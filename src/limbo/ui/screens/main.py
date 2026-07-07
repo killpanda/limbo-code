@@ -123,7 +123,7 @@ class MainScreen(Screen[None]):
                     skip = True
 
                 if skip:
-                    apply_result = self.agent.apply_tool(
+                    apply_result = await self.agent.apply_tool(
                         event.name, event.arguments
                     )
                     preview.show(
@@ -159,7 +159,7 @@ class MainScreen(Screen[None]):
 
                 input_widget.disabled = False
                 if self._confirmation_result:
-                    apply_result = self.agent.apply_tool(
+                    apply_result = await self.agent.apply_tool(
                         event.name, event.arguments
                     )
                     preview.show(

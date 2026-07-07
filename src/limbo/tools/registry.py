@@ -5,6 +5,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import asyncio
+
 from limbo.config import Config
 from limbo.models import ToolResult
 from limbo.tools.base import BaseTool
@@ -44,13 +46,13 @@ class ToolRegistry:
     def get(self, name: str) -> BaseTool | None:
         return self._tools.get(name)
 
-    def execute(
+    async def execute(
         self, name: str, arguments: dict[str, Any], dry_run: bool = False
     ) -> ToolResult:
         tool = self.get(name)
         if tool is None:
             return ToolResult(success=False, error=f"Unknown tool: {name}")
-        return tool.execute(arguments, dry_run=dry_run)
+        return await asyncio.to_thread(tool.execute, arguments, dry_run)
 
     def definitions(self) -> list[dict[str, Any]]:
         return [

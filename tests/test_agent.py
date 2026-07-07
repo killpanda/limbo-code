@@ -101,7 +101,7 @@ async def test_agent_apply_tool_confirms(workdir):
     )
     await _collect(agent.run("write x.txt"))
 
-    result = agent.apply_tool("write", {"path": "x.txt", "content": "hi"})
+    result = await agent.apply_tool("write", {"path": "x.txt", "content": "hi"})
     assert result.success is True
     assert (workdir / "x.txt").read_text() == "hi"
     assert agent._pending_tool is None
@@ -121,7 +121,7 @@ async def test_agent_apply_tool_rejects_mismatch(workdir):
     )
     await _collect(agent.run("write x.txt"))
 
-    result = agent.apply_tool("write", {"path": "x.txt", "content": "different"})
+    result = await agent.apply_tool("write", {"path": "x.txt", "content": "different"})
     assert result.success is False
     assert "does not match" in result.error
     assert agent._pending_tool is not None
@@ -140,7 +140,7 @@ async def test_agent_apply_tool_requires_pending_tool(workdir):
     )
     await _collect(agent.run("hi"))
 
-    result = agent.apply_tool("write", {"path": "x.txt", "content": "hi"})
+    result = await agent.apply_tool("write", {"path": "x.txt", "content": "hi"})
     assert result.success is False
     assert "No tool is pending" in result.error
 
@@ -164,7 +164,7 @@ async def test_agent_continue_after_confirmation_resumes_loop(workdir):
     assert len(result_events) == 1
     assert result_events[0].result.requires_confirmation is True
 
-    apply_result = agent.apply_tool("write", {"path": "x.txt", "content": "hi"})
+    apply_result = await agent.apply_tool("write", {"path": "x.txt", "content": "hi"})
     assert apply_result.success is True
     assert (workdir / "x.txt").read_text() == "hi"
 

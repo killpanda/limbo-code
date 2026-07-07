@@ -153,7 +153,7 @@ class Agent:
                 name = tc["function"]["name"]
                 arguments = tc["function"]["arguments"]
                 yield ToolCallRequest(id=tc["id"], name=name, arguments=arguments)
-                result = self.registry.execute(name, arguments, dry_run=True)
+                result = await self.registry.execute(name, arguments, dry_run=True)
                 if result.requires_confirmation:
                     self._pending_tool = tc
                 yield ToolResultEvent(
@@ -169,7 +169,7 @@ class Agent:
                     )
                 )
 
-    def apply_tool(self, name: str, arguments: dict[str, Any]) -> ToolResult:
+    async def apply_tool(self, name: str, arguments: dict[str, Any]) -> ToolResult:
         """Apply the tool that is currently pending confirmation.
 
         Validates that ``name`` and ``arguments`` match the stored pending tool
@@ -189,7 +189,7 @@ class Agent:
                 ),
             )
 
-        result = self.registry.execute(name, arguments, dry_run=False)
+        result = await self.registry.execute(name, arguments, dry_run=False)
         self.messages.append(
             Message(
                 role="tool",

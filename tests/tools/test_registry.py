@@ -21,10 +21,11 @@ def test_registry_definitions(workdir):
     assert "ls" in names
 
 
-def test_registry_execute_read(workdir):
+@pytest.mark.asyncio
+async def test_registry_execute_read(workdir):
     (workdir / "x.txt").write_text("hi")
     reg = ToolRegistry(workdir=workdir)
-    result = reg.execute("read", {"path": "x.txt"})
+    result = await reg.execute("read", {"path": "x.txt"})
     assert result.success is True
     assert result.output == "hi"
 
