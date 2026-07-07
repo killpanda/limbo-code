@@ -51,6 +51,21 @@ def test_bash_timeout(workdir):
     assert "timed out" in result.error.lower()
 
 
+def test_bash_timeout_is_capped(workdir):
+    tool = BashTool(workdir=workdir)
+    # A huge requested timeout should be capped so the command returns quickly.
+    result = tool.execute({"command": "echo ok", "timeout": 1_000_000})
+    assert result.success is True
+    assert result.output.strip() == "ok"
+
+
+def test_bash_rejects_invalid_timeout(workdir):
+    tool = BashTool(workdir=workdir)
+    result = tool.execute({"command": "echo ok", "timeout": "not-a-number"})
+    assert result.success is False
+    assert "invalid timeout" in result.error.lower()
+
+
 def test_is_dangerous_detects_rm():
     assert is_dangerous("rm -rf /", ["rm"]) is True
     assert is_dangerous("echo hello", ["rm"]) is False

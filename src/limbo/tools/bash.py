@@ -13,6 +13,7 @@ from limbo.models import ToolResult
 from limbo.tools.base import BaseTool
 
 DEFAULT_TIMEOUT = 30.0
+MAX_TIMEOUT = 300.0
 MAX_OUTPUT_BYTES = 512 * 1024
 
 
@@ -34,7 +35,7 @@ class BashTool(BaseTool):
             "command": {"type": "string", "description": "Bash command to execute"},
             "timeout": {
                 "type": "number",
-                "description": "Timeout in seconds (optional, default 30)",
+                "description": "Timeout in seconds (optional, default 30, maximum 300)",
             },
         },
         "required": ["command"],
@@ -64,6 +65,14 @@ class BashTool(BaseTool):
                 requires_confirmation=True,
             )
 
+        # Cap the effective timeout so a huge value cannot block the worker
+        # indefinitely. The cap is documented in the tool schema above.
+        try:
+            requested_timeout = float(timeout)
+        except (TypeError, ValueError):
+            return ToolResult(success=False, error=f"Invalid timeout: {timeout}")
+        effective_timeout = min(requested_timeout, MAX_TIMEOUT)
+
         shell = shutil.which("bash") or "/bin/bash"
 
         try:
@@ -72,13 +81,13 @@ class BashTool(BaseTool):
                 capture_output=True,
                 text=True,
                 errors="replace",
-                timeout=float(timeout),
+                timeout=effective_timeout,
                 cwd=str(self.workdir),
             )
         except subprocess.TimeoutExpired:
             return ToolResult(
                 success=False,
-                error=f"Command timed out after {timeout}s.",
+                error=f"Command timed out after {effective_timeout}s.",
             )
         except Exception as e:  # noqa: BLE001
             return ToolResult(success=False, error=f"Execution failed: {e}")
