@@ -2,6 +2,7 @@ import pytest
 from textual.app import App
 
 from limbo.ui.widgets.chat import ChatWidget
+from limbo.ui.widgets.confirm import ConfirmDialog, Rejected
 from limbo.ui.widgets.file_preview import FilePreviewWidget
 from limbo.ui.widgets.input import InputWidget, UserSubmitted
 
@@ -95,6 +96,27 @@ async def test_file_preview_escapes_markup():
         widget.show("title", "[bold]not bold[/bold]")
         # The literal brackets should be escaped in the stored content string.
         assert r"\[bold]not bold\[/bold]" in widget.content
+
+
+@pytest.mark.asyncio
+async def test_confirm_dialog_escape_posts_rejected():
+    rejected = []
+
+    class TestApp(App[None]):
+        def on_rejected(self, event: Rejected) -> None:
+            rejected.append(event)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        dialog = ConfirmDialog(title="Test", body="body")
+        pilot.app.push_screen(dialog)
+        await pilot.pause()
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+    assert len(rejected) == 1
+    assert isinstance(rejected[0], Rejected)
 
 
 @pytest.mark.asyncio

@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from textual.app import ComposeResult
+from textual.binding import Binding
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
@@ -39,10 +40,18 @@ class ConfirmDialog(ModalScreen[None]):
     }
     """
 
+    BINDINGS = [
+        Binding("escape", "reject", "Reject"),
+    ]
+
     def __init__(self, title: str, body: str, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.title_text = title
         self.body_text = body
+
+    def action_reject(self) -> None:
+        self.post_message(Rejected())
+        self.dismiss()
 
     def compose(self) -> ComposeResult:
         with Vertical():
