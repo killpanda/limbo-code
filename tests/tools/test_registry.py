@@ -3,6 +3,7 @@ from pathlib import Path
 
 import pytest
 
+from limbo.config import Config
 from limbo.tools.registry import ToolRegistry
 
 
@@ -26,3 +27,28 @@ def test_registry_execute_read(workdir):
     result = reg.execute("read", {"path": "x.txt"})
     assert result.success is True
     assert result.output == "hi"
+
+
+def test_registry_wires_safety_config(workdir):
+    cfg = Config()
+    cfg.safety.dangerous_commands = ["danger"]
+    cfg.safety.sensitive_files = ["secret.txt"]
+    reg = ToolRegistry(workdir=workdir, config=cfg)
+
+    bash = reg.get("bash")
+    assert bash is not None
+    assert bash.dangerous_patterns == ["danger"]
+
+    read = reg.get("read")
+    assert read is not None
+    assert "secret.txt" in read.sensitive_files
+
+
+def test_registry_defaults_without_config(workdir):
+    reg = ToolRegistry(workdir=workdir)
+    bash = reg.get("bash")
+    assert bash is not None
+    assert "rm" in bash.dangerous_patterns
+    read = reg.get("read")
+    assert read is not None
+    assert ".env" in read.sensitive_files

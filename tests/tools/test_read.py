@@ -41,3 +41,18 @@ def test_read_sensitive_file(workdir):
     result = tool.execute({"path": ".env"})
     assert result.success is False
     assert "sensitive" in result.error.lower()
+
+
+def test_read_custom_sensitive_files(workdir):
+    (workdir / "secret.txt").write_text("SECRET=1")
+    tool = ReadTool(workdir=workdir, sensitive_files=["secret.txt"])
+    result = tool.execute({"path": "secret.txt"})
+    assert result.success is False
+    assert "sensitive" in result.error.lower()
+
+
+def test_read_non_sensitive_file_not_in_custom_list(workdir):
+    (workdir / ".env").write_text("SECRET=1")
+    tool = ReadTool(workdir=workdir, sensitive_files=["secret.txt"])
+    result = tool.execute({"path": ".env"})
+    assert result.success is True

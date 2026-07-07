@@ -9,7 +9,7 @@ from limbo.tools.base import BaseTool, is_within_workdir
 
 MAX_LINES = 2000
 MAX_BYTES = 512 * 1024
-SENSITIVE_FILES = {".env", "id_rsa", "id_ed25519", ".ssh"}
+DEFAULT_SENSITIVE_FILES = {".env", "id_rsa", "id_ed25519", ".ssh"}
 
 
 class ReadTool(BaseTool):
@@ -31,6 +31,12 @@ class ReadTool(BaseTool):
         "required": ["path"],
     }
 
+    def __init__(
+        self, workdir: Path, sensitive_files: list[str] | None = None
+    ):
+        super().__init__(workdir)
+        self.sensitive_files = set(sensitive_files or DEFAULT_SENSITIVE_FILES)
+
     def execute(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
         raw_path = arguments.get("path", "")
         target = self.workdir / raw_path
@@ -39,8 +45,8 @@ class ReadTool(BaseTool):
         if not is_within_workdir(target, self.workdir):
             return ToolResult(success=False, error="Path is outside working directory.")
 
-        if target.name in SENSITIVE_FILES or any(
-            part in SENSITIVE_FILES for part in target.parts
+        if target.name in self.sensitive_files or any(
+            part in self.sensitive_files for part in target.parts
         ):
             return ToolResult(success=False, error="Refusing to read sensitive file.")
 

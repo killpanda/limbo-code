@@ -56,7 +56,7 @@ class Agent:
         self.config = config
         self.llm_client = llm_client
         self.workdir = workdir
-        self.registry = ToolRegistry(workdir=workdir)
+        self.registry = ToolRegistry(workdir=workdir, config=config)
         self.messages: list[Message] = []
         self._pending_tool: dict[str, Any] | None = None
         self._confirmation_applied = False

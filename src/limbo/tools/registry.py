@@ -5,6 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from limbo.config import Config
 from limbo.models import ToolResult
 from limbo.tools.base import BaseTool
 from limbo.tools.bash import BashTool
@@ -19,11 +20,22 @@ from limbo.tools.write import WriteTool
 class ToolRegistry:
     """Registers and executes tools."""
 
-    def __init__(self, workdir: Path):
+    def __init__(self, workdir: Path, config: Config | None = None):
         self.workdir = workdir
+        self.config = config or Config()
         self._tools: dict[str, BaseTool] = {}
-        for tool_class in [ReadTool, BashTool, EditTool, WriteTool, GrepTool, FindTool, LsTool]:
+        # Tools without configurable safety settings are registered generically.
+        for tool_class in [EditTool, WriteTool, GrepTool, FindTool, LsTool]:
             self.register(tool_class)  # type: ignore[arg-type]
+        # Wire configurable safety options from Config.
+        self._tools["read"] = ReadTool(
+            workdir=workdir,
+            sensitive_files=self.config.safety.sensitive_files,
+        )
+        self._tools["bash"] = BashTool(
+            workdir=workdir,
+            dangerous_patterns=self.config.safety.dangerous_commands,
+        )
 
     def register(self, tool_class: type[BaseTool]) -> None:
         tool = tool_class(workdir=self.workdir)

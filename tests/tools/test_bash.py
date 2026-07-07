@@ -118,3 +118,16 @@ def test_is_dangerous_still_bypassed_by_subshell():
     result = tool.execute({"command": "bash -c 'echo harmless'"})
     assert result.success is True
     assert "blocked" not in (result.error or "").lower()
+
+
+def test_bash_custom_dangerous_patterns(workdir):
+    tool = BashTool(workdir=workdir, dangerous_patterns=["reboot"])
+    result = tool.execute({"command": "reboot"})
+    assert result.success is False
+    assert "blocked" in result.error.lower()
+
+
+def test_bash_allows_command_not_in_custom_patterns(workdir):
+    tool = BashTool(workdir=workdir, dangerous_patterns=["reboot"])
+    result = tool.execute({"command": "echo hello"})
+    assert result.success is True
