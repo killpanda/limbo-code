@@ -480,7 +480,6 @@ class Agent:
                 f.write(msg.model_dump_json() + "\n")
         if not file_existed:
             self._session_file.chmod(0o600)
-        self._last_saved_index = len(self.messages)
 
     async def _save_session(self) -> None:
         await asyncio.to_thread(self._save_session_sync)
