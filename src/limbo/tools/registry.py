@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import Any
-
-import asyncio
 
 from limbo.config import Config
 from limbo.models import ToolResult
@@ -28,7 +27,7 @@ class ToolRegistry:
         self._tools: dict[str, BaseTool] = {}
         # Tools without configurable safety settings are registered generically.
         for tool_class in [EditTool, WriteTool, GrepTool, FindTool, LsTool]:
-            self.register(tool_class)  # type: ignore[arg-type]
+            self.register(tool_class)  # type: ignore[type-abstract]
         # Wire configurable safety options from Config.
         self._tools["read"] = ReadTool(
             workdir=workdir,

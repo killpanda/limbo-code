@@ -262,7 +262,10 @@ async def test_agent_reject_pending_tool_clears_state(workdir):
     agent.reject_pending_tool()
     assert agent._pending_tool is None
     tool_messages = [m for m in agent.messages if m.role == "tool"]
-    assert any(m.tool_call_id == "c1" and "rejected" in (m.content or "").lower() for m in tool_messages)
+    assert any(
+        m.tool_call_id == "c1" and "rejected" in (m.content or "").lower()
+        for m in tool_messages
+    )
 
 
 @pytest.mark.asyncio
