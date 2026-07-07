@@ -406,7 +406,12 @@ class Agent:
                 ),
             )
 
-        result = await self.registry.execute(name, arguments, dry_run=False)
+        try:
+            result = await self.registry.execute(name, arguments, dry_run=False)
+        except Exception as e:  # noqa: BLE001
+            error_message = f"Tool error: {e}"
+            result = ToolResult(success=False, error=error_message)
+
         # Replace the placeholder tool result installed when the pending call
         # was first encountered, so the message history stays valid and shows
         # the actual outcome.
@@ -429,7 +434,8 @@ class Agent:
             )
         self._pending_placeholders.discard(self._pending_tool["id"])
         self._pending_tool = None
-        self._confirmation_applied = True
+        if result.success:
+            self._confirmation_applied = True
         return result
 
     async def _call_llm(self) -> AsyncIterator[AgentEvent]:

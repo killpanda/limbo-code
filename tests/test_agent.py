@@ -153,6 +153,42 @@ async def test_agent_apply_tool_requires_pending_tool(workdir):
 
 
 @pytest.mark.asyncio
+async def test_agent_apply_tool_catches_execution_failure(workdir):
+    cfg = Config()
+    fake_llm = FakeLLMClient([
+        [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
+    ])
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    await _collect(agent.run("write x.txt"))
+    assert agent._pending_tool is not None
+
+    original_execute = agent.registry.execute
+
+    async def failing_execute(name, arguments, dry_run=False):
+        if not dry_run:
+            raise RuntimeError("wet run failed")
+        return await original_execute(name, arguments, dry_run)
+
+    agent.registry.execute = failing_execute
+
+    result = await agent.apply_tool("write", {"path": "x.txt", "content": "hi"})
+    assert result.success is False
+    assert "wet run failed" in result.error
+    assert agent._pending_tool is None
+
+    c1_message = next(
+        m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c1"
+    )
+    assert "wet run failed" in (c1_message.content or "")
+    assert agent._confirmation_applied is False
+
+
+@pytest.mark.asyncio
 async def test_agent_continue_after_confirmation_resumes_loop(workdir):
     cfg = Config()
     fake_llm = FakeLLMClient([
