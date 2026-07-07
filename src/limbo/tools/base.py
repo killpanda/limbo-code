@@ -20,7 +20,7 @@ class BaseTool(ABC):
         self.workdir = workdir.resolve()
 
     @abstractmethod
-    def execute(self, arguments: dict[str, Any]) -> ToolResult:
+    def execute(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
         ...
 
 

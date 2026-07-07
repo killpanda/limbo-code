@@ -10,7 +10,6 @@ from typing import Any
 from limbo.models import ToolResult
 from limbo.tools.base import BaseTool
 
-
 MAX_MATCHES = 100
 MAX_BYTES = 512 * 1024
 
@@ -32,7 +31,7 @@ class GrepTool(BaseTool):
         "required": ["pattern"],
     }
 
-    def execute(self, arguments: dict[str, Any]) -> ToolResult:
+    def execute(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
         pattern = arguments.get("pattern", "")
         path = arguments.get("path", ".")
         glob = arguments.get("glob")

@@ -22,13 +22,20 @@ class WriteTool(BaseTool):
         "required": ["path", "content"],
     }
 
-    def execute(self, arguments: dict[str, Any]) -> ToolResult:
+    def execute(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
         raw_path = arguments.get("path", "")
         content = arguments.get("content", "")
 
         target = (self.workdir / raw_path).resolve()
         if not is_within_workdir(target, self.workdir):
             return ToolResult(success=False, error="Path is outside working directory.")
+
+        if dry_run:
+            return ToolResult(
+                success=True,
+                output=f"File ready to write: {raw_path}",
+                requires_confirmation=True,
+            )
 
         try:
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -38,6 +45,6 @@ class WriteTool(BaseTool):
 
         return ToolResult(
             success=True,
-            output=f"File ready to write: {raw_path}",
+            output=f"File written: {raw_path}",
             requires_confirmation=True,
         )

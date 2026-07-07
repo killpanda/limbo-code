@@ -31,7 +31,7 @@ class ReadTool(BaseTool):
         "required": ["path"],
     }
 
-    def execute(self, arguments: dict[str, Any]) -> ToolResult:
+    def execute(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
         raw_path = arguments.get("path", "")
         target = self.workdir / raw_path
         target = target.resolve()

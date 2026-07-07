@@ -29,7 +29,7 @@ class EditTool(BaseTool):
         "required": ["path", "old_text", "new_text"],
     }
 
-    def execute(self, arguments: dict[str, Any]) -> ToolResult:
+    def execute(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
         raw_path = arguments.get("path", "")
         old_text = arguments.get("old_text", "")
         new_text = arguments.get("new_text", "")
@@ -69,6 +69,13 @@ class EditTool(BaseTool):
             return ToolResult(
                 success=False,
                 error=f"No changes made to {raw_path}; replacement is identical.",
+            )
+
+        if dry_run:
+            return ToolResult(
+                success=True,
+                output=f"Edit ready to apply to {raw_path}.",
+                requires_confirmation=True,
             )
 
         try:

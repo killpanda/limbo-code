@@ -33,3 +33,11 @@ def test_write_outside_workdir(workdir):
     result = tool.execute({"path": "../x.txt", "content": "x"})
     assert result.success is False
     assert "outside" in result.error.lower()
+
+
+def test_write_dry_run_does_not_create_file(workdir):
+    tool = WriteTool(workdir=workdir)
+    result = tool.execute({"path": "new.txt", "content": "hello"}, dry_run=True)
+    assert result.success is True
+    assert result.requires_confirmation is True
+    assert not (workdir / "new.txt").exists()

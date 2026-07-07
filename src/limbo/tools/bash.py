@@ -35,7 +35,7 @@ class BashTool(BaseTool):
         super().__init__(workdir)
         self.dangerous_patterns = dangerous_patterns or ["rm", "git reset --hard", ">"]
 
-    def execute(self, arguments: dict[str, Any]) -> ToolResult:
+    def execute(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
         command = arguments.get("command", "")
         timeout = arguments.get("timeout", DEFAULT_TIMEOUT)
         shell = shutil.which("bash") or "/bin/bash"

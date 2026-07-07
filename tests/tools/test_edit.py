@@ -49,3 +49,15 @@ def test_edit_no_change(workdir):
     result = tool.execute({"path": "a.py", "old_text": "x = 1", "new_text": "x = 1"})
     assert result.success is False
     assert "no changes" in result.error.lower()
+
+
+def test_edit_dry_run_does_not_modify(workdir):
+    (workdir / "a.py").write_text("x = 1\ny = 2\n")
+    tool = EditTool(workdir=workdir)
+    result = tool.execute(
+        {"path": "a.py", "old_text": "x = 1", "new_text": "x = 42"},
+        dry_run=True,
+    )
+    assert result.success is True
+    assert result.requires_confirmation is True
+    assert (workdir / "a.py").read_text() == "x = 1\ny = 2\n"

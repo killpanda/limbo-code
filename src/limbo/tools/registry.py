@@ -32,11 +32,13 @@ class ToolRegistry:
     def get(self, name: str) -> BaseTool | None:
         return self._tools.get(name)
 
-    def execute(self, name: str, arguments: dict[str, Any]) -> ToolResult:
+    def execute(
+        self, name: str, arguments: dict[str, Any], dry_run: bool = False
+    ) -> ToolResult:
         tool = self.get(name)
         if tool is None:
             return ToolResult(success=False, error=f"Unknown tool: {name}")
-        return tool.execute(arguments)
+        return tool.execute(arguments, dry_run=dry_run)
 
     def definitions(self) -> list[dict[str, Any]]:
         return [

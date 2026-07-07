@@ -126,7 +126,7 @@ class FindTool(BaseTool):
         "required": ["pattern"],
     }
 
-    def execute(self, arguments: dict[str, Any]) -> ToolResult:
+    def execute(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
         pattern = arguments.get("pattern", "")
         path = arguments.get("path", ".")
         limit = arguments.get("limit", MAX_RESULTS)
