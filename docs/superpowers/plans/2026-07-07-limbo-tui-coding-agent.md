@@ -12,7 +12,7 @@
 
 - Python 3.11+
 - LLM API must be OpenAI-compatible; default configuration targets DeepSeek.
-- All file write operations (`write`, `edit`) and the unsandboxed `bash` tool require user confirmation before disk changes.
+- All file write operations (`write`, `edit`) and the unsandboxed `bash` tool require user confirmation before disk changes. In addition, bash commands that match configured dangerous patterns (e.g. `rm`, `git reset --hard`) are rejected outright and cannot be confirmed.
 - All file tools (`read`, `edit`, `write`, `grep`, `find`, `ls`) are bounded to the current working directory (no `..`, no symlink escape).
 - The `bash` tool starts in the working directory but is not sandboxed; users can disable it with `[tools] bash_enabled = false`.
 - Confirmation for `write`, `edit`, and `bash` is mandatory in the UI; there are no config toggles to disable it.
@@ -371,7 +371,7 @@ class UIConfig(BaseModel):
 
 class SafetyConfig(BaseModel):
     dangerous_commands: list[str] = Field(
-        default_factory=lambda: ["rm", "git reset --hard", ">"]
+        default_factory=lambda: ["rm", "git reset --hard"]
     )
     sensitive_files: list[str] = Field(
         default_factory=lambda: [".env", "id_rsa", "id_ed25519"]
@@ -627,6 +627,10 @@ git commit -m "feat: add read tool with workdir and sensitive file guards"
 - Produces:
   - `limbo.tools.bash.BashTool`
   - `limbo.tools.bash.is_dangerous(command: str, patterns: list[str]) -> bool`
+- Behavior: Bash first checks the command against a configurable list of dangerous
+  patterns. Matching commands are rejected with "Command blocked by safety policy"
+  and are never presented for confirmation. Non-matching commands are still
+  confirmation-gated because bash is unsandboxed.
 
 - [ ] **Step 1: Write failing tests `tests/tools/test_bash.py`**
 
@@ -727,7 +731,7 @@ class BashTool(BaseTool):
 
     def __init__(self, workdir: Path, dangerous_patterns: list[str] | None = None):
         super().__init__(workdir)
-        self.dangerous_patterns = dangerous_patterns or ["rm", "git reset --hard", ">"]
+        self.dangerous_patterns = dangerous_patterns or ["rm", "git reset --hard"]
 
     def execute(self, arguments: dict[str, Any]) -> ToolResult:
         command = arguments.get("command", "")

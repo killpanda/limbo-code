@@ -18,7 +18,9 @@ class BashTool(BaseTool):
     name = "bash"
     description = (
         "Execute a bash command in the current working directory. Returns stdout and stderr. "
-        "WARNING: bash is not sandboxed and can access files outside the workdir."
+        "WARNING: bash is not sandboxed and can access files outside the workdir. "
+        "Commands matching dangerous patterns (e.g. rm, git reset --hard) are "
+        "rejected outright and cannot be confirmed."
     )
     parameters = {
         "type": "object",
@@ -34,7 +36,7 @@ class BashTool(BaseTool):
 
     def __init__(self, workdir: Path, dangerous_patterns: list[str] | None = None):
         super().__init__(workdir)
-        self.dangerous_patterns = dangerous_patterns or ["rm", "git reset --hard", ">"]
+        self.dangerous_patterns = dangerous_patterns or ["rm", "git reset --hard"]
 
     def execute(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
         command = arguments.get("command", "")

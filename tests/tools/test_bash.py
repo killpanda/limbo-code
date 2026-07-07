@@ -92,11 +92,13 @@ def test_is_dangerous_allows_redirection_in_quoted_string():
     assert "blocked" not in (result.error or "").lower()
 
 
-def test_is_dangerous_blocks_actual_redirection():
+def test_is_dangerous_allows_redirection_by_default():
+    """Redirection is no longer hard-blocked by default; it is confirmation-gated."""
     tool = BashTool(workdir=Path("/tmp"))
     result = tool.execute({"command": "echo a > /tmp/limbo-test-redir.txt"})
-    assert result.success is False
-    assert "blocked" in result.error.lower()
+    assert result.success is True
+    assert Path("/tmp/limbo-test-redir.txt").read_text().strip() == "a"
+    Path("/tmp/limbo-test-redir.txt").unlink()
 
 
 def test_is_dangerous_blocks_git_reset_hard():
