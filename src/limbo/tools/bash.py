@@ -22,7 +22,9 @@ class BashTool(BaseTool):
         "Execute a bash command in the current working directory. Returns stdout and stderr. "
         "WARNING: bash is not sandboxed and can access files outside the workdir. "
         "Commands matching dangerous patterns (e.g. rm, git reset --hard) are "
-        "rejected outright and cannot be confirmed."
+        "rejected outright and cannot be confirmed. The filter is heuristic: "
+        "options or variable assignments before the command name "
+        "(e.g. 'git -C /foo reset --hard' or 'VAR=1 rm -rf /') can bypass it."
     )
     parameters = {
         "type": "object",
@@ -105,7 +107,7 @@ class BashTool(BaseTool):
         return ToolResult(success=True, output=output or "")
 
 
-_CONTROL_OPERATOR_RE = re.compile(r"(;|&&|\|\||\|)")
+_CONTROL_OPERATOR_RE = re.compile(r"(;|&&|&|\|\||\|)")
 
 
 def _tokenize_command(command: str) -> list[str]:
@@ -124,17 +126,19 @@ def is_dangerous(command: str, patterns: list[str]) -> bool:
 
     Single-token patterns are matched only in command-name positions: the first
     token of the command or the first token after a shell control operator
-    (``;``, ``&&``, ``||``, ``|``). Multi-token patterns are matched against
-    the leading tokens starting at each command position.
+    (``;``, ``&&``, ``&``, ``||``, ``|``). Multi-token patterns are matched
+    against the leading tokens starting at each command position.
 
     .. warning::
         This check is heuristic only. It tokenizes the top-level command, so
         subshells (``bash -c ...``), command substitution (``$(rm ...)``),
-        variable indirection, and other shell constructs can bypass it. Review
-        all commands before confirming destructive actions.
+        variable indirection, variable assignments before a command name
+        (``VAR=1 rm -rf /``), and options between the command name and the
+        matched tokens (``git -C /foo reset --hard``) can bypass it. Review all
+        commands before confirming destructive actions.
     """
     tokens = _tokenize_command(command)
-    control_operators = {";", "&&", "||", "|"}
+    control_operators = {";", "&&", "&", "||", "|"}
     command_starts = [0]
     for i in range(1, len(tokens)):
         if tokens[i - 1] in control_operators:

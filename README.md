@@ -72,9 +72,10 @@ the workdir. In addition, commands that match dangerous patterns such as `rm`
 or `git reset --hard` are **rejected outright and cannot be confirmed**.
 The pattern list is configurable but cannot be disabled from the UI. Bash
 commands are filtered with a simple heuristic, but that filter can be bypassed
-by subshells, command substitution, variable indirection, and similar shell
-constructs. Only run Limbo with trusted commands and in repositories you can
-afford to modify or lose.
+by subshells, command substitution, variable indirection, options or variable
+assignments before the command name (for example, `git -C /foo reset --hard`
+and `VAR=1 rm -rf /`), and similar shell constructs. Only run Limbo with
+trusted commands and in repositories you can afford to modify or lose.
 
 If you need to work with untrusted projects, disable the bash tool entirely:
 

@@ -64,6 +64,13 @@ def test_is_dangerous_allows_benign_token_matches():
     assert is_dangerous("echo ok; git reset --hard", ["git reset --hard"]) is True
 
 
+def test_is_dangerous_detects_background_operator():
+    """The background operator ``&`` should start a new command position."""
+    assert is_dangerous("echo hello & rm -rf /", ["rm"]) is True
+    assert is_dangerous("echo hello && rm -rf /", ["rm"]) is True
+    assert is_dangerous("echo hello & echo rm", ["rm"]) is False
+
+
 def test_bash_rejects_dangerous_command(workdir):
     tool = BashTool(workdir=workdir)
     result = tool.execute({"command": "rm -rf /"})
@@ -145,6 +152,16 @@ def test_is_dangerous_still_bypassed_by_subshell():
     result = tool.execute({"command": "bash -c 'echo harmless'"})
     assert result.success is True
     assert "blocked" not in (result.error or "").lower()
+
+
+def test_is_dangerous_bypassed_by_options_and_assignments():
+    """Options and variable assignments before the command name bypass the filter.
+
+    These are documented limitations of the heuristic matcher; a robust fix
+    requires a real shell parser or sandbox and is out of MVP scope.
+    """
+    assert is_dangerous("git -C /tmp reset --hard HEAD", ["git reset --hard"]) is False
+    assert is_dangerous("VAR=1 rm -rf /tmp/limbo-fake-target", ["rm"]) is False
 
 
 def test_bash_custom_dangerous_patterns(workdir):
