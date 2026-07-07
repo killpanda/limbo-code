@@ -97,3 +97,15 @@ def test_message_to_openai_serializes_tool_arguments():
     assert json.loads(args) == {"path": "main.py"}
     # The original message object is left untouched as a dict.
     assert isinstance(message.tool_calls[0]["function"]["arguments"], dict)
+
+
+def test_message_to_openai_keeps_empty_tool_content():
+    message = Message(
+        role="tool",
+        content="",
+        tool_call_id="call_1",
+    )
+    result = _message_to_openai(message)
+    assert result["role"] == "tool"
+    assert "content" in result
+    assert result["content"] == ""
