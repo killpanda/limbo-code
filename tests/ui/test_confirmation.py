@@ -165,12 +165,25 @@ async def test_confirm_dialog_disables_input(tmp_path, monkeypatch):
     monkeypatch.setattr("limbo.agent.Path.home", lambda: tmp_path)
     cfg = Config()
     cfg.llm.api_key = "test"
-    fake_llm = FakeLLMClient(
-        [
-            [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
-        ]
-    )
-    app = LimboApp(workdir=tmp_path, config=cfg, llm_client=fake_llm)
+
+    hold_second_response = asyncio.Event()
+
+    class HoldingFakeLLMClient:
+        def __init__(self):
+            self.first = True
+
+        async def chat(self, messages, tools):
+            if self.first:
+                self.first = False
+                yield ToolCallEvent(
+                    id="c1", name="write", arguments={"path": "x.txt", "content": "hi"}
+                )
+            else:
+                yield TextChunk(text="stream")
+                await hold_second_response.wait()
+                yield TextChunk(text=" done")
+
+    app = LimboApp(workdir=tmp_path, config=cfg, llm_client=HoldingFakeLLMClient())
     async with app.run_test() as pilot:
         await pilot.pause()
         main_screen = pilot.app.screen_stack[-1]
@@ -184,6 +197,13 @@ async def test_confirm_dialog_disables_input(tmp_path, monkeypatch):
         assert any(isinstance(s, ConfirmDialog) for s in pilot.app.screen_stack)
 
         await pilot.click("#apply")
+        await pilot.pause()
+
+        # Input must stay disabled while the agent streams the follow-up response.
+        assert input_widget.disabled is True
+
+        hold_second_response.set()
+        await pilot.pause()
         await pilot.pause()
 
         assert input_widget.disabled is False

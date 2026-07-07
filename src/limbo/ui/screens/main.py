@@ -157,7 +157,6 @@ class MainScreen(Screen[None]):
                     self.agent.reject_pending_tool()
                     return
 
-                input_widget.disabled = False
                 if self._confirmation_result:
                     apply_result = await self.agent.apply_tool(
                         event.name, event.arguments
