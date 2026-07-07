@@ -53,5 +53,4 @@ async def test_file_preview_escapes_markup():
         widget = pilot.app.query_one(FilePreviewWidget)
         widget.show("title", "[bold]not bold[/bold]")
         # The literal brackets should be escaped in the stored content string.
-        content = widget._Static__content
-        assert r"\[bold]not bold\[/bold]" in content
+        assert r"\[bold]not bold\[/bold]" in widget.content

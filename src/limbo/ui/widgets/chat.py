@@ -29,7 +29,7 @@ class ChatWidget(VerticalScroll):
         self.messages: list[Static] = []
 
     def add_user_message(self, text: str) -> None:
-        msg = Static(f"You: {text}", classes="user-message")
+        msg = Static(f"You: {text}", classes="user-message", markup=False)
         self.messages.append(msg)
         self.mount(msg)
 

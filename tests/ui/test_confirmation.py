@@ -151,7 +151,6 @@ async def test_error_event_is_shown(tmp_path, monkeypatch):
         main_screen.run_worker(main_screen._handle_turn("hi"))
         await pilot.pause()
 
-        chat = main_screen.query_one("#chat", expect_type=type(main_screen.query_one("#chat")))
         # Re-query with the concrete widget class for type checking.
         from limbo.ui.widgets.chat import ChatWidget
 
