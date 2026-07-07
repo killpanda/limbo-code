@@ -67,3 +67,14 @@ def test_grep_python_fallback_searches_directory(workdir):
     result = tool.execute({"pattern": "def foo"})
     assert result.success is True
     assert "a.py" in result.output
+
+
+def test_grep_python_fallback_does_not_follow_symlinks_outside_workdir(workdir):
+    outside = workdir.parent / "outside_secret.txt"
+    outside.write_text("SECRET_OUTSIDE_WORKDIR=1\n")
+    (workdir / "escape_link").symlink_to(outside)
+    tool = GrepTool(workdir=workdir)
+    tool._find_rg = lambda: None
+    result = tool.execute({"pattern": "SECRET_OUTSIDE_WORKDIR"})
+    assert result.success is True
+    assert "SECRET_OUTSIDE_WORKDIR" not in result.output

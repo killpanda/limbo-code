@@ -79,7 +79,7 @@ class GrepTool(BaseTool):
             cmd.extend(["-C", str(context)])
         if glob:
             cmd.extend(["-g", glob])
-        cmd.extend(["--max-count", str(limit), pattern, str(target)])
+        cmd.extend(["--max-count", str(limit), "--", pattern, str(target)])
 
         try:
             proc = subprocess.run(
@@ -123,16 +123,20 @@ class GrepTool(BaseTool):
         files = [target] if target.is_file() else target.rglob("*")
         count = 0
         for f in files:
-            if not f.is_file():
+            # Resolve symlinks and enforce the workdir boundary before reading.
+            resolved = f.resolve()
+            if not is_within_workdir(resolved, self.workdir):
+                continue
+            if not resolved.is_file():
                 continue
             try:
-                rel = f.relative_to(self.workdir)
+                rel = resolved.relative_to(self.workdir)
             except ValueError:
                 continue
             if matcher.is_ignored(str(rel)):
                 continue
             try:
-                text = f.read_text(encoding="utf-8", errors="replace")
+                text = resolved.read_text(encoding="utf-8", errors="replace")
             except OSError:
                 continue
             for lineno, line in enumerate(text.splitlines(), start=1):

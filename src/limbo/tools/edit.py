@@ -40,7 +40,11 @@ class EditTool(BaseTool):
         if not target.exists():
             return ToolResult(success=False, error=f"File not found: {raw_path}")
 
-        content = target.read_text(encoding="utf-8")
+        try:
+            content = target.read_text(encoding="utf-8")
+        except OSError as e:
+            return ToolResult(success=False, error=f"Could not read file: {e}")
+
         occurrences = content.count(old_text)
         if occurrences == 0:
             return ToolResult(success=False, error=f"old_text not found in {raw_path}.")

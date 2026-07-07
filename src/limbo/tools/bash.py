@@ -91,14 +91,14 @@ def is_dangerous(command: str, patterns: list[str]) -> bool:
     """
     tokens = shlex.split(command)
     for pattern in patterns:
-        if pattern.startswith(">"):
-            if pattern in command:
-                return True
-        elif " " in pattern:
-            if pattern in command:
-                return True
-        else:
+        if not pattern:
+            continue
+        pattern_tokens = shlex.split(pattern)
+        if len(pattern_tokens) == 1:
+            name = pattern_tokens[0]
             for token in tokens:
-                if token == pattern or token.endswith(f"/{pattern}"):
+                if token == name or Path(token).name == name:
                     return True
+        elif tokens[: len(pattern_tokens)] == pattern_tokens:
+            return True
     return False

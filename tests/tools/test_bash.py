@@ -73,3 +73,48 @@ def test_bash_safety_filter_is_heuristic(workdir):
 def test_is_dangerous_docstring_warns_about_bypasses():
     assert "heuristic" in (is_dangerous.__doc__ or "").lower()
     assert "bypass" in (is_dangerous.__doc__ or "").lower()
+
+
+def test_is_dangerous_allows_redirection_in_quoted_string():
+    tool = BashTool(workdir=Path("/tmp"))
+    result = tool.execute({"command": 'echo "a > b"'})
+    assert result.success is True
+    assert "blocked" not in (result.error or "").lower()
+
+
+def test_is_dangerous_blocks_actual_redirection():
+    tool = BashTool(workdir=Path("/tmp"))
+    result = tool.execute({"command": "echo a > /tmp/limbo-test-redir.txt"})
+    assert result.success is False
+    assert "blocked" in result.error.lower()
+
+
+def test_is_dangerous_blocks_git_reset_hard():
+    tool = BashTool(workdir=Path("/tmp"))
+    result = tool.execute({"command": "git reset --hard HEAD"})
+    assert result.success is False
+    assert "blocked" in result.error.lower()
+
+
+def test_is_dangerous_allows_git_status(workdir):
+    import subprocess
+
+    subprocess.run(["git", "init", str(workdir)], check=True, capture_output=True)
+    tool = BashTool(workdir=workdir)
+    result = tool.execute({"command": "git status"})
+    assert "blocked" not in (result.error or "").lower()
+    assert result.success is True
+
+
+def test_is_dangerous_blocks_absolute_rm_path():
+    tool = BashTool(workdir=Path("/tmp"))
+    result = tool.execute({"command": "/bin/rm -rf /tmp/limbo-fake-target"})
+    assert result.success is False
+    assert "blocked" in result.error.lower()
+
+
+def test_is_dangerous_still_bypassed_by_subshell():
+    tool = BashTool(workdir=Path("/tmp"))
+    result = tool.execute({"command": "bash -c 'echo harmless'"})
+    assert result.success is True
+    assert "blocked" not in (result.error or "").lower()

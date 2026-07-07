@@ -94,3 +94,19 @@ def test_edit_handles_os_error(workdir):
         assert "could not write file" in result.error.lower()
     finally:
         target.chmod(0o644)
+
+
+def test_edit_handles_read_error(workdir):
+    target = workdir / "a.py"
+    target.write_text("x = 1\n")
+    target.chmod(0o000)
+    try:
+        tool = EditTool(workdir=workdir)
+        result = tool.execute(
+            {"path": "a.py", "old_text": "x = 1", "new_text": "x = 42"},
+            dry_run=False,
+        )
+        assert result.success is False
+        assert "could not read file" in result.error.lower()
+    finally:
+        target.chmod(0o644)
