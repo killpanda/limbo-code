@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from limbo.agent import Agent
+from limbo.agent import Agent, ErrorEvent
 from limbo.config import Config
 from limbo.models import TextChunk, ToolCallEvent
 
@@ -21,43 +21,65 @@ class FakeLLMClient:
         self.responses = responses
         self.calls = []
 
-    def chat(self, messages, tools):
+    async def chat(self, messages, tools):
         self.calls.append((messages, tools))
         for event in self.responses.pop(0):
             yield event
 
 
-def test_agent_text_only_response(workdir):
+async def _collect(run):
+    return [event async for event in run]
+
+
+@pytest.mark.asyncio
+async def test_agent_text_only_response(workdir):
     cfg = Config()
     fake_llm = FakeLLMClient([[TextChunk(text="hello")]])
-    agent = Agent(config=cfg, llm_client=fake_llm, workdir=workdir)
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
 
-    events = list(agent.run("hi"))
+    events = await _collect(agent.run("hi"))
     assert "".join([e.text for e in events if hasattr(e, "text")]) == "hello"
 
 
-def test_agent_calls_tool_and_loops(workdir):
+@pytest.mark.asyncio
+async def test_agent_calls_tool_and_loops(workdir):
     (workdir / "main.py").write_text("x = 1\n")
     cfg = Config()
     fake_llm = FakeLLMClient([
         [ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"})],
         [TextChunk(text="done")],
     ])
-    agent = Agent(config=cfg, llm_client=fake_llm, workdir=workdir)
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
 
-    events = list(agent.run("read main.py"))
+    events = await _collect(agent.run("read main.py"))
     assert any(hasattr(e, "name") and e.name == "read" for e in events)
     assert any(hasattr(e, "text") and e.text == "done" for e in events)
 
 
-def test_agent_stops_on_confirmation(workdir):
+@pytest.mark.asyncio
+async def test_agent_stops_on_confirmation(workdir):
     cfg = Config()
     fake_llm = FakeLLMClient([
         [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
     ])
-    agent = Agent(config=cfg, llm_client=fake_llm, workdir=workdir)
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
 
-    events = list(agent.run("write x.txt"))
+    events = await _collect(agent.run("write x.txt"))
     result_events = [e for e in events if hasattr(e, "result")]
     assert len(result_events) == 1
     assert result_events[0].result.requires_confirmation is True
@@ -65,15 +87,66 @@ def test_agent_stops_on_confirmation(workdir):
     assert not (workdir / "x.txt").exists()
 
 
-def test_agent_apply_tool_confirms(workdir):
+@pytest.mark.asyncio
+async def test_agent_apply_tool_confirms(workdir):
     cfg = Config()
     fake_llm = FakeLLMClient([
         [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
     ])
-    agent = Agent(config=cfg, llm_client=fake_llm, workdir=workdir)
-    list(agent.run("write x.txt"))
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    await _collect(agent.run("write x.txt"))
 
     result = agent.apply_tool("write", {"path": "x.txt", "content": "hi"})
     assert result.success is True
     assert (workdir / "x.txt").read_text() == "hi"
     assert agent._pending_tool is None
+
+
+@pytest.mark.asyncio
+async def test_agent_saves_session(workdir):
+    cfg = Config()
+    fake_llm = FakeLLMClient([[TextChunk(text="hello")]])
+    session_dir = workdir / "sessions"
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=session_dir,
+    )
+
+    await _collect(agent.run("hi"))
+
+    assert session_dir.exists()
+    files = list(session_dir.iterdir())
+    assert len(files) == 1
+    lines = files[0].read_text().strip().splitlines()
+    assert len(lines) >= 2
+    assert '"role":"system"' in lines[0]
+    assert any('"role":"user"' in line for line in lines)
+
+
+@pytest.mark.asyncio
+async def test_agent_error_event_on_llm_failure(workdir):
+    class FailingLLMClient:
+        async def chat(self, messages, tools):
+            raise RuntimeError("network down")
+            if False:
+                yield TextChunk(text="")
+
+    cfg = Config()
+    agent = Agent(
+        config=cfg,
+        llm_client=FailingLLMClient(),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    events = await _collect(agent.run("hi"))
+    error_events = [e for e in events if isinstance(e, ErrorEvent)]
+    assert len(error_events) == 1
+    assert "network down" in error_events[0].message

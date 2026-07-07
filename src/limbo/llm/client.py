@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import Any, Iterator, Protocol
+from collections.abc import AsyncIterator
+from typing import Any, Protocol
 
 from limbo.models import LLMEvent, Message
 
@@ -12,4 +13,4 @@ class LLMClient(Protocol):
         self,
         messages: list[Message],
         tools: list[dict[str, Any]],
-    ) -> Iterator[LLMEvent]: ...
+    ) -> AsyncIterator[LLMEvent]: ...

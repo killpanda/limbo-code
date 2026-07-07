@@ -15,8 +15,13 @@ def client():
     return OpenAICompatibleClient(cfg)
 
 
+async def _collect(chat):
+    return [event async for event in chat]
+
+
+@pytest.mark.asyncio
 @respx.mock
-def test_client_returns_text(client):
+async def test_client_returns_text(client):
     text_stream = (
         'data: {"id":"1","object":"chat.completion.chunk",'
         '"choices":[{"delta":{"role":"assistant","content":"hello"}}]}\n\n'
@@ -30,13 +35,14 @@ def test_client_returns_text(client):
         )
     )
 
-    events = list(client.chat([Message(role="user", content="hi")], tools=[]))
+    events = await _collect(client.chat([Message(role="user", content="hi")], tools=[]))
     assert "".join([e.text for e in events if hasattr(e, "text")]) == "hello"
     assert route.called
 
 
+@pytest.mark.asyncio
 @respx.mock
-def test_client_returns_tool_call(client):
+async def test_client_returns_tool_call(client):
     tool_stream = (
         'data: {"id":"1","object":"chat.completion.chunk",'
         '"choices":[{"delta":{"tool_calls":['
@@ -56,7 +62,9 @@ def test_client_returns_tool_call(client):
         )
     )
 
-    events = list(client.chat([Message(role="user", content="read main.py")], tools=[]))
+    events = await _collect(
+        client.chat([Message(role="user", content="read main.py")], tools=[])
+    )
     calls = [e for e in events if isinstance(e, ToolCallEvent)]
     assert len(calls) == 1
     assert calls[0].name == "read"

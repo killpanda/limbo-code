@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import json
-from typing import Any, Iterator
+from collections.abc import AsyncIterator
+from typing import Any
 
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 from limbo.config import Config
 from limbo.models import LLMEvent, Message, TextChunk, ToolCallEvent
@@ -16,22 +17,22 @@ class OpenAICompatibleClient:
 
     def __init__(self, config: Config):
         self.config = config
-        self._client: OpenAI | None = None
+        self._client: AsyncOpenAI | None = None
 
     @property
-    def client(self) -> OpenAI:
+    def client(self) -> AsyncOpenAI:
         if self._client is None:
-            self._client = OpenAI(
+            self._client = AsyncOpenAI(
                 api_key=self.config.llm.api_key or "",
                 base_url=self.config.llm.base_url,
             )
         return self._client
 
-    def chat(
+    async def chat(
         self,
         messages: list[Message],
         tools: list[dict[str, Any]],
-    ) -> Iterator[LLMEvent]:
+    ) -> AsyncIterator[LLMEvent]:
         request_messages = [_message_to_openai(m) for m in messages]
         kwargs: dict[str, Any] = {
             "model": self.config.llm.model,
@@ -42,10 +43,10 @@ class OpenAICompatibleClient:
         if tools:
             kwargs["tools"] = tools
 
-        stream = self.client.chat.completions.create(**kwargs)
+        stream = await self.client.chat.completions.create(**kwargs)
 
         active_calls: dict[int, dict[str, Any]] = {}
-        for chunk in stream:
+        async for chunk in stream:
             delta = chunk.choices[0].delta
             if delta.content:
                 yield TextChunk(text=delta.content)
@@ -54,7 +55,11 @@ class OpenAICompatibleClient:
                 for tc in delta.tool_calls:
                     idx = tc.index
                     if idx not in active_calls:
-                        active_calls[idx] = {"id": tc.id or "", "name": "", "arguments": ""}
+                        active_calls[idx] = {
+                            "id": tc.id or "",
+                            "name": "",
+                            "arguments": "",
+                        }
                     current = active_calls[idx]
                     if tc.id:
                         current["id"] = tc.id

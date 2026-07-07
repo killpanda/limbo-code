@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from limbo.config import Config
 from limbo.llm.client import LLMClient
@@ -43,7 +46,13 @@ AgentEvent = TextDelta | ToolCallRequest | ToolResultEvent | ErrorEvent
 class Agent:
     """Orchestrates the conversation between user, LLM, and tools."""
 
-    def __init__(self, config: Config, llm_client: LLMClient, workdir: Path):
+    def __init__(
+        self,
+        config: Config,
+        llm_client: LLMClient,
+        workdir: Path,
+        session_dir: Path | None = None,
+    ):
         self.config = config
         self.llm_client = llm_client
         self.workdir = workdir
@@ -51,6 +60,10 @@ class Agent:
         self.messages: list[Message] = []
         self._pending_tool: dict[str, Any] | None = None
         self._init_system_message()
+
+        self._session_dir = session_dir or Path.home() / ".limbo" / "sessions"
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+        self._session_file = self._session_dir / f"{timestamp}.jsonl"
 
     def _init_system_message(self) -> None:
         self.messages.append(
@@ -79,38 +92,42 @@ class Agent:
             )
         )
 
-    def run(self, user_input: str) -> Iterator[AgentEvent]:
+    async def run(self, user_input: str) -> AsyncIterator[AgentEvent]:
         self.messages.append(Message(role="user", content=user_input))
 
-        for _ in range(self.config.llm.max_iterations):
-            try:
-                yield from self._call_llm()
-            except Exception as e:  # noqa: BLE001
-                yield ErrorEvent(message=f"LLM error: {e}")
-                return
-
-            last = self.messages[-1]
-            if not last.tool_calls:
-                break
-
-            for tc in last.tool_calls:
-                name = tc["function"]["name"]
-                arguments = tc["function"]["arguments"]
-                yield ToolCallRequest(id=tc["id"], name=name, arguments=arguments)
-                result = self.registry.execute(name, arguments, dry_run=True)
-                yield ToolResultEvent(
-                    id=tc["id"], name=name, result=result, arguments=arguments
-                )
-                if result.requires_confirmation:
-                    self._pending_tool = tc
+        try:
+            for _ in range(self.config.llm.max_iterations):
+                try:
+                    async for event in self._call_llm():
+                        yield event
+                except Exception as e:  # noqa: BLE001
+                    yield ErrorEvent(message=f"LLM error: {e}")
                     return
-                self.messages.append(
-                    Message(
-                        role="tool",
-                        content=result.output or result.error or "",
-                        tool_call_id=tc["id"],
+
+                last = self.messages[-1]
+                if not last.tool_calls:
+                    break
+
+                for tc in last.tool_calls:
+                    name = tc["function"]["name"]
+                    arguments = tc["function"]["arguments"]
+                    yield ToolCallRequest(id=tc["id"], name=name, arguments=arguments)
+                    result = self.registry.execute(name, arguments, dry_run=True)
+                    yield ToolResultEvent(
+                        id=tc["id"], name=name, result=result, arguments=arguments
                     )
-                )
+                    if result.requires_confirmation:
+                        self._pending_tool = tc
+                        return
+                    self.messages.append(
+                        Message(
+                            role="tool",
+                            content=result.output or result.error or "",
+                            tool_call_id=tc["id"],
+                        )
+                    )
+        finally:
+            await self._save_session()
 
     def apply_tool(self, name: str, arguments: dict[str, Any]) -> ToolResult:
         result = self.registry.execute(name, arguments, dry_run=False)
@@ -131,12 +148,12 @@ class Agent:
         self._pending_tool = None
         return result
 
-    def _call_llm(self) -> Iterator[AgentEvent]:
+    async def _call_llm(self) -> AsyncIterator[AgentEvent]:
         tool_definitions = self.registry.definitions()
         assistant_content = ""
         tool_calls: list[dict[str, Any]] = []
 
-        for event in self.llm_client.chat(self.messages, tools=tool_definitions):
+        async for event in self.llm_client.chat(self.messages, tools=tool_definitions):
             if isinstance(event, TextChunk):
                 assistant_content += event.text
                 yield TextDelta(text=event.text)
@@ -162,3 +179,12 @@ class Agent:
                 tool_calls=tool_calls if tool_calls else None,
             )
         )
+
+    def _save_session_sync(self) -> None:
+        self._session_file.parent.mkdir(parents=True, exist_ok=True)
+        with self._session_file.open("w", encoding="utf-8") as f:
+            for msg in self.messages:
+                f.write(msg.model_dump_json() + "\n")
+
+    async def _save_session(self) -> None:
+        await asyncio.to_thread(self._save_session_sync)
