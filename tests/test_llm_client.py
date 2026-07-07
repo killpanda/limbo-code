@@ -1,9 +1,11 @@
+import json
+
 import pytest
 import respx
 from httpx import Response
 
 from limbo.config import Config
-from limbo.llm.openai_client import OpenAICompatibleClient
+from limbo.llm.openai_client import OpenAICompatibleClient, _message_to_openai
 from limbo.models import Message, ToolCallEvent
 
 
@@ -70,3 +72,28 @@ async def test_client_returns_tool_call(client):
     assert calls[0].name == "read"
     assert calls[0].arguments.get("path") == "main.py"
     assert route.called
+
+
+def test_message_to_openai_serializes_tool_arguments():
+    message = Message(
+        role="assistant",
+        content="",
+        tool_calls=[
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "read",
+                    "arguments": {"path": "main.py"},
+                },
+            }
+        ],
+    )
+    result = _message_to_openai(message)
+    assert result["role"] == "assistant"
+    assert len(result["tool_calls"]) == 1
+    args = result["tool_calls"][0]["function"]["arguments"]
+    assert isinstance(args, str)
+    assert json.loads(args) == {"path": "main.py"}
+    # The original message object is left untouched as a dict.
+    assert isinstance(message.tool_calls[0]["function"]["arguments"], dict)

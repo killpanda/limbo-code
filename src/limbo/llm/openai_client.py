@@ -93,7 +93,23 @@ def _message_to_openai(message: Message) -> dict[str, Any]:
     if message.content:
         m["content"] = message.content
     if message.tool_calls:
-        m["tool_calls"] = message.tool_calls
+        # The OpenAI SDK requires function.arguments to be a JSON string.
+        # Internal messages keep arguments as a dict for validation; serialize
+        # only when building the API request.
+        m["tool_calls"] = [
+            {
+                **tc,
+                "function": {
+                    **tc["function"],
+                    "arguments": (
+                        json.dumps(tc["function"]["arguments"])
+                        if isinstance(tc["function"]["arguments"], dict)
+                        else tc["function"]["arguments"]
+                    ),
+                },
+            }
+            for tc in message.tool_calls
+        ]
     if message.tool_call_id:
         m["tool_call_id"] = message.tool_call_id
     return m
