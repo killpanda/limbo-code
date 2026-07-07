@@ -46,6 +46,9 @@ class EditTool(BaseTool):
         except OSError as e:
             return ToolResult(success=False, error=f"Could not read file: {e}")
 
+        if old_text == "":
+            return ToolResult(success=False, error="old_text cannot be empty.")
+
         occurrences = content.count(old_text)
         if occurrences == 0:
             return ToolResult(success=False, error=f"old_text not found in {raw_path}.")

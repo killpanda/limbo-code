@@ -66,6 +66,17 @@ def test_edit_no_change(workdir):
     assert "no changes" in result.error.lower()
 
 
+def test_edit_rejects_empty_old_text(workdir):
+    (workdir / "a.py").write_text("x = 1\n")
+    tool = EditTool(workdir=workdir)
+    result = tool.execute(
+        {"path": "a.py", "old_text": "", "new_text": "x = 42"},
+        dry_run=False,
+    )
+    assert result.success is False
+    assert "old_text cannot be empty" in result.error.lower()
+
+
 def test_edit_dry_run_does_not_modify(workdir):
     (workdir / "a.py").write_text("x = 1\ny = 2\n")
     tool = EditTool(workdir=workdir)
