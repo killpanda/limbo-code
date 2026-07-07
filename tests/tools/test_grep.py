@@ -123,3 +123,16 @@ def test_grep_broken_symlink_search_path_returns_invalid_path(workdir):
     result = tool.execute({"pattern": "foo", "path": "broken_link"})
     assert result.success is False
     assert "invalid path" in result.error.lower()
+
+
+def test_grep_ripgrep_uses_relative_paths(workdir):
+    rg = GrepTool(workdir=workdir)._find_rg()
+    if not rg:
+        pytest.skip("ripgrep not installed")
+
+    tool = GrepTool(workdir=workdir)
+    result = tool.execute({"pattern": "def foo"})
+    assert result.success is True
+    assert "a.py" in result.output
+    # The host path prefix should not leak into search results.
+    assert str(workdir) not in result.output

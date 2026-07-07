@@ -95,7 +95,9 @@ class GrepTool(BaseTool):
             cmd.extend(["-C", str(context)])
         if glob:
             cmd.extend(["-g", glob])
-        cmd.extend(["--max-count", str(limit), "--", pattern, str(target)])
+        # Emit workdir-relative paths, consistent with the Python fallback and find.
+        rel_target = target.relative_to(self.workdir)
+        cmd.extend(["--max-count", str(limit), "--", pattern, str(rel_target)])
 
         try:
             proc = subprocess.run(
@@ -103,6 +105,7 @@ class GrepTool(BaseTool):
                 capture_output=True,
                 text=True,
                 timeout=30,
+                cwd=str(self.workdir),
             )
         except subprocess.TimeoutExpired:
             return ToolResult(success=False, error="grep timed out.")
