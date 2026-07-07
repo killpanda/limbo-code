@@ -53,8 +53,8 @@ bash_enabled = true
 ### Session storage
 
 Conversations are saved as JSONL files in `~/.limbo/sessions/` so you can
-review or debug them later. Use the `session_dir` argument or set a custom
-location if you need to redirect them.
+review or debug them later. Use the `--session-dir` argument to redirect them
+to another location.
 
 ## Run
 
@@ -65,9 +65,14 @@ limbo --workdir /path/to/project
 ## Safety and confirmation
 
 Limbo asks for confirmation before applying destructive or workspace-modifying
-tool calls (writes and edits by default). File tools (`read`, `edit`, `write`,
-`grep`, `find`, `ls`) are bounded to the current working directory and reject
-paths that escape it, including via symlinks.
+tool calls. Writes and edits are gated by default, and **bash is also
+confirmation-gated** because it is unsandboxed and can mutate state.
+
+File tools (`read`, `edit`, `write`, `grep`, `find`, `ls`) are bounded to the
+current working directory and reject paths that escape it, including via
+symlinks. The boundary check resolves the path before each operation, so a
+symlink swapped between the check and the operation (a time-of-check-to-time-of-use
+race) could escape the workdir. This is a known limitation for the MVP.
 
 Bash is an exception: it is started in the working directory but is **not**
 sandboxed. Commands can `cd ..`, use absolute paths, and read or write outside

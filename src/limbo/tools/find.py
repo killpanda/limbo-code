@@ -115,7 +115,7 @@ class _GitignoreMatcher:
 
 class FindTool(BaseTool):
     name = "find"
-    description = "Find files by glob pattern. Respects .gitignore."
+    description = "Find files by glob pattern. Respects the root .gitignore only."
     parameters = {
         "type": "object",
         "properties": {
