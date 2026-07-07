@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 from textual.containers import Horizontal, Vertical
@@ -10,6 +11,7 @@ from textual.screen import Screen
 
 from limbo.agent import (
     Agent,
+    AgentEvent,
     ErrorEvent,
     TextDelta,
     ToolResultEvent,
@@ -73,79 +75,93 @@ class MainScreen(Screen[None]):
         self.run_worker(self._handle_turn(event.message))
 
     async def _handle_turn(self, user_input: str) -> None:
+        stream: AsyncIterator[AgentEvent] = self.agent.run(user_input)
+        while True:
+            async for event in stream:
+                await self._process_agent_event(event)
+
+            if self.agent._confirmation_applied:
+                stream = self.agent.continue_after_confirmation()
+                continue
+            break
+
+    async def _process_agent_event(self, event: AgentEvent) -> None:
         chat = self.query_one("#chat", ChatWidget)
         sidebar = self.query_one("#sidebar", SidebarWidget)
         preview = self.query_one("#preview", FilePreviewWidget)
+        input_widget = self.query_one("#input", InputWidget)
 
-        async for event in self.agent.run(user_input):
-            if isinstance(event, TextDelta):
-                chat.append_assistant_text(event.text)
-            elif isinstance(event, ErrorEvent):
-                chat.append_assistant_text(event.message)
-            elif isinstance(event, ToolResultEvent):
-                result = event.result
-                sidebar.set_status(f"Tool: {event.name}")
-                if result.output:
-                    preview.show(f"{event.name} result", result.output)
+        if isinstance(event, TextDelta):
+            chat.append_assistant_text(event.text)
+        elif isinstance(event, ErrorEvent):
+            chat.append_assistant_text(event.message)
+        elif isinstance(event, ToolResultEvent):
+            result = event.result
+            sidebar.set_status(f"Tool: {event.name}")
+            if result.output:
+                preview.show(f"{event.name} result", result.output)
 
-                if (
-                    event.name == "read"
-                    and result.success
-                    and "path" in event.arguments
-                ):
-                    sidebar.add_recent_file(event.arguments["path"])
+            if (
+                event.name == "read"
+                and result.success
+                and "path" in event.arguments
+            ):
+                sidebar.add_recent_file(event.arguments["path"])
 
-                if result.requires_confirmation:
-                    skip = False
-                    if event.name == "write" and not self.config.ui.confirm_writes:
-                        skip = True
-                    elif event.name == "edit" and not self.config.ui.confirm_edits:
-                        skip = True
+            if result.requires_confirmation:
+                skip = False
+                if event.name == "write" and not self.config.ui.confirm_writes:
+                    skip = True
+                elif event.name == "edit" and not self.config.ui.confirm_edits:
+                    skip = True
 
-                    if skip:
-                        apply_result = self.agent.apply_tool(
-                            event.name, event.arguments
-                        )
-                        preview.show(
-                            f"{event.name} applied",
-                            apply_result.output or "",
-                        )
-                        path = event.arguments.get("path")
-                        if path and apply_result.success:
-                            sidebar.add_recent_file(path)
-                        continue
-
-                    self._confirmation_event.clear()
-                    self._confirmation_result = None
-                    self.app.push_screen(
-                        ConfirmDialog(
-                            title=f"Apply {event.name}?",
-                            body=result.output or "",
-                        )
+                if skip:
+                    apply_result = self.agent.apply_tool(
+                        event.name, event.arguments
                     )
-                    try:
-                        await asyncio.wait_for(
-                            self._confirmation_event.wait(),
-                            timeout=CONFIRMATION_TIMEOUT,
-                        )
-                    except asyncio.TimeoutError:
-                        chat.append_assistant_text(
-                            f"\n[{event.name} confirmation timed out; action rejected.]"
-                        )
-                        continue
+                    preview.show(
+                        f"{event.name} applied",
+                        apply_result.output or "",
+                    )
+                    path = event.arguments.get("path")
+                    if path and apply_result.success:
+                        sidebar.add_recent_file(path)
+                    return
 
-                    if self._confirmation_result:
-                        apply_result = self.agent.apply_tool(
-                            event.name, event.arguments
-                        )
-                        preview.show(
-                            f"{event.name} applied",
-                            apply_result.output or "",
-                        )
-                        path = event.arguments.get("path")
-                        if path and apply_result.success:
-                            sidebar.add_recent_file(path)
-                    else:
-                        chat.append_assistant_text(
-                            f"\n[{event.name} was rejected by user.]"
-                        )
+                input_widget.disabled = True
+                self._confirmation_event.clear()
+                self._confirmation_result = None
+                dialog = ConfirmDialog(
+                    title=f"Apply {event.name}?",
+                    body=result.output or "",
+                )
+                self.app.push_screen(dialog)
+                try:
+                    await asyncio.wait_for(
+                        self._confirmation_event.wait(),
+                        timeout=CONFIRMATION_TIMEOUT,
+                    )
+                except asyncio.TimeoutError:
+                    chat.append_assistant_text(
+                        f"\n[{event.name} confirmation timed out; action rejected.]"
+                    )
+                    dialog.dismiss()
+                    input_widget.disabled = False
+                    return
+
+                input_widget.disabled = False
+                if self._confirmation_result:
+                    apply_result = self.agent.apply_tool(
+                        event.name, event.arguments
+                    )
+                    preview.show(
+                        f"{event.name} applied",
+                        apply_result.output or "",
+                    )
+                    path = event.arguments.get("path")
+                    if path and apply_result.success:
+                        sidebar.add_recent_file(path)
+                else:
+                    chat.append_assistant_text(
+                        f"\n[{event.name} was rejected by user.]"
+                    )

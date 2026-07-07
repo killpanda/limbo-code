@@ -1,11 +1,16 @@
 """Tests for the confirmation flow in the main screen."""
 
+import asyncio
+
 import pytest
 
 from limbo.config import Config
 from limbo.models import TextChunk, ToolCallEvent
 from limbo.ui.app import LimboApp
 from limbo.ui.screens.main import MainScreen
+from limbo.ui.widgets.chat import ChatWidget
+from limbo.ui.widgets.confirm import ConfirmDialog
+from limbo.ui.widgets.input import InputWidget
 
 
 class FakeLLMClient:
@@ -153,3 +158,95 @@ async def test_error_event_is_shown(tmp_path, monkeypatch):
         rendered = " ".join(str(m.content) for m in chat.messages)
         assert "LLM error" in rendered
         assert "boom" in rendered
+
+
+@pytest.mark.asyncio
+async def test_confirm_dialog_disables_input(tmp_path, monkeypatch):
+    monkeypatch.setattr("limbo.agent.Path.home", lambda: tmp_path)
+    cfg = Config()
+    cfg.llm.api_key = "test"
+    fake_llm = FakeLLMClient(
+        [
+            [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
+        ]
+    )
+    app = LimboApp(workdir=tmp_path, config=cfg, llm_client=fake_llm)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        main_screen = pilot.app.screen_stack[-1]
+        assert isinstance(main_screen, MainScreen)
+
+        main_screen.run_worker(main_screen._handle_turn("write x.txt"))
+        await pilot.pause()
+
+        input_widget = main_screen.query_one("#input", InputWidget)
+        assert input_widget.disabled is True
+        assert any(isinstance(s, ConfirmDialog) for s in pilot.app.screen_stack)
+
+        await pilot.click("#apply")
+        await pilot.pause()
+
+        assert input_widget.disabled is False
+
+
+@pytest.mark.asyncio
+async def test_confirm_timeout_dismisses_dialog(tmp_path, monkeypatch):
+    monkeypatch.setattr("limbo.agent.Path.home", lambda: tmp_path)
+    monkeypatch.setattr("limbo.ui.screens.main.CONFIRMATION_TIMEOUT", 0.2)
+    cfg = Config()
+    cfg.llm.api_key = "test"
+    fake_llm = FakeLLMClient(
+        [
+            [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
+        ]
+    )
+    app = LimboApp(workdir=tmp_path, config=cfg, llm_client=fake_llm)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        main_screen = pilot.app.screen_stack[-1]
+        assert isinstance(main_screen, MainScreen)
+
+        main_screen.run_worker(main_screen._handle_turn("write x.txt"))
+        await pilot.pause()
+
+        assert any(isinstance(s, ConfirmDialog) for s in pilot.app.screen_stack)
+
+        # Wait for the short timeout to elapse.
+        await asyncio.sleep(0.3)
+        await pilot.pause()
+
+        assert not any(isinstance(s, ConfirmDialog) for s in pilot.app.screen_stack)
+        assert not (tmp_path / "x.txt").exists()
+
+        input_widget = main_screen.query_one("#input", InputWidget)
+        assert input_widget.disabled is False
+
+
+@pytest.mark.asyncio
+async def test_confirm_dialog_resumes_conversation_loop(tmp_path, monkeypatch):
+    monkeypatch.setattr("limbo.agent.Path.home", lambda: tmp_path)
+    cfg = Config()
+    cfg.llm.api_key = "test"
+    fake_llm = FakeLLMClient(
+        [
+            [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
+            [TextChunk(text="done")],
+        ]
+    )
+    app = LimboApp(workdir=tmp_path, config=cfg, llm_client=fake_llm)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        main_screen = pilot.app.screen_stack[-1]
+        assert isinstance(main_screen, MainScreen)
+
+        main_screen.run_worker(main_screen._handle_turn("write x.txt"))
+        await pilot.pause()
+
+        await pilot.click("#apply")
+        await pilot.pause()
+        await pilot.pause()
+
+        assert (tmp_path / "x.txt").read_text() == "hi"
+        chat = main_screen.query_one("#chat", ChatWidget)
+        rendered = " ".join(str(m.content) for m in chat.messages)
+        assert "done" in rendered
