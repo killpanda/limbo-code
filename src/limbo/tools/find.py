@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from limbo.models import ToolResult
-from limbo.tools.base import BaseTool
+from limbo.tools.base import BaseTool, is_within_workdir
 
 MAX_RESULTS = 1000
 MAX_BYTES = 512 * 1024
@@ -134,6 +134,8 @@ class FindTool(BaseTool):
         target = (self.workdir / path).resolve()
         if not target.exists():
             return ToolResult(success=False, error=f"Path not found: {path}")
+        if not is_within_workdir(target, self.workdir):
+            return ToolResult(success=False, error="Path is outside working directory.")
 
         try:
             matches = sorted(target.glob(pattern))

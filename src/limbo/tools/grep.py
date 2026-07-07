@@ -8,7 +8,8 @@ from pathlib import Path
 from typing import Any
 
 from limbo.models import ToolResult
-from limbo.tools.base import BaseTool
+from limbo.tools.base import BaseTool, is_within_workdir
+from limbo.tools.find import _GitignoreMatcher
 
 MAX_MATCHES = 100
 MAX_BYTES = 512 * 1024
@@ -43,6 +44,8 @@ class GrepTool(BaseTool):
         target = (self.workdir / path).resolve()
         if not target.exists():
             return ToolResult(success=False, error=f"Path not found: {path}")
+        if not is_within_workdir(target, self.workdir):
+            return ToolResult(success=False, error="Path is outside working directory.")
 
         rg = self._find_rg()
         if rg:
@@ -113,10 +116,17 @@ class GrepTool(BaseTool):
             return ToolResult(success=False, error=f"Invalid regex: {e}")
 
         matches = []
+        matcher = _GitignoreMatcher(self.workdir)
         files = [target] if target.is_file() else target.rglob("*")
         count = 0
         for f in files:
             if not f.is_file():
+                continue
+            try:
+                rel = f.relative_to(self.workdir)
+            except ValueError:
+                continue
+            if matcher.is_ignored(str(rel)):
                 continue
             try:
                 text = f.read_text(encoding="utf-8", errors="replace")
@@ -124,7 +134,6 @@ class GrepTool(BaseTool):
                 continue
             for lineno, line in enumerate(text.splitlines(), start=1):
                 if compiled.search(line):
-                    rel = f.relative_to(self.workdir)
                     matches.append(f"{rel}:{lineno}:{line}")
                     count += 1
                     if count >= limit:

@@ -60,7 +60,11 @@ class EditTool(BaseTool):
                 requires_confirmation=True,
             )
 
-        target.write_text(new_content, encoding="utf-8")
+        try:
+            target.write_text(new_content, encoding="utf-8")
+        except OSError as e:
+            return ToolResult(success=False, error=f"Could not write file: {e}")
+
         return ToolResult(success=True, output=f"Edited {raw_path}.\n{diff}")
 
     def _make_diff(self, old: str, new: str) -> str:

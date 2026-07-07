@@ -52,3 +52,17 @@ def test_find_respects_gitignore(workdir_with_gitignore):
     assert "src/a.py" in result.output
     assert "ignored.py" not in result.output
     assert "ignored_dir/x.py" not in result.output
+
+
+def test_find_rejects_path_outside_workdir(workdir):
+    tool = FindTool(workdir=workdir)
+    result = tool.execute({"pattern": "*.py", "path": ".."})
+    assert result.success is False
+    assert "outside" in result.error.lower()
+
+
+def test_find_rejects_absolute_path_outside_workdir(workdir):
+    tool = FindTool(workdir=workdir)
+    result = tool.execute({"pattern": "*.py", "path": "/etc"})
+    assert result.success is False
+    assert "outside" in result.error.lower()

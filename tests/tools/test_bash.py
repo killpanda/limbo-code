@@ -21,7 +21,9 @@ def test_bash_echo(workdir):
 
 def test_bash_captures_stderr(workdir):
     tool = BashTool(workdir=workdir)
-    result = tool.execute({"command": "echo error >&2"})
+    result = tool.execute(
+        {"command": "python -c \"import sys; sys.stderr.write('error\\n')\""}
+    )
     assert result.success is True
     assert "error" in result.output
 
@@ -43,6 +45,13 @@ def test_bash_timeout(workdir):
 def test_is_dangerous_detects_rm():
     assert is_dangerous("rm -rf /", ["rm"]) is True
     assert is_dangerous("echo hello", ["rm"]) is False
+
+
+def test_bash_rejects_dangerous_command(workdir):
+    tool = BashTool(workdir=workdir)
+    result = tool.execute({"command": "rm -rf /"})
+    assert result.success is False
+    assert "blocked" in result.error.lower()
 
 
 def test_bash_workdir_context(workdir):
