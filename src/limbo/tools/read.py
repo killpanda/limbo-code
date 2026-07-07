@@ -10,6 +10,7 @@ from limbo.tools.base import BaseTool, resolve_path
 
 MAX_LINES = 2000
 MAX_BYTES = 512 * 1024
+MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 DEFAULT_SENSITIVE_FILES = {".env", "id_rsa", "id_ed25519", ".ssh"}
 
 
@@ -54,6 +55,19 @@ class ReadTool(BaseTool):
 
         if not target.is_file():
             return ToolResult(success=False, error=f"Not a file: {raw_path}")
+
+        try:
+            file_size = target.stat().st_size
+        except OSError as e:
+            return ToolResult(success=False, error=f"Could not read file: {e}")
+        if file_size > MAX_FILE_SIZE:
+            return ToolResult(
+                success=False,
+                error=(
+                    f"File too large ({file_size} bytes). "
+                    f"Maximum size is {MAX_FILE_SIZE} bytes."
+                ),
+            )
 
         try:
             text = target.read_text(encoding="utf-8", errors="replace")

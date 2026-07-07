@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from limbo.tools.read import ReadTool
+from limbo.tools.read import MAX_FILE_SIZE, ReadTool
 
 
 @pytest.fixture
@@ -144,3 +144,13 @@ def test_read_truncates_output_by_byte_budget(workdir):
     assert result.success is True
     assert len(result.output.encode("utf-8")) <= 512 * 1024 + 100
     assert "truncated" in result.output.lower()
+
+
+def test_read_rejects_files_above_max_size(workdir):
+    """Files larger than the generous cap must be refused before reading."""
+    big = workdir / "huge.txt"
+    big.write_text("x" * (MAX_FILE_SIZE + 1))
+    tool = ReadTool(workdir=workdir)
+    result = tool.execute({"path": "huge.txt"})
+    assert result.success is False
+    assert "too large" in result.error.lower()
