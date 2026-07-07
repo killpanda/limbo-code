@@ -71,3 +71,13 @@ def test_load_config_validation_error_uses_defaults(tmp_path):
     with pytest.warns(UserWarning, match="Invalid config file"):
         cfg = load_config(path)
     assert cfg.llm.max_iterations == 10
+
+
+def test_llm_config_rejects_non_positive_max_iterations():
+    from limbo.config import LLMConfig
+
+    with pytest.raises(ValueError, match="max_iterations"):
+        LLMConfig(max_iterations=0)
+    with pytest.raises(ValueError, match="max_iterations"):
+        LLMConfig(max_iterations=-1)
+    assert LLMConfig(max_iterations=1).max_iterations == 1

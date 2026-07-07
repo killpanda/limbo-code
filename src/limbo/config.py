@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import toml  # type: ignore[import-untyped]
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 from toml import TomlDecodeError
 
 DEFAULT_CONFIG_PATH = Path.home() / ".limbo" / "config.toml"
@@ -20,6 +20,13 @@ class LLMConfig(BaseModel):
     model: str = "deepseek-chat"
     temperature: float = 0.2
     max_iterations: int = 10
+
+    @field_validator("max_iterations")
+    @classmethod
+    def _max_iterations_must_be_positive(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError("max_iterations must be at least 1")
+        return value
 
 
 class UIConfig(BaseModel):
