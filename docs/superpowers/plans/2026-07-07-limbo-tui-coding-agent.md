@@ -357,7 +357,6 @@ DEFAULT_CONFIG_PATH = Path.home() / ".limbo" / "config.toml"
 
 
 class LLMConfig(BaseModel):
-    provider: str = "openai"
     api_key: str | None = None
     base_url: str = "https://api.deepseek.com/v1"
     model: str = "deepseek-chat"
@@ -366,7 +365,7 @@ class LLMConfig(BaseModel):
 
 
 class UIConfig(BaseModel):
-    theme: str = "dark"
+    pass
 
 
 class SafetyConfig(BaseModel):
@@ -374,7 +373,7 @@ class SafetyConfig(BaseModel):
         default_factory=lambda: ["rm", "git reset --hard"]
     )
     sensitive_files: list[str] = Field(
-        default_factory=lambda: [".env", "id_rsa", "id_ed25519"]
+        default_factory=lambda: [".env", "id_rsa", "id_ed25519", ".ssh"]
     )
 
 
@@ -2646,6 +2645,12 @@ def main() -> int:
         default=Path.cwd(),
         help="Working directory (default: current directory)",
     )
+    parser.add_argument(
+        "--session-dir",
+        type=Path,
+        default=None,
+        help="Directory for session JSONL files (default: ~/.limbo/sessions)",
+    )
     args = parser.parse_args()
 
     config = load_config()
@@ -2657,7 +2662,7 @@ def main() -> int:
         )
         return 1
 
-    app = LimboApp(workdir=args.workdir, config=config)
+    app = LimboApp(workdir=args.workdir, config=config, session_dir=args.session_dir)
     app.run()
     return 0
 
@@ -2692,6 +2697,7 @@ class LimboApp(App[None]):
         workdir: str | Path,
         config: Config | None = None,
         llm_client: LLMClient | None = None,
+        session_dir: Path | None = None,
         *args,
         **kwargs,
     ):
@@ -2699,6 +2705,7 @@ class LimboApp(App[None]):
         self.workdir = Path(workdir).resolve()
         self.config = config
         self.llm_client = llm_client
+        self.session_dir = session_dir
 
     def on_mount(self) -> None:
         self.push_screen(
@@ -2706,6 +2713,7 @@ class LimboApp(App[None]):
                 workdir=self.workdir,
                 config=self.config,
                 llm_client=self.llm_client,
+                session_dir=self.session_dir,
             )
         )
 ```
