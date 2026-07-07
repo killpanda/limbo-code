@@ -94,8 +94,69 @@ class Agent:
             )
         )
 
-    def reject_pending_tool(self) -> None:
-        """Clear any tool awaiting confirmation."""
+    def reject_pending_tool(self, reason: str = "Action rejected.") -> None:
+        """Clear any tool awaiting confirmation.
+
+        Updates the placeholder ``role="tool"`` message installed when the
+        pending call was first encountered, or appends one if it is missing,
+        so the assistant message that referenced the tool call remains valid
+        for the OpenAI API. Any later tool calls in the same assistant turn
+        are marked as not executed.
+        """
+        if self._pending_tool is None:
+            return
+        pending_id = self._pending_tool["id"]
+
+        # Find the most recent assistant message that owns this pending call
+        # so we can update its later tool-call placeholders as well.
+        assistant = None
+        for msg in reversed(self.messages):
+            if msg.role == "assistant" and msg.tool_calls:
+                if any(tc["id"] == pending_id for tc in msg.tool_calls):
+                    assistant = msg
+                    break
+
+        if assistant is not None and assistant.tool_calls:
+            pending_idx: int | None = None
+            for idx, tc in enumerate(assistant.tool_calls):
+                if tc["id"] == pending_id:
+                    pending_idx = idx
+                    break
+            if pending_idx is not None:
+                for tc in assistant.tool_calls[pending_idx:]:
+                    content = (
+                        reason
+                        if tc["id"] == pending_id
+                        else "Action not executed: earlier tool was rejected."
+                    )
+                    for existing in self.messages:
+                        if existing.role == "tool" and existing.tool_call_id == tc["id"]:
+                            existing.content = content
+                            break
+                    else:
+                        self.messages.append(
+                            Message(
+                                role="tool",
+                                content=content,
+                                tool_call_id=tc["id"],
+                            )
+                        )
+                self._pending_tool = None
+                return
+
+        # Fallback when the owning assistant message cannot be located.
+        for msg in self.messages:
+            if msg.role == "tool" and msg.tool_call_id == pending_id:
+                msg.content = reason
+                break
+        else:
+            self.messages.append(
+                Message(
+                    role="tool",
+                    content=reason,
+                    tool_call_id=pending_id,
+                )
+            )
         self._pending_tool = None
 
     async def run(self, user_input: str) -> AsyncIterator[AgentEvent]:
@@ -103,7 +164,9 @@ class Agent:
         self._iteration_count = 0
         self._confirmation_applied = False
         if self._pending_tool is not None:
-            self.reject_pending_tool()
+            self.reject_pending_tool(
+                reason="Action timed out or was superseded by a new turn."
+            )
 
         self.messages.append(Message(role="user", content=user_input))
 
@@ -149,7 +212,7 @@ class Agent:
             if not last.tool_calls:
                 break
 
-            for tc in last.tool_calls:
+            for idx, tc in enumerate(last.tool_calls):
                 name = tc["function"]["name"]
                 arguments = tc["function"]["arguments"]
                 yield ToolCallRequest(id=tc["id"], name=name, arguments=arguments)
@@ -160,6 +223,20 @@ class Agent:
                     id=tc["id"], name=name, result=result, arguments=arguments
                 )
                 if result.requires_confirmation:
+                    # The assistant message already references every tool call in
+                    # this turn, but only the calls before this one have results.
+                    # Append placeholders for this pending call and the remaining
+                    # calls so the message history stays valid for OpenAI. The
+                    # pending call's placeholder is replaced by the real result
+                    # when the user confirms it.
+                    for pending_or_remaining in last.tool_calls[idx:]:
+                        self.messages.append(
+                            Message(
+                                role="tool",
+                                content="Action pending user confirmation.",
+                                tool_call_id=pending_or_remaining["id"],
+                            )
+                        )
                     return
                 self.messages.append(
                     Message(
@@ -190,13 +267,24 @@ class Agent:
             )
 
         result = await self.registry.execute(name, arguments, dry_run=False)
-        self.messages.append(
-            Message(
-                role="tool",
-                content=result.output or result.error or "",
-                tool_call_id=self._pending_tool["id"],
+        # Replace the placeholder tool result installed when the pending call
+        # was first encountered, so the message history stays valid and shows
+        # the actual outcome.
+        for msg in self.messages:
+            if (
+                msg.role == "tool"
+                and msg.tool_call_id == self._pending_tool["id"]
+            ):
+                msg.content = result.output or result.error or ""
+                break
+        else:
+            self.messages.append(
+                Message(
+                    role="tool",
+                    content=result.output or result.error or "",
+                    tool_call_id=self._pending_tool["id"],
+                )
             )
-        )
         self._pending_tool = None
         self._confirmation_applied = True
         return result

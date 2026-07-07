@@ -261,6 +261,8 @@ async def test_agent_reject_pending_tool_clears_state(workdir):
 
     agent.reject_pending_tool()
     assert agent._pending_tool is None
+    tool_messages = [m for m in agent.messages if m.role == "tool"]
+    assert any(m.tool_call_id == "c1" and "rejected" in (m.content or "").lower() for m in tool_messages)
 
 
 @pytest.mark.asyncio
@@ -282,3 +284,62 @@ async def test_agent_new_turn_clears_stale_pending_tool(workdir):
     events = await _collect(agent.run("new turn"))
     assert agent._pending_tool is None
     assert any(hasattr(e, "text") and e.text == "fresh turn" for e in events)
+    tool_messages = [m for m in agent.messages if m.role == "tool"]
+    assert any(
+        m.tool_call_id == "c1" and "superseded" in (m.content or "").lower()
+        for m in tool_messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_multi_tool_confirmation_appends_placeholders(workdir):
+    cfg = Config()
+    fake_llm = FakeLLMClient([
+        [
+            ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"}),
+            ToolCallEvent(id="c2", name="write", arguments={"path": "x.txt", "content": "hi"}),
+            ToolCallEvent(id="c3", name="ls", arguments={"path": "."}),
+        ],
+    ])
+    (workdir / "main.py").write_text("x = 1\n")
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    events = await _collect(agent.run("multi"))
+    # The second tool (write) requires confirmation, so the loop stops there.
+    result_events = [e for e in events if hasattr(e, "result")]
+    assert len(result_events) == 2
+    assert result_events[1].result.requires_confirmation is True
+    assert agent._pending_tool is not None
+    assert agent._pending_tool["id"] == "c2"
+
+    # Every assistant tool_call must have a matching tool result message.
+    assistant = [m for m in agent.messages if m.role == "assistant" and m.tool_calls]
+    assert len(assistant) == 1
+    tool_call_ids = {tc["id"] for tc in assistant[0].tool_calls or []}
+    tool_result_ids = {m.tool_call_id for m in agent.messages if m.role == "tool"}
+    assert tool_call_ids == tool_result_ids
+
+    # The pending tool and remaining calls have placeholder results.
+    pending_placeholder = next(
+        m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c2"
+    )
+    assert "pending" in (pending_placeholder.content or "").lower()
+    remaining_placeholder = next(
+        m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c3"
+    )
+    assert "pending" in (remaining_placeholder.content or "").lower()
+
+    # After confirmation the pending placeholder is replaced with the real result.
+    apply_result = await agent.apply_tool(
+        "write", {"path": "x.txt", "content": "hi"}
+    )
+    assert apply_result.success is True
+    c2_message = next(
+        m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c2"
+    )
+    assert "wrote" in (c2_message.content or "").lower()
