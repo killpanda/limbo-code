@@ -23,8 +23,11 @@ class ToolRegistry:
         self.workdir = workdir
         self._tools: dict[str, BaseTool] = {}
         for tool_class in [ReadTool, BashTool, EditTool, WriteTool, GrepTool, FindTool, LsTool]:
-            tool = tool_class(workdir=workdir)
-            self._tools[tool.name] = tool
+            self.register(tool_class)  # type: ignore[arg-type]
+
+    def register(self, tool_class: type[BaseTool]) -> None:
+        tool = tool_class(workdir=self.workdir)
+        self._tools[tool.name] = tool
 
     def get(self, name: str) -> BaseTool | None:
         return self._tools.get(name)
