@@ -109,3 +109,25 @@ def test_message_to_openai_keeps_empty_tool_content():
     assert result["role"] == "tool"
     assert "content" in result
     assert result["content"] == ""
+
+
+def test_message_to_openai_includes_content_for_assistant_tool_calls():
+    message = Message(
+        role="assistant",
+        content=None,
+        tool_calls=[
+            {
+                "id": "call_1",
+                "type": "function",
+                "function": {
+                    "name": "read",
+                    "arguments": {"path": "main.py"},
+                },
+            }
+        ],
+    )
+    result = _message_to_openai(message)
+    assert result["role"] == "assistant"
+    assert "content" in result
+    assert result["content"] == ""
+    assert len(result["tool_calls"]) == 1

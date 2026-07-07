@@ -13,6 +13,7 @@ def test_default_config():
     assert cfg.llm.model == "deepseek-chat"
     assert cfg.llm.max_iterations == 10
     assert cfg.tools.bash_enabled is True
+    assert ".ssh" in cfg.safety.sensitive_files
 
 
 def test_load_config_from_file():

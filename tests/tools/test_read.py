@@ -56,3 +56,29 @@ def test_read_non_sensitive_file_not_in_custom_list(workdir):
     tool = ReadTool(workdir=workdir, sensitive_files=["secret.txt"])
     result = tool.execute({"path": ".env"})
     assert result.success is True
+
+
+def test_read_blocks_ssh_path(workdir):
+    ssh_dir = workdir / ".ssh"
+    ssh_dir.mkdir()
+    (ssh_dir / "config").write_text("Host example")
+    tool = ReadTool(workdir=workdir)
+    result = tool.execute({"path": ".ssh/config"})
+    assert result.success is False
+    assert "sensitive" in result.error.lower()
+
+
+def test_read_rejects_negative_offset(workdir):
+    (workdir / "lines.txt").write_text("line1\nline2\n")
+    tool = ReadTool(workdir=workdir)
+    result = tool.execute({"path": "lines.txt", "offset": -1})
+    assert result.success is False
+    assert "positive" in result.error.lower()
+
+
+def test_read_rejects_negative_limit(workdir):
+    (workdir / "lines.txt").write_text("line1\nline2\n")
+    tool = ReadTool(workdir=workdir)
+    result = tool.execute({"path": "lines.txt", "limit": -1})
+    assert result.success is False
+    assert "positive" in result.error.lower()

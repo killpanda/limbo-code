@@ -24,8 +24,7 @@ class FakeLLMClient:
 
 
 @pytest.mark.asyncio
-async def test_confirm_dialog_applies_tool(tmp_path, monkeypatch):
-    monkeypatch.setattr("limbo.agent.Path.home", lambda: tmp_path)
+async def test_confirm_dialog_applies_tool(tmp_path):
     cfg = Config()
     cfg.llm.api_key = "test"
     fake_llm = FakeLLMClient(
@@ -33,7 +32,12 @@ async def test_confirm_dialog_applies_tool(tmp_path, monkeypatch):
             [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
         ]
     )
-    app = LimboApp(workdir=tmp_path, config=cfg, llm_client=fake_llm)
+    app = LimboApp(
+        workdir=tmp_path,
+        config=cfg,
+        llm_client=fake_llm,
+        session_dir=tmp_path / "sessions",
+    )
     async with app.run_test() as pilot:
         await pilot.pause()
         main_screen = pilot.app.screen_stack[-1]
@@ -49,8 +53,7 @@ async def test_confirm_dialog_applies_tool(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_confirm_dialog_rejects_tool(tmp_path, monkeypatch):
-    monkeypatch.setattr("limbo.agent.Path.home", lambda: tmp_path)
+async def test_confirm_dialog_rejects_tool(tmp_path):
     cfg = Config()
     cfg.llm.api_key = "test"
     fake_llm = FakeLLMClient(
@@ -58,7 +61,12 @@ async def test_confirm_dialog_rejects_tool(tmp_path, monkeypatch):
             [ToolCallEvent(id="c1", name="write", arguments={"path": "y.txt", "content": "hi"})],
         ]
     )
-    app = LimboApp(workdir=tmp_path, config=cfg, llm_client=fake_llm)
+    app = LimboApp(
+        workdir=tmp_path,
+        config=cfg,
+        llm_client=fake_llm,
+        session_dir=tmp_path / "sessions",
+    )
     async with app.run_test() as pilot:
         await pilot.pause()
         main_screen = pilot.app.screen_stack[-1]
@@ -74,8 +82,7 @@ async def test_confirm_dialog_rejects_tool(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_confirm_writes_false_skips_dialog(tmp_path, monkeypatch):
-    monkeypatch.setattr("limbo.agent.Path.home", lambda: tmp_path)
+async def test_confirm_writes_false_skips_dialog(tmp_path):
     cfg = Config()
     cfg.llm.api_key = "test"
     cfg.ui.confirm_writes = False
@@ -84,7 +91,12 @@ async def test_confirm_writes_false_skips_dialog(tmp_path, monkeypatch):
             [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
         ]
     )
-    app = LimboApp(workdir=tmp_path, config=cfg, llm_client=fake_llm)
+    app = LimboApp(
+        workdir=tmp_path,
+        config=cfg,
+        llm_client=fake_llm,
+        session_dir=tmp_path / "sessions",
+    )
     async with app.run_test() as pilot:
         await pilot.pause()
         main_screen = pilot.app.screen_stack[-1]
@@ -97,8 +109,7 @@ async def test_confirm_writes_false_skips_dialog(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_confirm_edits_false_skips_dialog(tmp_path, monkeypatch):
-    monkeypatch.setattr("limbo.agent.Path.home", lambda: tmp_path)
+async def test_confirm_edits_false_skips_dialog(tmp_path):
     (tmp_path / "a.py").write_text("x = 1\n")
     cfg = Config()
     cfg.llm.api_key = "test"
@@ -118,7 +129,12 @@ async def test_confirm_edits_false_skips_dialog(tmp_path, monkeypatch):
             ],
         ]
     )
-    app = LimboApp(workdir=tmp_path, config=cfg, llm_client=fake_llm)
+    app = LimboApp(
+        workdir=tmp_path,
+        config=cfg,
+        llm_client=fake_llm,
+        session_dir=tmp_path / "sessions",
+    )
     async with app.run_test() as pilot:
         await pilot.pause()
         main_screen = pilot.app.screen_stack[-1]
@@ -131,9 +147,7 @@ async def test_confirm_edits_false_skips_dialog(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_error_event_is_shown(tmp_path, monkeypatch):
-    monkeypatch.setattr("limbo.agent.Path.home", lambda: tmp_path)
-
+async def test_error_event_is_shown(tmp_path):
     class ErrorLLMClient:
         async def chat(self, messages, tools):
             raise RuntimeError("boom")
@@ -142,7 +156,12 @@ async def test_error_event_is_shown(tmp_path, monkeypatch):
 
     cfg = Config()
     cfg.llm.api_key = "test"
-    app = LimboApp(workdir=tmp_path, config=cfg, llm_client=ErrorLLMClient())
+    app = LimboApp(
+        workdir=tmp_path,
+        config=cfg,
+        llm_client=ErrorLLMClient(),
+        session_dir=tmp_path / "sessions",
+    )
     async with app.run_test() as pilot:
         await pilot.pause()
         main_screen = pilot.app.screen_stack[-1]
@@ -161,8 +180,7 @@ async def test_error_event_is_shown(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_confirm_dialog_disables_input(tmp_path, monkeypatch):
-    monkeypatch.setattr("limbo.agent.Path.home", lambda: tmp_path)
+async def test_confirm_dialog_disables_input(tmp_path):
     cfg = Config()
     cfg.llm.api_key = "test"
 
@@ -183,7 +201,12 @@ async def test_confirm_dialog_disables_input(tmp_path, monkeypatch):
                 await hold_second_response.wait()
                 yield TextChunk(text=" done")
 
-    app = LimboApp(workdir=tmp_path, config=cfg, llm_client=HoldingFakeLLMClient())
+    app = LimboApp(
+        workdir=tmp_path,
+        config=cfg,
+        llm_client=HoldingFakeLLMClient(),
+        session_dir=tmp_path / "sessions",
+    )
     async with app.run_test() as pilot:
         await pilot.pause()
         main_screen = pilot.app.screen_stack[-1]
@@ -211,7 +234,6 @@ async def test_confirm_dialog_disables_input(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_confirm_timeout_dismisses_dialog(tmp_path, monkeypatch):
-    monkeypatch.setattr("limbo.agent.Path.home", lambda: tmp_path)
     monkeypatch.setattr("limbo.ui.screens.main.CONFIRMATION_TIMEOUT", 0.2)
     cfg = Config()
     cfg.llm.api_key = "test"
@@ -220,7 +242,12 @@ async def test_confirm_timeout_dismisses_dialog(tmp_path, monkeypatch):
             [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
         ]
     )
-    app = LimboApp(workdir=tmp_path, config=cfg, llm_client=fake_llm)
+    app = LimboApp(
+        workdir=tmp_path,
+        config=cfg,
+        llm_client=fake_llm,
+        session_dir=tmp_path / "sessions",
+    )
     async with app.run_test() as pilot:
         await pilot.pause()
         main_screen = pilot.app.screen_stack[-1]
@@ -243,8 +270,7 @@ async def test_confirm_timeout_dismisses_dialog(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_confirm_dialog_resumes_conversation_loop(tmp_path, monkeypatch):
-    monkeypatch.setattr("limbo.agent.Path.home", lambda: tmp_path)
+async def test_confirm_dialog_resumes_conversation_loop(tmp_path):
     cfg = Config()
     cfg.llm.api_key = "test"
     fake_llm = FakeLLMClient(
@@ -253,7 +279,12 @@ async def test_confirm_dialog_resumes_conversation_loop(tmp_path, monkeypatch):
             [TextChunk(text="done")],
         ]
     )
-    app = LimboApp(workdir=tmp_path, config=cfg, llm_client=fake_llm)
+    app = LimboApp(
+        workdir=tmp_path,
+        config=cfg,
+        llm_client=fake_llm,
+        session_dir=tmp_path / "sessions",
+    )
     async with app.run_test() as pilot:
         await pilot.pause()
         main_screen = pilot.app.screen_stack[-1]
@@ -273,8 +304,7 @@ async def test_confirm_dialog_resumes_conversation_loop(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_reject_clears_pending_tool(tmp_path, monkeypatch):
-    monkeypatch.setattr("limbo.agent.Path.home", lambda: tmp_path)
+async def test_reject_clears_pending_tool(tmp_path):
     cfg = Config()
     cfg.llm.api_key = "test"
     fake_llm = FakeLLMClient(
@@ -282,7 +312,12 @@ async def test_reject_clears_pending_tool(tmp_path, monkeypatch):
             [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
         ]
     )
-    app = LimboApp(workdir=tmp_path, config=cfg, llm_client=fake_llm)
+    app = LimboApp(
+        workdir=tmp_path,
+        config=cfg,
+        llm_client=fake_llm,
+        session_dir=tmp_path / "sessions",
+    )
     async with app.run_test() as pilot:
         await pilot.pause()
         main_screen = pilot.app.screen_stack[-1]
@@ -300,7 +335,6 @@ async def test_reject_clears_pending_tool(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_timeout_clears_pending_tool(tmp_path, monkeypatch):
-    monkeypatch.setattr("limbo.agent.Path.home", lambda: tmp_path)
     monkeypatch.setattr("limbo.ui.screens.main.CONFIRMATION_TIMEOUT", 0.2)
     cfg = Config()
     cfg.llm.api_key = "test"
@@ -309,7 +343,12 @@ async def test_timeout_clears_pending_tool(tmp_path, monkeypatch):
             [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
         ]
     )
-    app = LimboApp(workdir=tmp_path, config=cfg, llm_client=fake_llm)
+    app = LimboApp(
+        workdir=tmp_path,
+        config=cfg,
+        llm_client=fake_llm,
+        session_dir=tmp_path / "sessions",
+    )
     async with app.run_test() as pilot:
         await pilot.pause()
         main_screen = pilot.app.screen_stack[-1]
@@ -326,8 +365,7 @@ async def test_timeout_clears_pending_tool(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_input_disabled_during_streaming(tmp_path, monkeypatch):
-    monkeypatch.setattr("limbo.agent.Path.home", lambda: tmp_path)
+async def test_input_disabled_during_streaming(tmp_path):
     cfg = Config()
     cfg.llm.api_key = "test"
 
@@ -339,7 +377,12 @@ async def test_input_disabled_during_streaming(tmp_path, monkeypatch):
             await hold.wait()
             yield TextChunk(text=" world")
 
-    app = LimboApp(workdir=tmp_path, config=cfg, llm_client=HoldingLLMClient())
+    app = LimboApp(
+        workdir=tmp_path,
+        config=cfg,
+        llm_client=HoldingLLMClient(),
+        session_dir=tmp_path / "sessions",
+    )
     async with app.run_test() as pilot:
         await pilot.pause()
         main_screen = pilot.app.screen_stack[-1]
@@ -359,8 +402,7 @@ async def test_input_disabled_during_streaming(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_recent_file_path_is_normalized(tmp_path, monkeypatch):
-    monkeypatch.setattr("limbo.agent.Path.home", lambda: tmp_path)
+async def test_recent_file_path_is_normalized(tmp_path):
     (tmp_path / "subdir").mkdir()
     (tmp_path / "x.txt").write_text("hello")
     cfg = Config()
@@ -370,7 +412,12 @@ async def test_recent_file_path_is_normalized(tmp_path, monkeypatch):
             [ToolCallEvent(id="c1", name="read", arguments={"path": "./subdir/../x.txt"})],
         ]
     )
-    app = LimboApp(workdir=tmp_path, config=cfg, llm_client=fake_llm)
+    app = LimboApp(
+        workdir=tmp_path,
+        config=cfg,
+        llm_client=fake_llm,
+        session_dir=tmp_path / "sessions",
+    )
     async with app.run_test() as pilot:
         await pilot.pause()
         main_screen = pilot.app.screen_stack[-1]
