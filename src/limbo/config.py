@@ -24,8 +24,6 @@ class LLMConfig(BaseModel):
 
 class UIConfig(BaseModel):
     theme: str = "dark"
-    confirm_writes: bool = True
-    confirm_edits: bool = True
 
 
 class SafetyConfig(BaseModel):

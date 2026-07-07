@@ -35,14 +35,6 @@ model = "gpt-4o"
 api_key = "your-api-key"
 ```
 
-Optional UI settings:
-
-```toml
-[ui]
-confirm_writes = true
-confirm_edits = true
-```
-
 Optional tool settings:
 
 ```toml
@@ -72,7 +64,7 @@ File tools (`read`, `edit`, `write`, `grep`, `find`, `ls`) are bounded to the
 current working directory and reject paths that escape it, including via
 symlinks. The boundary check resolves the path before each operation, so a
 symlink swapped between the check and the operation (a time-of-check-to-time-of-use
-race) could escape the workdir. This is a known limitation for the MVP.
+race) could escape the workdir. **This is a known limitation for the MVP.**
 
 Bash is an exception: it is started in the working directory but is **not**
 sandboxed. Commands can `cd ..`, use absolute paths, and read or write outside

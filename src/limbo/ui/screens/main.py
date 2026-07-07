@@ -139,42 +139,19 @@ class MainScreen(Screen[None]):
                     sidebar.add_recent_file(recent)
 
             if result.requires_confirmation:
-                skip = False
-                if event.name == "write" and not self.config.ui.confirm_writes:
-                    skip = True
-                elif event.name == "edit" and not self.config.ui.confirm_edits:
-                    skip = True
-
-                if skip:
-                    apply_result = await self.agent.apply_tool(
-                        event.name, event.arguments
-                    )
-                    if not apply_result.success:
-                        preview.show(
-                            f"{event.name} error",
-                            apply_result.error or "Tool failed.",
-                        )
-                        chat.append_assistant_text(
-                            f"\n[{event.name} failed: {apply_result.error or 'unknown error'}]"
-                        )
-                    else:
-                        preview.show(
-                            f"{event.name} applied",
-                            apply_result.output or "",
-                        )
-                    path = event.arguments.get("path")
-                    if path and apply_result.success:
-                        recent = self._normalized_recent_path(path)
-                        if recent is not None:
-                            sidebar.add_recent_file(recent)
-                    return
-
                 input_widget.disabled = True
                 self._confirmation_event.clear()
                 self._confirmation_result = None
+                body = result.output or ""
+                if event.name == "bash":
+                    body += (
+                        "\n\nWarning: the bash safety filter is heuristic and can"
+                        " be bypassed by subshells or command substitution."
+                        " Review carefully before confirming."
+                    )
                 dialog = ConfirmDialog(
                     title=f"Apply {event.name}?",
-                    body=result.output or "",
+                    body=body,
                 )
                 self.app.push_screen(dialog)
                 try:
