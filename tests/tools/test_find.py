@@ -66,3 +66,25 @@ def test_find_rejects_absolute_path_outside_workdir(workdir):
     result = tool.execute({"pattern": "*.py", "path": "/etc"})
     assert result.success is False
     assert "outside" in result.error.lower()
+
+
+def test_find_does_not_follow_symlink_to_outside_directory(workdir):
+    """A symlinked directory inside the workdir must not expose outside files."""
+    import os
+
+    outside = workdir.parent / f"find_outside_{workdir.name}"
+    outside.mkdir()
+    (outside / "secret.py").write_text("secret")
+
+    link = workdir / "outside_link"
+    try:
+        os.symlink(outside, link)
+    except OSError:
+        pytest.skip("Symlinks not supported on this platform")
+
+    (workdir / "inside.py").write_text("inside")
+    tool = FindTool(workdir=workdir)
+    result = tool.execute({"pattern": "**/*.py"})
+    assert result.success is True
+    assert "inside.py" in result.output
+    assert "secret.py" not in result.output

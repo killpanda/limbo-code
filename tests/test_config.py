@@ -12,6 +12,7 @@ def test_default_config():
     assert cfg.llm.base_url == "https://api.deepseek.com/v1"
     assert cfg.llm.model == "deepseek-chat"
     assert cfg.llm.max_iterations == 10
+    assert cfg.tools.bash_enabled is True
 
 
 def test_load_config_from_file():
@@ -41,4 +42,23 @@ def test_load_config_malformed_file_uses_defaults(tmp_path):
     path.write_text("[unclosed = ")
     with pytest.warns(UserWarning, match="Malformed config file"):
         cfg = load_config(path)
+    assert cfg.llm.model == "deepseek-chat"
+
+
+def test_load_config_tools_bash_enabled(tmp_path):
+    path = tmp_path / "tools.toml"
+    path.write_text("[tools]\nbash_enabled = false\n")
+    cfg = load_config(path)
+    assert cfg.tools.bash_enabled is False
+
+
+def test_load_config_permission_error_uses_defaults(tmp_path):
+    path = tmp_path / "unreadable.toml"
+    path.write_text("[llm]\nmodel = \"gpt-4o\"\n")
+    path.chmod(0o000)
+    try:
+        with pytest.warns(UserWarning, match="Could not read config file"):
+            cfg = load_config(path)
+    finally:
+        path.chmod(0o644)
     assert cfg.llm.model == "deepseek-chat"

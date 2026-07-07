@@ -33,10 +33,11 @@ class ToolRegistry:
             workdir=workdir,
             sensitive_files=self.config.safety.sensitive_files,
         )
-        self._tools["bash"] = BashTool(
-            workdir=workdir,
-            dangerous_patterns=self.config.safety.dangerous_commands,
-        )
+        if self.config.tools.bash_enabled:
+            self._tools["bash"] = BashTool(
+                workdir=workdir,
+                dangerous_patterns=self.config.safety.dangerous_commands,
+            )
 
     def register(self, tool_class: type[BaseTool]) -> None:
         tool = tool_class(workdir=self.workdir)

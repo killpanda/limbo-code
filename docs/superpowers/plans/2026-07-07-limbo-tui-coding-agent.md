@@ -13,7 +13,8 @@
 - Python 3.11+
 - LLM API must be OpenAI-compatible; default configuration targets DeepSeek.
 - All file write operations (`write`, `edit`) require user confirmation before disk changes.
-- All file/shell tools are bounded to the current working directory (no `..`, no symlink escape).
+- All file tools (`read`, `edit`, `write`, `grep`, `find`, `ls`) are bounded to the current working directory (no `..`, no symlink escape).
+- The `bash` tool starts in the working directory but is not sandboxed; users can disable it with `[tools] bash_enabled = false`.
 - Use pytest with TDD; every task ends with passing tests.
 - Configuration lives in `~/.limbo/config.toml`.
 - Session history is saved as JSONL in `~/.limbo/sessions/`.

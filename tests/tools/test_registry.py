@@ -53,3 +53,11 @@ def test_registry_defaults_without_config(workdir):
     read = reg.get("read")
     assert read is not None
     assert ".env" in read.sensitive_files
+
+
+def test_registry_bash_disabled(workdir):
+    cfg = Config()
+    cfg.tools.bash_enabled = False
+    reg = ToolRegistry(workdir=workdir, config=cfg)
+    assert reg.get("bash") is None
+    assert "bash" not in {d["function"]["name"] for d in reg.definitions()}

@@ -37,10 +37,15 @@ class SafetyConfig(BaseModel):
     )
 
 
+class ToolsConfig(BaseModel):
+    bash_enabled: bool = True
+
+
 class Config(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
+    tools: ToolsConfig = Field(default_factory=ToolsConfig)
 
 
 def load_config(path: Path | None = None) -> Config:
@@ -53,6 +58,12 @@ def load_config(path: Path | None = None) -> Config:
     except TomlDecodeError as e:
         warnings.warn(
             f"Malformed config file {path}: {e}. Using defaults.",
+            stacklevel=2,
+        )
+        return Config()
+    except OSError as e:
+        warnings.warn(
+            f"Could not read config file {path}: {e}. Using defaults.",
             stacklevel=2,
         )
         return Config()

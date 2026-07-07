@@ -17,7 +17,8 @@ DEFAULT_TIMEOUT = 30.0
 class BashTool(BaseTool):
     name = "bash"
     description = (
-        "Execute a bash command in the current working directory. Returns stdout and stderr."
+        "Execute a bash command in the current working directory. Returns stdout and stderr. "
+        "WARNING: bash is not sandboxed and can access files outside the workdir."
     )
     parameters = {
         "type": "object",

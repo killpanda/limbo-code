@@ -146,7 +146,13 @@ class FindTool(BaseTool):
 
         results = []
         for p in matches:
-            if not p.is_file():
+            try:
+                resolved = p.resolve()
+            except OSError:
+                continue
+            if not resolved.is_file():
+                continue
+            if not is_within_workdir(resolved, self.workdir):
                 continue
             rel = str(p.relative_to(self.workdir))
             if matcher.is_ignored(rel):
