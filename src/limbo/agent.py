@@ -297,6 +297,14 @@ class Agent:
                         update={"content": result.output or result.error or ""}
                     )
                     break
+            else:
+                self.messages.append(
+                    Message(
+                        role="tool",
+                        content=result.output or result.error or "",
+                        tool_call_id=tc["id"],
+                    )
+                )
             self._pending_placeholders.discard(tc["id"])
 
     async def _conversation_loop(self) -> AsyncIterator[AgentEvent]:
@@ -311,6 +319,24 @@ class Agent:
 
             last = self.messages[-1]
             if not last.tool_calls:
+                break
+
+            # If we've reached the iteration limit on an assistant message that
+            # requests tool calls, cancel the calls instead of executing them.
+            # OpenAI requires a matching ``role="tool"`` result for every
+            # ``tool_call_id`` referenced by the assistant.
+            if self._iteration_count >= self.config.llm.max_iterations:
+                for tc in last.tool_calls:
+                    self.messages.append(
+                        Message(
+                            role="tool",
+                            content="Maximum iteration count reached; tool not executed.",
+                            tool_call_id=tc["id"],
+                        )
+                    )
+                yield ErrorEvent(
+                    message="Maximum iteration count reached; remaining tool calls were cancelled."
+                )
                 break
 
             for idx, tc in enumerate(last.tool_calls):
@@ -438,11 +464,16 @@ class Agent:
         )
 
     def _save_session_sync(self) -> None:
-        self._session_file.parent.mkdir(parents=True, exist_ok=True)
-        mode = "a" if self._session_file.exists() and self._last_saved_index > 0 else "w"
+        self._session_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # If a session file with the same timestamp+pid already exists, append
+        # rather than overwrite so we never lose history on a collision.
+        mode = "a" if self._session_file.exists() else "w"
+        file_existed = self._session_file.exists()
         with self._session_file.open(mode, encoding="utf-8") as f:
             for msg in self.messages[self._last_saved_index :]:
                 f.write(msg.model_dump_json() + "\n")
+        if not file_existed:
+            self._session_file.chmod(0o600)
         self._last_saved_index = len(self.messages)
 
     async def _save_session(self) -> None:

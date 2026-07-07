@@ -582,6 +582,99 @@ async def test_agent_continue_after_confirmation_replaces_placeholder_on_crash(w
 
 
 @pytest.mark.asyncio
+async def test_agent_max_iterations_cancels_tool_calls(workdir):
+    cfg = Config()
+    cfg.llm.max_iterations = 1
+    fake_llm = FakeLLMClient([
+        [ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"})],
+    ])
+    (workdir / "main.py").write_text("x = 1\n")
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    executed = []
+    original_execute = agent.registry.execute
+
+    async def tracking_execute(name, arguments, dry_run=False):
+        executed.append((name, arguments, dry_run))
+        return await original_execute(name, arguments, dry_run)
+
+    agent.registry.execute = tracking_execute
+
+    events = await _collect(agent.run("read main.py"))
+
+    # The tool must not be executed once the iteration limit is reached.
+    assert len(executed) == 0
+
+    assistant = [m for m in agent.messages if m.role == "assistant" and m.tool_calls]
+    assert len(assistant) == 1
+    assert assistant[0].tool_calls[0]["id"] == "c1"
+
+    tool_messages = [m for m in agent.messages if m.role == "tool"]
+    assert len(tool_messages) == 1
+    assert tool_messages[0].tool_call_id == "c1"
+    assert "maximum" in (tool_messages[0].content or "").lower()
+
+    error_events = [e for e in events if isinstance(e, ErrorEvent)]
+    assert len(error_events) == 1
+    assert "maximum" in error_events[0].message.lower()
+
+
+@pytest.mark.asyncio
+async def test_agent_continue_appends_missing_placeholder(workdir):
+    """If a remaining-tool placeholder is missing, a new tool message is appended."""
+    (workdir / "main.py").write_text("x = 1\n")
+    cfg = Config()
+    fake_llm = FakeLLMClient([
+        [
+            ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"}),
+            ToolCallEvent(
+                id="c2", name="write", arguments={"path": "x.txt", "content": "hi"}
+            ),
+            ToolCallEvent(id="c3", name="read", arguments={"path": "x.txt"}),
+        ],
+        [TextChunk(text="done")],
+    ])
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    await _collect(agent.run("multi"))
+    assert agent._pending_tool is not None
+    assert agent._pending_tool["id"] == "c2"
+
+    apply_result = await agent.apply_tool(
+        "write", {"path": "x.txt", "content": "hi"}
+    )
+    assert apply_result.success is True
+
+    # Remove the placeholder message for the remaining tool, but keep its id in
+    # the pending set so the continuation still tries to execute it.
+    agent.messages = [
+        m
+        for m in agent.messages
+        if not (m.role == "tool" and m.tool_call_id == "c3")
+    ]
+    assert "c3" in agent._pending_placeholders
+
+    continuation = await _collect(agent.continue_after_confirmation())
+    assert any(isinstance(e, TextDelta) and e.text == "done" for e in continuation)
+    assert agent._pending_tool is None
+
+    c3_message = next(
+        m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c3"
+    )
+    assert "hi" in (c3_message.content or "")
+
+
+@pytest.mark.asyncio
 async def test_agent_appends_session_on_subsequent_turns(workdir):
     cfg = Config()
     fake_llm = FakeLLMClient([
