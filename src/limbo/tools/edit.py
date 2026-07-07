@@ -6,7 +6,7 @@ import difflib
 from typing import Any
 
 from limbo.models import ToolResult
-from limbo.tools.base import BaseTool, is_within_workdir
+from limbo.tools.base import BaseTool, resolve_path
 
 
 class EditTool(BaseTool):
@@ -35,9 +35,9 @@ class EditTool(BaseTool):
         raw_path = arguments.get("path", "")
         old_text = arguments.get("old_text", "")
         new_text = arguments.get("new_text", "")
-        target = (self.workdir / raw_path).resolve()
-        if not is_within_workdir(target, self.workdir):
-            return ToolResult(success=False, error="Path is outside working directory.")
+        target = resolve_path(raw_path, self.workdir)
+        if isinstance(target, ToolResult):
+            return target
         if not target.exists():
             return ToolResult(success=False, error=f"File not found: {raw_path}")
 

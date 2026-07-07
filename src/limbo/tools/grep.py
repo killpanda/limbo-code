@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from limbo.models import ToolResult
-from limbo.tools.base import BaseTool, is_within_workdir
+from limbo.tools.base import BaseTool, is_within_workdir, resolve_path
 from limbo.tools.find import _GitignoreMatcher
 
 MAX_MATCHES = 100
@@ -55,11 +55,11 @@ class GrepTool(BaseTool):
         context = arguments.get("context", 0)
         limit = arguments.get("limit", MAX_MATCHES)
 
-        target = (self.workdir / path).resolve()
+        target = resolve_path(path, self.workdir)
+        if isinstance(target, ToolResult):
+            return target
         if not target.exists():
             return ToolResult(success=False, error=f"Path not found: {path}")
-        if not is_within_workdir(target, self.workdir):
-            return ToolResult(success=False, error="Path is outside working directory.")
 
         rg = self._find_rg()
         if rg:

@@ -55,3 +55,19 @@ def test_write_rejects_symlink_escape(workdir):
     assert result.success is False
     assert "outside" in result.error.lower()
     assert not outside.exists()
+
+
+def test_write_broken_symlink_to_outside_is_rejected(workdir):
+    """A broken symlink pointing outside the workdir resolves outside and is rejected."""
+    link = workdir / "broken_link"
+    try:
+        link.symlink_to("../outside_write_target.txt")
+    except OSError:
+        pytest.skip("Symlinks not supported on this platform")
+
+    tool = WriteTool(workdir=workdir)
+    result = tool.execute(
+        {"path": "broken_link", "content": "escaped"}, dry_run=False
+    )
+    assert result.success is False
+    assert "outside" in result.error.lower()

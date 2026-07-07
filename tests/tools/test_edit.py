@@ -136,3 +136,19 @@ def test_edit_rejects_symlink_escape(workdir):
     assert result.success is False
     assert "outside" in result.error.lower()
     assert outside.read_text() == "x = 1\n"
+
+
+def test_edit_broken_symlink_returns_invalid_path(workdir):
+    link = workdir / "broken_link.py"
+    try:
+        link.symlink_to("does_not_exist")
+    except OSError:
+        pytest.skip("Symlinks not supported on this platform")
+
+    tool = EditTool(workdir=workdir)
+    result = tool.execute(
+        {"path": "broken_link.py", "old_text": "a", "new_text": "b"},
+        dry_run=False,
+    )
+    assert result.success is False
+    assert "invalid path" in result.error.lower()

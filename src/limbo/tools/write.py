@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from limbo.models import ToolResult
-from limbo.tools.base import BaseTool, is_within_workdir
+from limbo.tools.base import BaseTool, resolve_path
 
 
 class WriteTool(BaseTool):
@@ -23,9 +23,9 @@ class WriteTool(BaseTool):
     def execute(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
         raw_path = arguments.get("path", "")
         content = arguments.get("content", "")
-        target = (self.workdir / raw_path).resolve()
-        if not is_within_workdir(target, self.workdir):
-            return ToolResult(success=False, error="Path is outside working directory.")
+        target = resolve_path(raw_path, self.workdir, strict=False)
+        if isinstance(target, ToolResult):
+            return target
 
         if dry_run:
             return ToolResult(

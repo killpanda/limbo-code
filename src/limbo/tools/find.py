@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from limbo.models import ToolResult
-from limbo.tools.base import BaseTool, is_within_workdir
+from limbo.tools.base import BaseTool, is_within_workdir, resolve_path
 
 MAX_RESULTS = 1000
 MAX_BYTES = 512 * 1024
@@ -135,11 +135,11 @@ class FindTool(BaseTool):
         path = arguments.get("path", ".")
         limit = arguments.get("limit", MAX_RESULTS)
 
-        target = (self.workdir / path).resolve()
+        target = resolve_path(path, self.workdir)
+        if isinstance(target, ToolResult):
+            return target
         if not target.exists():
             return ToolResult(success=False, error=f"Path not found: {path}")
-        if not is_within_workdir(target, self.workdir):
-            return ToolResult(success=False, error="Path is outside working directory.")
 
         try:
             # ``glob`` may traverse directory symlinks before we can filter them;

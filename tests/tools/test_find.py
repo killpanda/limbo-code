@@ -88,3 +88,16 @@ def test_find_does_not_follow_symlink_to_outside_directory(workdir):
     assert result.success is True
     assert "inside.py" in result.output
     assert "secret.py" not in result.output
+
+
+def test_find_broken_symlink_search_path_returns_invalid_path(workdir):
+    link = workdir / "broken_link"
+    try:
+        link.symlink_to("does_not_exist")
+    except OSError:
+        pytest.skip("Symlinks not supported on this platform")
+
+    tool = FindTool(workdir=workdir)
+    result = tool.execute({"pattern": "*.py", "path": "broken_link"})
+    assert result.success is False
+    assert "invalid path" in result.error.lower()

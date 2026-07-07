@@ -36,3 +36,16 @@ def test_ls_rejects_paths_outside_workdir(workdir):
     assert tool.execute({"path": ".."}).success is False
     assert tool.execute({"path": "../"}).success is False
     assert tool.execute({"path": "/tmp"}).success is False
+
+
+def test_ls_broken_symlink_returns_invalid_path(workdir):
+    link = workdir / "broken_link"
+    try:
+        link.symlink_to("does_not_exist")
+    except OSError:
+        pytest.skip("Symlinks not supported on this platform")
+
+    tool = LsTool(workdir=workdir)
+    result = tool.execute({"path": "broken_link"})
+    assert result.success is False
+    assert "invalid path" in result.error.lower()

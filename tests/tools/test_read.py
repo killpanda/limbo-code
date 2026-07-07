@@ -102,3 +102,45 @@ def test_read_does_not_follow_symlink_to_outside_file(workdir):
     result = tool.execute({"path": "outside_link"})
     assert result.success is False
     assert "outside working directory" in result.error.lower()
+
+
+def test_read_broken_symlink_returns_invalid_path(workdir):
+    """A broken symlink causes resolve() to raise OSError; the tool must handle it."""
+    import os
+
+    link = workdir / "broken_link"
+    try:
+        os.symlink("does_not_exist", link)
+    except OSError:
+        pytest.skip("Symlinks not supported on this platform")
+
+    tool = ReadTool(workdir=workdir)
+    result = tool.execute({"path": "broken_link"})
+    assert result.success is False
+    assert "invalid path" in result.error.lower()
+
+
+def test_read_symlink_loop_returns_invalid_path(workdir):
+    """A symlink loop causes resolve() to raise RuntimeError; the tool must handle it."""
+    import os
+
+    link = workdir / "loop"
+    try:
+        os.symlink("loop", link)
+    except OSError:
+        pytest.skip("Symlinks not supported on this platform")
+
+    tool = ReadTool(workdir=workdir)
+    result = tool.execute({"path": "loop"})
+    assert result.success is False
+    assert "invalid path" in result.error.lower()
+
+
+def test_read_truncates_output_by_byte_budget(workdir):
+    """Multi-byte characters count against the byte budget, not character count."""
+    (workdir / "big.txt").write_text("é" * (600 * 1024))
+    tool = ReadTool(workdir=workdir)
+    result = tool.execute({"path": "big.txt"})
+    assert result.success is True
+    assert len(result.output.encode("utf-8")) <= 512 * 1024 + 100
+    assert "truncated" in result.output.lower()
