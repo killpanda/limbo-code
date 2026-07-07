@@ -390,7 +390,8 @@ class Agent:
 
         Validates that ``name`` and ``arguments`` match the stored pending tool
         call. Returns an error result and leaves the pending state untouched
-        when they do not match.
+        when they do not match or when execution fails, so the user can retry
+        after transient failures.
         """
         if self._pending_tool is None:
             return ToolResult(success=False, error="No tool is pending confirmation.")
@@ -413,7 +414,8 @@ class Agent:
 
         # Replace the placeholder tool result installed when the pending call
         # was first encountered, so the message history stays valid and shows
-        # the actual outcome.
+        # the actual outcome. Only clear the pending state on success so a
+        # transient failure can be retried.
         for idx, msg in enumerate(self.messages):
             if (
                 msg.role == "tool"
@@ -432,8 +434,8 @@ class Agent:
                 )
             )
         self._pending_placeholders.discard(self._pending_tool["id"])
-        self._pending_tool = None
         if result.success:
+            self._pending_tool = None
             self._confirmation_applied = True
         return result
 

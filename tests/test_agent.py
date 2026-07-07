@@ -179,13 +179,20 @@ async def test_agent_apply_tool_catches_execution_failure(workdir):
     result = await agent.apply_tool("write", {"path": "x.txt", "content": "hi"})
     assert result.success is False
     assert "wet run failed" in result.error
-    assert agent._pending_tool is None
+    assert agent._pending_tool is not None
 
     c1_message = next(
         m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c1"
     )
     assert "wet run failed" in (c1_message.content or "")
     assert agent._confirmation_applied is False
+
+    # A retry after the transient failure should still be able to apply.
+    agent.registry.execute = original_execute
+    retry = await agent.apply_tool("write", {"path": "x.txt", "content": "hi"})
+    assert retry.success is True
+    assert agent._pending_tool is None
+    assert agent._confirmation_applied is True
 
 
 @pytest.mark.asyncio
