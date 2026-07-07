@@ -33,7 +33,7 @@ class SafetyConfig(BaseModel):
         default_factory=lambda: ["rm", "git reset --hard", ">"]
     )
     sensitive_files: list[str] = Field(
-        default_factory=lambda: [".env", "id_rsa", "id_ed25519"]
+        default_factory=lambda: [".env", "id_rsa", "id_ed25519", ".ssh"]
     )
 
 

@@ -49,6 +49,13 @@ class BashTool(BaseTool):
                 error=f"Command blocked by safety policy: {command}",
             )
 
+        if dry_run:
+            return ToolResult(
+                success=True,
+                output=f"Will execute on approval:\n$ {command}",
+                requires_confirmation=True,
+            )
+
         shell = shutil.which("bash") or "/bin/bash"
 
         try:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
@@ -37,16 +39,16 @@ class ConfirmDialog(ModalScreen[None]):
     }
     """
 
-    def __init__(self, title: str, body: str, *args, **kwargs):
+    def __init__(self, title: str, body: str, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.title_text = title
         self.body_text = body
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Label(self.title_text)
+            yield Label(self.title_text, markup=False)
             with VerticalScroll(id="diff-body"):
-                yield Label(self.body_text)
+                yield Label(self.body_text, markup=False)
             with Horizontal():
                 yield Button("Apply", variant="success", id="apply")
                 yield Button("Reject", variant="error", id="reject")

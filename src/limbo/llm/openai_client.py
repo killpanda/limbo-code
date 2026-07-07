@@ -90,9 +90,8 @@ class OpenAICompatibleClient:
 
 def _message_to_openai(message: Message) -> dict[str, Any]:
     m: dict[str, Any] = {"role": message.role}
-    # OpenAI requires `content` on role="tool" messages, even when empty.
-    if message.content is not None or message.tool_call_id is not None:
-        m["content"] = message.content or ""
+    # OpenAI requires `content` on assistant and tool messages, even when empty.
+    m["content"] = message.content or ""
     if message.tool_calls:
         # The OpenAI SDK requires function.arguments to be a JSON string.
         # Internal messages keep arguments as a dict for validation; serialize

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from textual.containers import VerticalScroll
 from textual.widgets import Static
 
@@ -24,7 +26,7 @@ class ChatWidget(VerticalScroll):
     }
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.messages: list[Static] = []
 
@@ -41,6 +43,8 @@ class ChatWidget(VerticalScroll):
     def append_assistant_text(self, text: str) -> None:
         if self.messages and "assistant-message" in self.messages[-1].classes:
             current = self.messages[-1]
+            # The Static was created with markup=False, so update() will continue
+            # to render the accumulated text literally without re-parsing markup.
             current.update(str(current.content) + text)
         else:
             self.add_assistant_text(text)
