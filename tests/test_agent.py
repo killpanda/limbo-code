@@ -7,7 +7,13 @@ from pathlib import Path
 
 import pytest
 
-from limbo.agent import Agent, ErrorEvent
+from limbo.agent import (
+    Agent,
+    ErrorEvent,
+    TextDelta,
+    ToolCallRequest,
+    ToolResultEvent,
+)
 from limbo.config import Config
 from limbo.models import TextChunk, ToolCallEvent
 
@@ -44,7 +50,7 @@ async def test_agent_text_only_response(workdir):
     )
 
     events = await _collect(agent.run("hi"))
-    assert "".join([e.text for e in events if hasattr(e, "text")]) == "hello"
+    assert "".join([e.text for e in events if isinstance(e, TextDelta)]) == "hello"
 
 
 @pytest.mark.asyncio
@@ -63,8 +69,8 @@ async def test_agent_calls_tool_and_loops(workdir):
     )
 
     events = await _collect(agent.run("read main.py"))
-    assert any(hasattr(e, "name") and e.name == "read" for e in events)
-    assert any(hasattr(e, "text") and e.text == "done" for e in events)
+    assert any(isinstance(e, ToolCallRequest) and e.name == "read" for e in events)
+    assert any(isinstance(e, TextDelta) and e.text == "done" for e in events)
 
 
 @pytest.mark.asyncio
@@ -81,7 +87,7 @@ async def test_agent_stops_on_confirmation(workdir):
     )
 
     events = await _collect(agent.run("write x.txt"))
-    result_events = [e for e in events if hasattr(e, "result")]
+    result_events = [e for e in events if isinstance(e, ToolResultEvent)]
     assert len(result_events) == 1
     assert result_events[0].result.requires_confirmation is True
     assert agent._pending_tool is not None
@@ -161,7 +167,7 @@ async def test_agent_continue_after_confirmation_resumes_loop(workdir):
     )
 
     events = await _collect(agent.run("write x.txt"))
-    result_events = [e for e in events if hasattr(e, "result")]
+    result_events = [e for e in events if isinstance(e, ToolResultEvent)]
     assert len(result_events) == 1
     assert result_events[0].result.requires_confirmation is True
 
@@ -170,7 +176,7 @@ async def test_agent_continue_after_confirmation_resumes_loop(workdir):
     assert (workdir / "x.txt").read_text() == "hi"
 
     continuation = await _collect(agent.continue_after_confirmation())
-    assert any(hasattr(e, "text") and e.text == "done" for e in continuation)
+    assert any(isinstance(e, TextDelta) and e.text == "done" for e in continuation)
     assert agent._pending_tool is None
     assert agent._confirmation_applied is False
 
@@ -213,7 +219,7 @@ async def test_agent_save_session_failure_is_ignored(workdir):
     with pytest.warns(UserWarning, match="Failed to save session"):
         events = await _collect(agent.run("hi"))
 
-    assert any(hasattr(e, "text") and e.text == "hello" for e in events)
+    assert any(isinstance(e, TextDelta) and e.text == "hello" for e in events)
 
 
 @pytest.mark.asyncio
@@ -256,11 +262,11 @@ async def test_agent_iteration_count_resets_per_turn(workdir):
 
     events = await _collect(agent.run("turn one"))
     assert agent._iteration_count == 1
-    assert any(hasattr(e, "name") and e.name == "read" for e in events)
+    assert any(isinstance(e, ToolCallRequest) and e.name == "read" for e in events)
 
     events = await _collect(agent.run("turn two"))
     assert agent._iteration_count == 1
-    assert any(hasattr(e, "text") and e.text == "second turn" for e in events)
+    assert any(isinstance(e, TextDelta) and e.text == "second turn" for e in events)
 
 
 @pytest.mark.asyncio
@@ -305,7 +311,7 @@ async def test_agent_new_turn_clears_stale_pending_tool(workdir):
 
     events = await _collect(agent.run("new turn"))
     assert agent._pending_tool is None
-    assert any(hasattr(e, "text") and e.text == "fresh turn" for e in events)
+    assert any(isinstance(e, TextDelta) and e.text == "fresh turn" for e in events)
     tool_messages = [m for m in agent.messages if m.role == "tool"]
     assert any(
         m.tool_call_id == "c1" and "superseded" in (m.content or "").lower()
@@ -333,7 +339,7 @@ async def test_agent_multi_tool_confirmation_appends_placeholders(workdir):
 
     events = await _collect(agent.run("multi"))
     # The second tool (write) requires confirmation, so the loop stops there.
-    result_events = [e for e in events if hasattr(e, "result")]
+    result_events = [e for e in events if isinstance(e, ToolResultEvent)]
     assert len(result_events) == 2
     assert result_events[1].result.requires_confirmation is True
     assert agent._pending_tool is not None
@@ -389,7 +395,7 @@ async def test_agent_continue_executes_remaining_tools_after_confirmation(workdi
     )
 
     events = await _collect(agent.run("multi"))
-    result_events = [e for e in events if hasattr(e, "result")]
+    result_events = [e for e in events if isinstance(e, ToolResultEvent)]
     assert len(result_events) == 2  # c1 read, c2 write dry-run
     assert agent._pending_tool is not None
     assert agent._pending_tool["id"] == "c2"
@@ -400,11 +406,11 @@ async def test_agent_continue_executes_remaining_tools_after_confirmation(workdi
     assert apply_result.success is True
 
     continuation = await _collect(agent.continue_after_confirmation())
-    result_events = [e for e in continuation if hasattr(e, "result")]
+    result_events = [e for e in continuation if isinstance(e, ToolResultEvent)]
     assert len(result_events) == 1
     assert result_events[0].name == "read"
     assert result_events[0].result.success is True
-    assert any(hasattr(e, "text") and e.text == "done" for e in continuation)
+    assert any(isinstance(e, TextDelta) and e.text == "done" for e in continuation)
     assert agent._pending_tool is None
 
     # No placeholder messages should remain.
@@ -449,7 +455,7 @@ async def test_agent_continue_stops_when_remaining_tool_requires_confirmation(wo
     assert apply_result.success is True
 
     continuation = await _collect(agent.continue_after_confirmation())
-    result_events = [e for e in continuation if hasattr(e, "result")]
+    result_events = [e for e in continuation if isinstance(e, ToolResultEvent)]
     assert len(result_events) == 1
     assert result_events[0].result.requires_confirmation is True
     assert agent._pending_tool is not None
@@ -507,3 +513,33 @@ async def test_agent_appends_session_on_subsequent_turns(workdir):
     assert roles.count("system") == 1
     assert roles.count("user") == 2
     assert "assistant" in roles
+
+
+@pytest.mark.asyncio
+async def test_agent_does_not_mutate_stored_messages(workdir):
+    cfg = Config()
+    fake_llm = FakeLLMClient([
+        [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
+    ])
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    events = await _collect(agent.run("write x.txt"))
+    assert any(isinstance(e, ToolResultEvent) and e.result.requires_confirmation for e in events)
+    placeholder = next(
+        m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c1"
+    )
+    placeholder_id = id(placeholder)
+
+    result = await agent.apply_tool("write", {"path": "x.txt", "content": "hi"})
+    assert result.success is True
+
+    updated = next(
+        m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c1"
+    )
+    assert "wrote" in (updated.content or "").lower()
+    assert id(updated) != placeholder_id, "Agent should replace the message, not mutate it in place"

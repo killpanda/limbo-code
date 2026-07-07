@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import warnings
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -68,7 +69,7 @@ class Agent:
 
         self._session_dir = session_dir or Path.home() / ".limbo" / "sessions"
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
-        self._session_file = self._session_dir / f"{timestamp}.jsonl"
+        self._session_file = self._session_dir / f"{timestamp}-{os.getpid()}.jsonl"
 
     @property
     def confirmation_applied(self) -> bool:
@@ -137,9 +138,11 @@ class Agent:
                         if tc["id"] == pending_id
                         else "Action not executed: earlier tool was rejected."
                     )
-                    for existing in self.messages:
+                    for idx, existing in enumerate(self.messages):
                         if existing.role == "tool" and existing.tool_call_id == tc["id"]:
-                            existing.content = content
+                            self.messages[idx] = existing.model_copy(
+                                update={"content": content}
+                            )
                             break
                     else:
                         self.messages.append(
@@ -154,9 +157,9 @@ class Agent:
                 return
 
         # Fallback when the owning assistant message cannot be located.
-        for msg in self.messages:
+        for idx, msg in enumerate(self.messages):
             if msg.role == "tool" and msg.tool_call_id == pending_id:
-                msg.content = reason
+                self.messages[idx] = msg.model_copy(update={"content": reason})
                 break
         else:
             self.messages.append(
@@ -255,9 +258,11 @@ class Agent:
             if result.requires_confirmation:
                 self._pending_tool = tc
                 return
-            for msg in self.messages:
+            for idx, msg in enumerate(self.messages):
                 if msg.role == "tool" and msg.tool_call_id == tc["id"]:
-                    msg.content = result.output or result.error or ""
+                    self.messages[idx] = msg.model_copy(
+                        update={"content": result.output or result.error or ""}
+                    )
                     break
             self._pending_placeholders.discard(tc["id"])
 
@@ -341,12 +346,14 @@ class Agent:
         # Replace the placeholder tool result installed when the pending call
         # was first encountered, so the message history stays valid and shows
         # the actual outcome.
-        for msg in self.messages:
+        for idx, msg in enumerate(self.messages):
             if (
                 msg.role == "tool"
                 and msg.tool_call_id == self._pending_tool["id"]
             ):
-                msg.content = result.output or result.error or ""
+                self.messages[idx] = msg.model_copy(
+                    update={"content": result.output or result.error or ""}
+                )
                 break
         else:
             self.messages.append(
