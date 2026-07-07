@@ -47,6 +47,8 @@ class OpenAICompatibleClient:
 
         active_calls: dict[int, dict[str, Any]] = {}
         async for chunk in stream:
+            if not chunk.choices:
+                continue
             delta = chunk.choices[0].delta
             if delta.content:
                 yield TextChunk(text=delta.content)
@@ -71,10 +73,14 @@ class OpenAICompatibleClient:
 
         for idx in sorted(active_calls):
             call = active_calls[idx]
+            raw_arguments = call["arguments"]
             try:
-                args = json.loads(call["arguments"]) if call["arguments"] else {}
-            except json.JSONDecodeError:
-                args = {}
+                args = json.loads(raw_arguments) if raw_arguments else {}
+            except json.JSONDecodeError as e:
+                args = {
+                    "raw_arguments": raw_arguments,
+                    "parse_error": str(e),
+                }
             yield ToolCallEvent(
                 id=call["id"] or f"call_{idx}",
                 name=call["name"],
