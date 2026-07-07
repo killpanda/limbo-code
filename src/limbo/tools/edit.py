@@ -12,7 +12,8 @@ from limbo.tools.base import BaseTool, is_within_workdir
 class EditTool(BaseTool):
     name = "edit"
     description = (
-        "Make surgical edits to a file by replacing exact text. old_text must match exactly."
+        "Make surgical edits to a file by replacing exact text. old_text must match exactly. "
+        "The displayed diff may not clearly indicate trailing-newline changes."
     )
     parameters = {
         "type": "object",

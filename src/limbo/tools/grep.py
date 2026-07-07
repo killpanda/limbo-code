@@ -28,7 +28,10 @@ class GrepTool(BaseTool):
         "properties": {
             "pattern": {"type": "string", "description": "Search pattern"},
             "path": {"type": "string", "description": "Directory or file to search"},
-            "glob": {"type": "string", "description": "Filter files by glob"},
+            "glob": {
+                "type": "string",
+                "description": "Filter files by glob (Python fallback does not support `**`)",
+            },
             "ignore_case": {"type": "boolean", "description": "Case-insensitive"},
             "fixed_string": {"type": "boolean", "description": "Literal string"},
             "context": {"type": "integer", "description": "Lines before/after match"},
