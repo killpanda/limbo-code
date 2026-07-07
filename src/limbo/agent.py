@@ -179,6 +179,11 @@ class Agent:
     async def continue_after_confirmation(self) -> AsyncIterator[AgentEvent]:
         """Resume the conversation loop after a confirmed tool was applied.
 
+        Before returning to the LLM, any remaining tool calls from the
+        original assistant turn are executed and their placeholder results are
+        replaced with real results. If a remaining tool requires confirmation,
+        the loop stops and yields its confirmation event.
+
         Yields the remaining assistant responses and any follow-up tool events
         until the assistant produces a final response without pending tool calls.
         """
@@ -193,10 +198,50 @@ class Agent:
         self._confirmation_applied = False
 
         try:
+            async for event in self._execute_remaining_tools():
+                yield event
             async for event in self._conversation_loop():
                 yield event
         finally:
             await self._save_session()
+
+    async def _execute_remaining_tools(self) -> AsyncIterator[AgentEvent]:
+        """Execute remaining placeholder tool calls from the last assistant turn.
+
+        The assistant message already references every tool call in a multi-tool
+        turn, but the calls after a confirmation pause only have placeholder
+        results. Run those calls, replacing placeholders with real outputs, and
+        stop if another call requires confirmation.
+        """
+        assistant = None
+        for msg in reversed(self.messages):
+            if msg.role == "assistant" and msg.tool_calls:
+                assistant = msg
+                break
+        if assistant is None or assistant.tool_calls is None:
+            return
+
+        placeholder = "Action pending user confirmation."
+        for tc in assistant.tool_calls:
+            tool_msg = None
+            for msg in reversed(self.messages):
+                if msg.role == "tool" and msg.tool_call_id == tc["id"]:
+                    tool_msg = msg
+                    break
+            if tool_msg is None or tool_msg.content != placeholder:
+                continue
+
+            name = tc["function"]["name"]
+            arguments = tc["function"]["arguments"]
+            yield ToolCallRequest(id=tc["id"], name=name, arguments=arguments)
+            result = await self.registry.execute(name, arguments, dry_run=True)
+            yield ToolResultEvent(
+                id=tc["id"], name=name, result=result, arguments=arguments
+            )
+            if result.requires_confirmation:
+                self._pending_tool = tc
+                return
+            tool_msg.content = result.output or result.error or ""
 
     async def _conversation_loop(self) -> AsyncIterator[AgentEvent]:
         while self._iteration_count < self.config.llm.max_iterations:
@@ -219,16 +264,14 @@ class Agent:
                 result = await self.registry.execute(name, arguments, dry_run=True)
                 if result.requires_confirmation:
                     self._pending_tool = tc
-                yield ToolResultEvent(
-                    id=tc["id"], name=name, result=result, arguments=arguments
-                )
-                if result.requires_confirmation:
                     # The assistant message already references every tool call in
                     # this turn, but only the calls before this one have results.
                     # Append placeholders for this pending call and the remaining
                     # calls so the message history stays valid for OpenAI. The
                     # pending call's placeholder is replaced by the real result
-                    # when the user confirms it.
+                    # when the user confirms it. Placeholders are installed
+                    # before yielding the ToolResultEvent so confirmation handlers
+                    # can update them immediately.
                     for pending_or_remaining in last.tool_calls[idx:]:
                         self.messages.append(
                             Message(
@@ -237,6 +280,10 @@ class Agent:
                                 tool_call_id=pending_or_remaining["id"],
                             )
                         )
+                yield ToolResultEvent(
+                    id=tc["id"], name=name, result=result, arguments=arguments
+                )
+                if result.requires_confirmation:
                     return
                 self.messages.append(
                     Message(
