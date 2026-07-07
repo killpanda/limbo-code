@@ -33,6 +33,15 @@ def test_bash_failure_returns_non_zero(workdir):
     result = tool.execute({"command": "exit 42"})
     assert result.success is False
     assert "exit code 42" in result.error.lower()
+    assert "exit code 42" in result.output.lower()
+
+
+def test_bash_failure_includes_exit_code_with_output(workdir):
+    tool = BashTool(workdir=workdir)
+    result = tool.execute({"command": "echo partial && exit 7"})
+    assert result.success is False
+    assert "exit code 7" in result.output.lower()
+    assert "partial" in result.output
 
 
 def test_bash_timeout(workdir):

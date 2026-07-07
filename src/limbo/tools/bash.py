@@ -80,10 +80,12 @@ class BashTool(BaseTool):
             output += ("\n" if output else "") + f"[stderr]\n{proc.stderr}"
 
         if proc.returncode != 0:
+            exit_msg = f"Command failed with exit code {proc.returncode}."
+            output = f"{exit_msg}\n{output}" if output else exit_msg
             return ToolResult(
                 success=False,
-                output=output or None,
-                error=f"Command failed with exit code {proc.returncode}.",
+                output=output,
+                error=exit_msg,
             )
 
         return ToolResult(success=True, output=output or "")
