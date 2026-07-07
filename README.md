@@ -40,9 +40,12 @@ limbo --workdir /path/to/project
 Limbo asks for confirmation before applying destructive or workspace-modifying
 tool calls (writes and edits by default). Bash commands are filtered with a
 simple heuristic, but that filter can be bypassed by subshells, command
-substitution, variable indirection, and similar shell constructs. Review every
-command before confirming it, and only run Limbo in repositories you can afford
-to modify or lose.
+substitution, variable indirection, and similar shell constructs.
+
+Bash is started in the working directory you provide, but it is **not**
+sandboxed: commands can `cd ..`, use absolute paths, and read or write outside
+the workdir. Only run Limbo with trusted commands and in repositories you can
+afford to modify or lose. Review every command before confirming it.
 
 ## Development
 
