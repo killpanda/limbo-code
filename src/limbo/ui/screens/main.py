@@ -6,10 +6,10 @@ from pathlib import Path
 
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
-from textual.widgets import Static
-
 from limbo.ui.widgets.chat import ChatWidget
+from limbo.ui.widgets.file_preview import FilePreviewWidget
 from limbo.ui.widgets.input import InputWidget
+from limbo.ui.widgets.sidebar import SidebarWidget
 
 
 class MainScreen(Screen[None]):
@@ -22,9 +22,9 @@ class MainScreen(Screen[None]):
     def compose(self):
         with Horizontal():
             with Vertical(id="sidebar"):
-                yield Static("Sidebar", id="sidebar-title")
+                yield SidebarWidget(id="sidebar")
             with Vertical(id="chat-container"):
                 yield ChatWidget(id="chat")
                 yield InputWidget(id="input")
             with Vertical(id="preview-container"):
-                yield Static("Preview", id="preview-title")
+                yield FilePreviewWidget(id="preview")
