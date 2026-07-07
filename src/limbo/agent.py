@@ -476,10 +476,13 @@ class Agent:
         # Rewrite the whole session on every save. This guarantees that in-place
         # updates to placeholder messages (e.g. after a confirmation) are
         # reflected on disk, and it is still cheap for MVP-sized conversations.
+        # Write to a temp file and atomically replace to avoid truncation on crash.
+        tmp_file = self._session_file.with_suffix(".tmp")
         file_existed = self._session_file.exists()
-        with self._session_file.open("w", encoding="utf-8") as f:
+        with tmp_file.open("w", encoding="utf-8") as f:
             for msg in self.messages:
                 f.write(msg.model_dump_json() + "\n")
+        os.replace(tmp_file, self._session_file)
         if not file_existed:
             self._session_file.chmod(0o600)
 

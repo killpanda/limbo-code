@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -805,3 +806,36 @@ async def test_agent_does_not_mutate_stored_messages(workdir):
     )
     assert "wrote" in (updated.content or "").lower()
     assert id(updated) != placeholder_id, "Agent should replace the message, not mutate it in place"
+
+
+@pytest.mark.asyncio
+async def test_agent_save_session_is_atomic(workdir, monkeypatch):
+    """Session writes must use a temp file and atomic replace."""
+    cfg = Config()
+    fake_llm = FakeLLMClient([[TextChunk(text="hello")]])
+    session_dir = workdir / "sessions"
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=session_dir,
+    )
+
+    replaced: list[tuple[Path, Path]] = []
+    original_replace = os.replace
+
+    def tracking_replace(src: str | Path, dst: str | Path) -> None:
+        replaced.append((Path(src), Path(dst)))
+        original_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", tracking_replace)
+
+    await _collect(agent.run("hi"))
+
+    assert len(replaced) == 1
+    src, dst = replaced[0]
+    assert src.suffix == ".tmp"
+    assert dst == agent._session_file
+    # The temp file should not be left behind after a successful save.
+    assert not src.exists()
+    assert dst.exists()
