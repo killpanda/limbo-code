@@ -23,7 +23,7 @@ class LLMConfig(BaseModel):
 
 
 class UIConfig(BaseModel):
-    theme: str = "dark"
+    pass
 
 
 class SafetyConfig(BaseModel):

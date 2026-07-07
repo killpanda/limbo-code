@@ -14,6 +14,7 @@ from limbo.agent import (
     AgentEvent,
     ErrorEvent,
     TextDelta,
+    ToolCallRequest,
     ToolResultEvent,
 )
 from limbo.config import Config
@@ -116,6 +117,8 @@ class MainScreen(Screen[None]):
             chat.append_assistant_text(event.text)
         elif isinstance(event, ErrorEvent):
             chat.append_assistant_text(event.message)
+        elif isinstance(event, ToolCallRequest):
+            sidebar.set_status(f"Calling {event.name}...")
         elif isinstance(event, ToolResultEvent):
             result = event.result
             sidebar.set_status(f"Tool: {event.name}")
