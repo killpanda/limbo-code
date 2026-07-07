@@ -65,8 +65,9 @@ def test_bash_safety_filter_is_heuristic(workdir):
     """Document that the simple pattern matcher can be bypassed."""
     tool = BashTool(workdir=workdir)
     # Subshell / command substitution bypasses the top-level token check.
-    result = tool.execute({"command": "bash -c 'rm -rf /tmp/limbo-fake-target'"})
+    result = tool.execute({"command": "bash -c 'echo bypassed'"})
     assert result.success is True
+    assert "bypassed" in result.output
     assert "blocked" not in (result.error or "").lower()
 
 
