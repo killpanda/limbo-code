@@ -43,6 +43,47 @@ async def test_input_submits_event():
 
 
 @pytest.mark.asyncio
+async def test_input_submits_on_enter_key():
+    submitted = []
+
+    class TestApp(App[None]):
+        def compose(self):
+            yield InputWidget(id="input")
+
+        def on_user_submitted(self, event: UserSubmitted) -> None:
+            submitted.append(event)
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(InputWidget)
+        widget.focus()
+        widget.text = "hello"
+        await pilot.press("enter")
+        await pilot.pause()
+
+    assert len(submitted) == 1
+    assert submitted[0].message == "hello"
+
+
+@pytest.mark.asyncio
+async def test_input_shift_enter_inserts_newline():
+    class TestApp(App[None]):
+        def compose(self):
+            yield InputWidget(id="input")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(InputWidget)
+        widget.focus()
+        widget.text = "hello"
+        widget.action_cursor_line_end()
+        await pilot.press("shift+enter")
+        await pilot.pause()
+
+    assert widget.text == "hello\n"
+
+
+@pytest.mark.asyncio
 async def test_file_preview_escapes_markup():
     class TestApp(App[None]):
         def compose(self):
