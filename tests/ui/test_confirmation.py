@@ -396,3 +396,51 @@ async def test_recent_file_path_is_normalized(tmp_path):
         sidebar = main_screen.query_one("#sidebar", SidebarWidget)
         assert "x.txt" in sidebar._recent_files
         assert "subdir/../x.txt" not in sidebar._recent_files
+
+
+@pytest.mark.asyncio
+async def test_multi_confirmation_resumes_without_extra_user_message(tmp_path):
+    """A turn with two confirmation-required tools should continue after both."""
+    cfg = Config()
+    cfg.llm.api_key = "test"
+    fake_llm = FakeLLMClient(
+        [
+            [
+                ToolCallEvent(id="c1", name="write", arguments={"path": "a.txt", "content": "a"}),
+                ToolCallEvent(id="c2", name="write", arguments={"path": "b.txt", "content": "b"}),
+            ],
+            [TextChunk(text="done")],
+        ]
+    )
+    app = LimboApp(
+        workdir=tmp_path,
+        config=cfg,
+        llm_client=fake_llm,
+        session_dir=tmp_path / "sessions",
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        main_screen = pilot.app.screen_stack[-1]
+        assert isinstance(main_screen, MainScreen)
+
+        main_screen.run_worker(main_screen._handle_turn("write a and b"))
+        await pilot.pause()
+
+        # First confirmation dialog should be visible.
+        assert any(isinstance(s, ConfirmDialog) for s in pilot.app.screen_stack)
+        await pilot.click("#apply")
+        await pilot.pause()
+        await pilot.pause()
+
+        # Second confirmation dialog should appear automatically.
+        assert any(isinstance(s, ConfirmDialog) for s in pilot.app.screen_stack)
+        await pilot.click("#apply")
+        await pilot.pause()
+        await pilot.pause()
+
+        # Both files should be written and the follow-up response shown.
+        assert (tmp_path / "a.txt").read_text() == "a"
+        assert (tmp_path / "b.txt").read_text() == "b"
+        chat = main_screen.query_one("#chat", ChatWidget)
+        rendered = " ".join(str(m.content) for m in chat.messages)
+        assert "done" in rendered

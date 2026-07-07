@@ -285,11 +285,12 @@ class Agent:
                     assistant, start_idx, tc["id"], error_message
                 )
                 return
+            if result.requires_confirmation:
+                self._pending_tool = tc
             yield ToolResultEvent(
                 id=tc["id"], name=name, result=result, arguments=arguments
             )
             if result.requires_confirmation:
-                self._pending_tool = tc
                 return
             for idx, msg in enumerate(self.messages):
                 if msg.role == "tool" and msg.tool_call_id == tc["id"]:
@@ -465,12 +466,12 @@ class Agent:
 
     def _save_session_sync(self) -> None:
         self._session_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-        # If a session file with the same timestamp+pid already exists, append
-        # rather than overwrite so we never lose history on a collision.
-        mode = "a" if self._session_file.exists() else "w"
+        # Rewrite the whole session on every save. This guarantees that in-place
+        # updates to placeholder messages (e.g. after a confirmation) are
+        # reflected on disk, and it is still cheap for MVP-sized conversations.
         file_existed = self._session_file.exists()
-        with self._session_file.open(mode, encoding="utf-8") as f:
-            for msg in self.messages[self._last_saved_index :]:
+        with self._session_file.open("w", encoding="utf-8") as f:
+            for msg in self.messages:
                 f.write(msg.model_dump_json() + "\n")
         if not file_existed:
             self._session_file.chmod(0o600)

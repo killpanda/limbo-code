@@ -675,7 +675,7 @@ async def test_agent_continue_appends_missing_placeholder(workdir):
 
 
 @pytest.mark.asyncio
-async def test_agent_appends_session_on_subsequent_turns(workdir):
+async def test_agent_rewrites_session_on_subsequent_turns(workdir):
     cfg = Config()
     fake_llm = FakeLLMClient([
         [TextChunk(text="first")],
@@ -699,6 +699,39 @@ async def test_agent_appends_session_on_subsequent_turns(workdir):
     assert roles.count("system") == 1
     assert roles.count("user") == 2
     assert "assistant" in roles
+
+
+@pytest.mark.asyncio
+async def test_agent_session_rewrite_replaces_placeholder(workdir):
+    """Placeholder tool results updated in-place must be reflected on disk."""
+    cfg = Config()
+    fake_llm = FakeLLMClient([
+        [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
+    ])
+    session_dir = workdir / "sessions"
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=session_dir,
+    )
+
+    await _collect(agent.run("write x.txt"))
+    session_file = next(iter(session_dir.iterdir()))
+    lines_before = session_file.read_text().strip().splitlines()
+    placeholder_line = next(
+        line for line in lines_before if json.loads(line).get("tool_call_id") == "c1"
+    )
+    assert "pending" in placeholder_line.lower()
+
+    await agent.apply_tool("write", {"path": "x.txt", "content": "hi"})
+    await agent._save_session()
+    lines_after = session_file.read_text().strip().splitlines()
+    updated_line = next(
+        line for line in lines_after if json.loads(line).get("tool_call_id") == "c1"
+    )
+    assert "pending" not in updated_line.lower()
+    assert "wrote" in updated_line.lower()
 
 
 @pytest.mark.asyncio
