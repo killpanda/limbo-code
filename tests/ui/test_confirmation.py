@@ -10,6 +10,7 @@ from limbo.ui.app import LimboApp
 from limbo.ui.screens.main import MainScreen
 from limbo.ui.widgets.chat import ChatWidget
 from limbo.ui.widgets.confirm import ConfirmDialog
+from limbo.ui.widgets.file_preview import FilePreviewWidget
 from limbo.ui.widgets.input import InputWidget
 from limbo.ui.widgets.sidebar import SidebarWidget
 
@@ -177,6 +178,37 @@ async def test_error_event_is_shown(tmp_path):
         rendered = " ".join(str(m.content) for m in chat.messages)
         assert "LLM error" in rendered
         assert "boom" in rendered
+
+
+@pytest.mark.asyncio
+async def test_tool_error_is_shown(tmp_path):
+    cfg = Config()
+    cfg.llm.api_key = "test"
+    fake_llm = FakeLLMClient(
+        [
+            [ToolCallEvent(id="c1", name="read", arguments={"path": "missing.txt"})],
+        ]
+    )
+    app = LimboApp(
+        workdir=tmp_path,
+        config=cfg,
+        llm_client=fake_llm,
+        session_dir=tmp_path / "sessions",
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        main_screen = pilot.app.screen_stack[-1]
+        assert isinstance(main_screen, MainScreen)
+
+        main_screen.run_worker(main_screen._handle_turn("read missing"))
+        await pilot.pause()
+
+        chat = main_screen.query_one("#chat", ChatWidget)
+        rendered = " ".join(str(m.content) for m in chat.messages)
+        assert "read failed" in rendered
+
+        preview = main_screen.query_one("#preview", FilePreviewWidget)
+        assert "missing.txt" in preview.content
 
 
 @pytest.mark.asyncio

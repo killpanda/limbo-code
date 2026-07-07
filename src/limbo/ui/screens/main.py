@@ -119,7 +119,14 @@ class MainScreen(Screen[None]):
         elif isinstance(event, ToolResultEvent):
             result = event.result
             sidebar.set_status(f"Tool: {event.name}")
-            if result.output:
+            if not result.success:
+                preview.show(
+                    f"{event.name} error", result.error or "Tool failed."
+                )
+                chat.append_assistant_text(
+                    f"\n[{event.name} failed: {result.error or 'unknown error'}]"
+                )
+            elif result.output:
                 preview.show(f"{event.name} result", result.output)
 
             if (
@@ -142,10 +149,19 @@ class MainScreen(Screen[None]):
                     apply_result = await self.agent.apply_tool(
                         event.name, event.arguments
                     )
-                    preview.show(
-                        f"{event.name} applied",
-                        apply_result.output or "",
-                    )
+                    if not apply_result.success:
+                        preview.show(
+                            f"{event.name} error",
+                            apply_result.error or "Tool failed.",
+                        )
+                        chat.append_assistant_text(
+                            f"\n[{event.name} failed: {apply_result.error or 'unknown error'}]"
+                        )
+                    else:
+                        preview.show(
+                            f"{event.name} applied",
+                            apply_result.output or "",
+                        )
                     path = event.arguments.get("path")
                     if path and apply_result.success:
                         recent = self._normalized_recent_path(path)
@@ -179,10 +195,19 @@ class MainScreen(Screen[None]):
                     apply_result = await self.agent.apply_tool(
                         event.name, event.arguments
                     )
-                    preview.show(
-                        f"{event.name} applied",
-                        apply_result.output or "",
-                    )
+                    if not apply_result.success:
+                        preview.show(
+                            f"{event.name} error",
+                            apply_result.error or "Tool failed.",
+                        )
+                        chat.append_assistant_text(
+                            f"\n[{event.name} failed: {apply_result.error or 'unknown error'}]"
+                        )
+                    else:
+                        preview.show(
+                            f"{event.name} applied",
+                            apply_result.output or "",
+                        )
                     path = event.arguments.get("path")
                     if path and apply_result.success:
                         recent = self._normalized_recent_path(path)
