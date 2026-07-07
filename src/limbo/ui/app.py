@@ -22,6 +22,7 @@ class LimboApp(App[None]):
         workdir: str | Path,
         config: Config | None = None,
         llm_client: LLMClient | None = None,
+        session_dir: Path | None = None,
         *args,
         **kwargs,
     ):
@@ -29,6 +30,7 @@ class LimboApp(App[None]):
         self.workdir = Path(workdir).resolve()
         self.config = config
         self.llm_client = llm_client
+        self.session_dir = session_dir
 
     def on_mount(self) -> None:
         self.push_screen(
@@ -36,6 +38,7 @@ class LimboApp(App[None]):
                 workdir=self.workdir,
                 config=self.config,
                 llm_client=self.llm_client,
+                session_dir=self.session_dir,
             )
         )
 

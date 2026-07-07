@@ -67,6 +67,11 @@ class Agent:
         timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
         self._session_file = self._session_dir / f"{timestamp}.jsonl"
 
+    @property
+    def confirmation_applied(self) -> bool:
+        """Whether a confirmed tool has been applied and the loop can resume."""
+        return self._confirmation_applied
+
     def _init_system_message(self) -> None:
         self.messages.append(
             Message(

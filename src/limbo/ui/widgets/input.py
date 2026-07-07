@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from textual.message import Message
 from textual.widgets import TextArea
 
@@ -23,7 +25,7 @@ class InputWidget(TextArea):
     }
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.show_line_numbers = False
 

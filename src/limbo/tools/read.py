@@ -66,6 +66,15 @@ class ReadTool(BaseTool):
         offset = arguments.get("offset")
         limit = arguments.get("limit")
 
+        if offset is not None and offset < 1:
+            return ToolResult(
+                success=False, error="offset must be a positive integer."
+            )
+        if limit is not None and limit < 1:
+            return ToolResult(
+                success=False, error="limit must be a positive integer."
+            )
+
         if offset is not None:
             start = max(0, offset - 1)
             lines = lines[start:]

@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from typing import Any
+
+from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.widgets import Static
 
@@ -16,14 +19,14 @@ class SidebarWidget(Vertical):
     }
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.title = Static("Limbo", id="session-title")
         self.recent_files = Static("Recent files:\n(none)", id="recent-files")
         self.status = Static("Idle", id="tool-status")
         self._recent_files: list[str] = []
 
-    def compose(self):
+    def compose(self) -> ComposeResult:
         yield self.title
         yield self.recent_files
         yield self.status

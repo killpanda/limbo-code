@@ -36,6 +36,7 @@ class MainScreen(Screen[None]):
         workdir: Path,
         config: Config | None = None,
         llm_client: LLMClient | None = None,
+        session_dir: Path | None = None,
         *args,
         **kwargs,
     ):
@@ -47,6 +48,7 @@ class MainScreen(Screen[None]):
             config=self.config,
             llm_client=self.llm_client,
             workdir=workdir,
+            session_dir=session_dir,
         )
         self._confirmation_event = asyncio.Event()
         self._confirmation_result: bool | None = None
@@ -97,7 +99,7 @@ class MainScreen(Screen[None]):
                 async for event in stream:
                     await self._process_agent_event(event)
 
-                if self.agent._confirmation_applied:
+                if self.agent.confirmation_applied:
                     stream = self.agent.continue_after_confirmation()
                     continue
                 break
