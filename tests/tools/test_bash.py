@@ -100,18 +100,25 @@ def test_is_dangerous_allows_redirection_in_quoted_string():
     assert "blocked" not in (result.error or "").lower()
 
 
-def test_is_dangerous_allows_redirection_by_default():
+def test_is_dangerous_allows_redirection_by_default(workdir):
     """Redirection is no longer hard-blocked by default; it is confirmation-gated."""
-    tool = BashTool(workdir=Path("/tmp"))
-    result = tool.execute({"command": "echo a > /tmp/limbo-test-redir.txt"})
+    target = workdir / "limbo-test-redir.txt"
+    tool = BashTool(workdir=workdir)
+    result = tool.execute({"command": f"echo a > {target}"})
     assert result.success is True
-    assert Path("/tmp/limbo-test-redir.txt").read_text().strip() == "a"
-    Path("/tmp/limbo-test-redir.txt").unlink()
+    assert target.read_text().strip() == "a"
 
 
 def test_is_dangerous_blocks_git_reset_hard():
     tool = BashTool(workdir=Path("/tmp"))
     result = tool.execute({"command": "git reset --hard HEAD"})
+    assert result.success is False
+    assert "blocked" in result.error.lower()
+
+
+def test_is_dangerous_blocks_absolute_git_reset_path():
+    tool = BashTool(workdir=Path("/tmp"))
+    result = tool.execute({"command": "/usr/bin/git reset --hard HEAD"})
     assert result.success is False
     assert "blocked" in result.error.lower()
 
@@ -188,5 +195,17 @@ def test_bash_truncates_excessive_output(workdir):
         {"command": "python -c \"print('x' * (600 * 1024), end='')\""}
     )
     assert result.success is True
-    assert len(result.output) <= 512 * 1024 + 100
+    assert len(result.output.encode("utf-8")) <= 512 * 1024 + 100
+    assert "truncated" in result.output.lower()
+
+
+def test_bash_truncates_output_by_byte_budget(workdir):
+    """Multi-byte characters count against the byte budget, not character count."""
+    tool = BashTool(workdir=workdir)
+    # Each 'é' is two UTF-8 bytes; 300 KiB of characters is 600 KiB of bytes.
+    result = tool.execute(
+        {"command": "python -c \"import sys; sys.stdout.write('é' * (300 * 1024))\""}
+    )
+    assert result.success is True
+    assert len(result.output.encode("utf-8")) <= 512 * 1024 + 100
     assert "truncated" in result.output.lower()

@@ -83,11 +83,15 @@ class BashTool(BaseTool):
         if proc.stderr:
             output += ("\n" if output else "") + f"[stderr]\n{proc.stderr}"
 
-        if len(output) > MAX_OUTPUT_BYTES:
-            output = (
-                output[:MAX_OUTPUT_BYTES]
-                + f"\n\n[output truncated: exceeded {MAX_OUTPUT_BYTES} byte limit]"
+        encoded = output.encode("utf-8", errors="replace")
+        if len(encoded) > MAX_OUTPUT_BYTES:
+            encoded = (
+                encoded[:MAX_OUTPUT_BYTES]
+                + f"\n\n[output truncated: exceeded {MAX_OUTPUT_BYTES} byte limit]".encode(
+                    "utf-8"
+                )
             )
+            output = encoded.decode("utf-8", errors="replace")
 
         if proc.returncode != 0:
             exit_msg = f"Command failed with exit code {proc.returncode}."
@@ -148,6 +152,15 @@ def is_dangerous(command: str, patterns: list[str]) -> bool:
                 token = tokens[start]
                 if token == name or Path(token).name == name:
                     return True
-            elif tokens[start : start + len(pattern_tokens)] == pattern_tokens:
-                return True
+            else:
+                first_pattern = pattern_tokens[0]
+                first_token = tokens[start]
+                first_matches = (
+                    first_token == first_pattern
+                    or Path(first_token).name == Path(first_pattern).name
+                )
+                if first_matches and tokens[
+                    start + 1 : start + len(pattern_tokens)
+                ] == pattern_tokens[1:]:
+                    return True
     return False
