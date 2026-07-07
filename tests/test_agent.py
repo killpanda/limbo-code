@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -454,3 +455,55 @@ async def test_agent_continue_stops_when_remaining_tool_requires_confirmation(wo
     assert agent._pending_tool is not None
     assert agent._pending_tool["id"] == "c2"
     assert (workdir / "b.txt").exists() is False
+
+
+@pytest.mark.asyncio
+async def test_agent_tool_crash_yields_tool_error_event(workdir):
+    cfg = Config()
+    fake_llm = FakeLLMClient([
+        [ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"})],
+    ])
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    async def crashing_execute(name, arguments, dry_run=False):
+        raise RuntimeError("tool exploded")
+
+    agent.registry.execute = crashing_execute
+
+    events = await _collect(agent.run("read main.py"))
+    error_events = [e for e in events if isinstance(e, ErrorEvent)]
+    assert len(error_events) == 1
+    assert error_events[0].message == "Tool error: tool exploded"
+    assert not any("LLM error" in e.message for e in error_events)
+
+
+@pytest.mark.asyncio
+async def test_agent_appends_session_on_subsequent_turns(workdir):
+    cfg = Config()
+    fake_llm = FakeLLMClient([
+        [TextChunk(text="first")],
+        [TextChunk(text="second")],
+    ])
+    session_dir = workdir / "sessions"
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=session_dir,
+    )
+
+    await _collect(agent.run("turn one"))
+    await _collect(agent.run("turn two"))
+
+    files = list(session_dir.iterdir())
+    assert len(files) == 1
+    lines = files[0].read_text().strip().splitlines()
+    roles = [json.loads(line)["role"] for line in lines]
+    assert roles.count("system") == 1
+    assert roles.count("user") == 2
+    assert "assistant" in roles
