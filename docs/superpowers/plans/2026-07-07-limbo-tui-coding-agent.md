@@ -12,9 +12,10 @@
 
 - Python 3.11+
 - LLM API must be OpenAI-compatible; default configuration targets DeepSeek.
-- All file write operations (`write`, `edit`) require user confirmation before disk changes.
+- All file write operations (`write`, `edit`) and the unsandboxed `bash` tool require user confirmation before disk changes.
 - All file tools (`read`, `edit`, `write`, `grep`, `find`, `ls`) are bounded to the current working directory (no `..`, no symlink escape).
 - The `bash` tool starts in the working directory but is not sandboxed; users can disable it with `[tools] bash_enabled = false`.
+- Confirmation for `write`, `edit`, and `bash` is mandatory in the UI; there are no config toggles to disable it.
 - Use pytest with TDD; every task ends with passing tests.
 - Configuration lives in `~/.limbo/config.toml`.
 - Session history is saved as JSONL in `~/.limbo/sessions/`.
@@ -366,8 +367,6 @@ class LLMConfig(BaseModel):
 
 class UIConfig(BaseModel):
     theme: str = "dark"
-    confirm_writes: bool = True
-    confirm_edits: bool = True
 
 
 class SafetyConfig(BaseModel):
@@ -379,10 +378,15 @@ class SafetyConfig(BaseModel):
     )
 
 
+class ToolsConfig(BaseModel):
+    bash_enabled: bool = True
+
+
 class Config(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
+    tools: ToolsConfig = Field(default_factory=ToolsConfig)
 
 
 def load_config(path: Path | None = None) -> Config:
