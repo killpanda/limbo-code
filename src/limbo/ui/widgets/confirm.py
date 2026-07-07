@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from textual.app import ComposeResult
-from textual.containers import Horizontal, Vertical
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.message import Message
 from textual.screen import ModalScreen
 from textual.widgets import Button, Label
@@ -32,6 +32,9 @@ class ConfirmDialog(ModalScreen[None]):
         background: $surface;
         padding: 1 2;
     }
+    ConfirmDialog #diff-body {
+        max-height: 50vh;
+    }
     """
 
     def __init__(self, title: str, body: str, *args, **kwargs):
@@ -42,7 +45,8 @@ class ConfirmDialog(ModalScreen[None]):
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Label(self.title_text)
-            yield Label(self.body_text, id="diff-body")
+            with VerticalScroll(id="diff-body"):
+                yield Label(self.body_text)
             with Horizontal():
                 yield Button("Apply", variant="success", id="apply")
                 yield Button("Reject", variant="error", id="reject")

@@ -81,7 +81,14 @@ class BashTool(BaseTool):
 
 
 def is_dangerous(command: str, patterns: list[str]) -> bool:
-    """Return True if command matches a dangerous pattern."""
+    """Return True if command matches a dangerous pattern.
+
+    .. warning::
+        This check is heuristic only. It tokenizes the top-level command, so
+        subshells (``bash -c ...``), command substitution (``$(rm ...)``),
+        variable indirection, and other shell constructs can bypass it. Review
+        all commands before confirming destructive actions.
+    """
     tokens = shlex.split(command)
     for pattern in patterns:
         if pattern.startswith(">"):

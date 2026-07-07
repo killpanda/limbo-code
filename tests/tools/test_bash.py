@@ -59,3 +59,17 @@ def test_bash_workdir_context(workdir):
     result = tool.execute({"command": "pwd"})
     assert result.success is True
     assert str(workdir) in result.output
+
+
+def test_bash_safety_filter_is_heuristic(workdir):
+    """Document that the simple pattern matcher can be bypassed."""
+    tool = BashTool(workdir=workdir)
+    # Subshell / command substitution bypasses the top-level token check.
+    result = tool.execute({"command": "bash -c 'rm -rf /tmp/limbo-fake-target'"})
+    assert result.success is True
+    assert "blocked" not in (result.error or "").lower()
+
+
+def test_is_dangerous_docstring_warns_about_bypasses():
+    assert "heuristic" in (is_dangerous.__doc__ or "").lower()
+    assert "bypass" in (is_dangerous.__doc__ or "").lower()

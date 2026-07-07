@@ -35,6 +35,15 @@ confirm_edits = true
 limbo --workdir /path/to/project
 ```
 
+## Safety and confirmation
+
+Limbo asks for confirmation before applying destructive or workspace-modifying
+tool calls (writes and edits by default). Bash commands are filtered with a
+simple heuristic, but that filter can be bypassed by subshells, command
+substitution, variable indirection, and similar shell constructs. Review every
+command before confirming it, and only run Limbo in repositories you can afford
+to modify or lose.
+
 ## Development
 
 Run tests:

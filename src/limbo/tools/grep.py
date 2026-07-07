@@ -107,6 +107,9 @@ class GrepTool(BaseTool):
         fixed_string: bool,
         limit: int,
     ) -> ToolResult:
+        # Fallback path: supports pattern/ignore_case/fixed_string/limit. The
+        # ``context`` and ``glob`` parameters are not implemented in this path;
+        # install ripgrep for full parameter support.
         flags = re.IGNORECASE if ignore_case else 0
         try:
             compiled = re.compile(
