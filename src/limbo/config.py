@@ -14,7 +14,6 @@ DEFAULT_CONFIG_PATH = Path.home() / ".limbo" / "config.toml"
 
 
 class LLMConfig(BaseModel):
-    provider: str = "openai"
     api_key: str | None = None
     base_url: str = "https://api.deepseek.com/v1"
     model: str = "deepseek-chat"
