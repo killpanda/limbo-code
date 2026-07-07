@@ -21,6 +21,20 @@ model = "deepseek-chat"
 base_url = "https://api.deepseek.com/v1"
 ```
 
+### Provider
+
+Limbo currently supports OpenAI-compatible chat completion endpoints. Set
+`provider = "openai"` (the default) and configure `base_url`, `model`, and
+`api_key` to point at your provider:
+
+```toml
+[llm]
+provider = "openai"
+base_url = "https://api.openai.com/v1"
+model = "gpt-4o"
+api_key = "your-api-key"
+```
+
 Optional UI settings:
 
 ```toml
@@ -35,6 +49,12 @@ Optional tool settings:
 [tools]
 bash_enabled = true
 ```
+
+### Session storage
+
+Conversations are saved as JSONL files in `~/.limbo/sessions/` so you can
+review or debug them later. Use the `session_dir` argument or set a custom
+location if you need to redirect them.
 
 ## Run
 
