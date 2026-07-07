@@ -62,6 +62,8 @@ class Agent:
         self._pending_tool: dict[str, Any] | None = None
         self._confirmation_applied = False
         self._iteration_count = 0
+        self._pending_placeholders: set[str] = set()
+        self._last_saved_index: int = 0
         self._init_system_message()
 
         self._session_dir = session_dir or Path.home() / ".limbo" / "sessions"
@@ -86,8 +88,8 @@ class Agent:
                     "- bash: Execute bash commands\n"
                     "- edit: Make surgical edits to files (find exact text and replace)\n"
                     "- write: Create or overwrite files\n"
-                    "- grep: Search file contents for patterns (respects .gitignore)\n"
-                    "- find: Find files by glob pattern (respects .gitignore)\n"
+                    "- grep: Search file contents for patterns (respects root .gitignore)\n"
+                    "- find: Find files by glob pattern (respects root .gitignore only)\n"
                     "- ls: List directory contents\n\n"
                     "Guidelines:\n"
                     "- Prefer grep/find/ls tools over bash for file exploration\n"
@@ -147,6 +149,7 @@ class Agent:
                                 tool_call_id=tc["id"],
                             )
                         )
+                    self._pending_placeholders.discard(tc["id"])
                 self._pending_tool = None
                 return
 
@@ -163,6 +166,7 @@ class Agent:
                     tool_call_id=pending_id,
                 )
             )
+        self._pending_placeholders.discard(pending_id)
         self._pending_tool = None
 
     async def run(self, user_input: str) -> AsyncIterator[AgentEvent]:
@@ -233,27 +237,29 @@ class Agent:
         if assistant is None or assistant.tool_calls is None:
             return
 
-        placeholder = "Action pending user confirmation."
         for tc in assistant.tool_calls:
-            tool_msg = None
-            for msg in reversed(self.messages):
-                if msg.role == "tool" and msg.tool_call_id == tc["id"]:
-                    tool_msg = msg
-                    break
-            if tool_msg is None or tool_msg.content != placeholder:
+            if tc["id"] not in self._pending_placeholders:
                 continue
 
             name = tc["function"]["name"]
             arguments = tc["function"]["arguments"]
             yield ToolCallRequest(id=tc["id"], name=name, arguments=arguments)
-            result = await self.registry.execute(name, arguments, dry_run=True)
+            try:
+                result = await self.registry.execute(name, arguments, dry_run=True)
+            except Exception as e:  # noqa: BLE001
+                yield ErrorEvent(message=f"Tool error: {e}")
+                return
             yield ToolResultEvent(
                 id=tc["id"], name=name, result=result, arguments=arguments
             )
             if result.requires_confirmation:
                 self._pending_tool = tc
                 return
-            tool_msg.content = result.output or result.error or ""
+            for msg in self.messages:
+                if msg.role == "tool" and msg.tool_call_id == tc["id"]:
+                    msg.content = result.output or result.error or ""
+                    break
+            self._pending_placeholders.discard(tc["id"])
 
     async def _conversation_loop(self) -> AsyncIterator[AgentEvent]:
         while self._iteration_count < self.config.llm.max_iterations:
@@ -273,7 +279,11 @@ class Agent:
                 name = tc["function"]["name"]
                 arguments = tc["function"]["arguments"]
                 yield ToolCallRequest(id=tc["id"], name=name, arguments=arguments)
-                result = await self.registry.execute(name, arguments, dry_run=True)
+                try:
+                    result = await self.registry.execute(name, arguments, dry_run=True)
+                except Exception as e:  # noqa: BLE001
+                    yield ErrorEvent(message=f"Tool error: {e}")
+                    return
                 if result.requires_confirmation:
                     self._pending_tool = tc
                     # The assistant message already references every tool call in
@@ -292,6 +302,7 @@ class Agent:
                                 tool_call_id=pending_or_remaining["id"],
                             )
                         )
+                        self._pending_placeholders.add(pending_or_remaining["id"])
                 yield ToolResultEvent(
                     id=tc["id"], name=name, result=result, arguments=arguments
                 )
@@ -304,6 +315,7 @@ class Agent:
                         tool_call_id=tc["id"],
                     )
                 )
+                self._pending_placeholders.discard(tc["id"])
 
     async def apply_tool(self, name: str, arguments: dict[str, Any]) -> ToolResult:
         """Apply the tool that is currently pending confirmation.
@@ -344,6 +356,7 @@ class Agent:
                     tool_call_id=self._pending_tool["id"],
                 )
             )
+        self._pending_placeholders.discard(self._pending_tool["id"])
         self._pending_tool = None
         self._confirmation_applied = True
         return result
@@ -382,9 +395,11 @@ class Agent:
 
     def _save_session_sync(self) -> None:
         self._session_file.parent.mkdir(parents=True, exist_ok=True)
-        with self._session_file.open("w", encoding="utf-8") as f:
-            for msg in self.messages:
+        mode = "a" if self._session_file.exists() and self._last_saved_index > 0 else "w"
+        with self._session_file.open(mode, encoding="utf-8") as f:
+            for msg in self.messages[self._last_saved_index :]:
                 f.write(msg.model_dump_json() + "\n")
+        self._last_saved_index = len(self.messages)
 
     async def _save_session(self) -> None:
         await asyncio.to_thread(self._save_session_sync)
