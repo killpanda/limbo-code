@@ -63,6 +63,7 @@ class BashTool(BaseTool):
                 [shell, "-c", command],
                 capture_output=True,
                 text=True,
+                errors="replace",
                 timeout=float(timeout),
                 cwd=str(self.workdir),
             )

@@ -82,3 +82,23 @@ def test_read_rejects_negative_limit(workdir):
     result = tool.execute({"path": "lines.txt", "limit": -1})
     assert result.success is False
     assert "positive" in result.error.lower()
+
+
+def test_read_does_not_follow_symlink_to_outside_file(workdir):
+    """A symlink inside the workdir must not expose files outside it."""
+    import os
+
+    outside = workdir.parent / f"read_outside_{workdir.name}"
+    outside.mkdir()
+    (outside / "secret.txt").write_text("secret")
+
+    link = workdir / "outside_link"
+    try:
+        os.symlink(outside / "secret.txt", link)
+    except OSError:
+        pytest.skip("Symlinks not supported on this platform")
+
+    tool = ReadTool(workdir=workdir)
+    result = tool.execute({"path": "outside_link"})
+    assert result.success is False
+    assert "outside working directory" in result.error.lower()

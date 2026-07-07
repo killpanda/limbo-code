@@ -152,3 +152,12 @@ def test_bash_dry_run_blocks_dangerous_command(workdir):
     result = tool.execute({"command": "rm -rf /"}, dry_run=True)
     assert result.success is False
     assert "blocked" in result.error.lower()
+
+
+def test_bash_handles_non_utf8_output(workdir):
+    tool = BashTool(workdir=workdir)
+    result = tool.execute(
+        {"command": "python -c \"import sys; sys.stdout.buffer.write(b'\\\\xff\\\\xfe')\""}
+    )
+    assert result.success is True
+    assert "\ufffd" in result.output
