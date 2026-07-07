@@ -64,7 +64,6 @@ class Agent:
         self._confirmation_applied = False
         self._iteration_count = 0
         self._pending_placeholders: set[str] = set()
-        self._last_saved_index: int = 0
         self._init_system_message()
 
         self._session_dir = session_dir or Path.home() / ".limbo" / "sessions"
