@@ -22,9 +22,11 @@ class BashTool(BaseTool):
         "Execute a bash command in the current working directory. Returns stdout and stderr. "
         "WARNING: bash is not sandboxed and can access files outside the workdir. "
         "Commands matching dangerous patterns (e.g. rm, git reset --hard) are "
-        "rejected outright and cannot be confirmed. The filter is heuristic: "
-        "options or variable assignments before the command name "
-        "(e.g. 'git -C /foo reset --hard' or 'VAR=1 rm -rf /') can bypass it."
+        "rejected outright and cannot be confirmed. The filter is heuristic only: "
+        "subshells, command substitution, variable indirection, options before the command "
+        "name, and variable assignments before the command name "
+        "(e.g. 'bash -c rm -rf /', '$(rm ...)', 'git -C /foo reset --hard', "
+        "or 'VAR=1 rm -rf /') can bypass it."
     )
     parameters = {
         "type": "object",
