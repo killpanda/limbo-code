@@ -108,6 +108,73 @@ async def test_agent_apply_tool_confirms(workdir):
 
 
 @pytest.mark.asyncio
+async def test_agent_apply_tool_rejects_mismatch(workdir):
+    cfg = Config()
+    fake_llm = FakeLLMClient([
+        [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
+    ])
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    await _collect(agent.run("write x.txt"))
+
+    result = agent.apply_tool("write", {"path": "x.txt", "content": "different"})
+    assert result.success is False
+    assert "does not match" in result.error
+    assert agent._pending_tool is not None
+    assert not (workdir / "x.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_agent_apply_tool_requires_pending_tool(workdir):
+    cfg = Config()
+    fake_llm = FakeLLMClient([[TextChunk(text="hello")]])
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    await _collect(agent.run("hi"))
+
+    result = agent.apply_tool("write", {"path": "x.txt", "content": "hi"})
+    assert result.success is False
+    assert "No tool is pending" in result.error
+
+
+@pytest.mark.asyncio
+async def test_agent_continue_after_confirmation_resumes_loop(workdir):
+    cfg = Config()
+    fake_llm = FakeLLMClient([
+        [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
+        [TextChunk(text="done")],
+    ])
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    events = await _collect(agent.run("write x.txt"))
+    result_events = [e for e in events if hasattr(e, "result")]
+    assert len(result_events) == 1
+    assert result_events[0].result.requires_confirmation is True
+
+    apply_result = agent.apply_tool("write", {"path": "x.txt", "content": "hi"})
+    assert apply_result.success is True
+    assert (workdir / "x.txt").read_text() == "hi"
+
+    continuation = await _collect(agent.continue_after_confirmation())
+    assert any(hasattr(e, "text") and e.text == "done" for e in continuation)
+    assert agent._pending_tool is None
+    assert agent._confirmation_applied is False
+
+
+@pytest.mark.asyncio
 async def test_agent_saves_session(workdir):
     cfg = Config()
     fake_llm = FakeLLMClient([[TextChunk(text="hello")]])

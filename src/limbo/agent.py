@@ -59,6 +59,8 @@ class Agent:
         self.registry = ToolRegistry(workdir=workdir)
         self.messages: list[Message] = []
         self._pending_tool: dict[str, Any] | None = None
+        self._confirmation_applied = False
+        self._iteration_count = 0
         self._init_system_message()
 
         self._session_dir = session_dir or Path.home() / ".limbo" / "sessions"
@@ -96,47 +98,59 @@ class Agent:
         self.messages.append(Message(role="user", content=user_input))
 
         try:
-            for _ in range(self.config.llm.max_iterations):
-                try:
-                    async for event in self._call_llm():
-                        yield event
-                except Exception as e:  # noqa: BLE001
-                    yield ErrorEvent(message=f"LLM error: {e}")
-                    return
-
-                last = self.messages[-1]
-                if not last.tool_calls:
-                    break
-
-                for tc in last.tool_calls:
-                    name = tc["function"]["name"]
-                    arguments = tc["function"]["arguments"]
-                    yield ToolCallRequest(id=tc["id"], name=name, arguments=arguments)
-                    result = self.registry.execute(name, arguments, dry_run=True)
-                    yield ToolResultEvent(
-                        id=tc["id"], name=name, result=result, arguments=arguments
-                    )
-                    if result.requires_confirmation:
-                        self._pending_tool = tc
-                        return
-                    self.messages.append(
-                        Message(
-                            role="tool",
-                            content=result.output or result.error or "",
-                            tool_call_id=tc["id"],
-                        )
-                    )
+            async for event in self._conversation_loop():
+                yield event
         finally:
             await self._save_session()
 
-    def apply_tool(self, name: str, arguments: dict[str, Any]) -> ToolResult:
-        result = self.registry.execute(name, arguments, dry_run=False)
-        last = self.messages[-1]
-        for tc in last.tool_calls or []:
-            if (
-                tc["function"]["name"] == name
-                and tc["function"]["arguments"] == arguments
-            ):
+    async def continue_after_confirmation(self) -> AsyncIterator[AgentEvent]:
+        """Resume the conversation loop after a confirmed tool was applied.
+
+        Yields the remaining assistant responses and any follow-up tool events
+        until the assistant produces a final response without pending tool calls.
+        """
+        if self._pending_tool is not None:
+            yield ErrorEvent(
+                message="Cannot continue: a tool is still pending confirmation."
+            )
+            return
+        if not self._confirmation_applied:
+            yield ErrorEvent(message="Cannot continue: no confirmed tool to resume from.")
+            return
+        self._confirmation_applied = False
+
+        try:
+            async for event in self._conversation_loop():
+                yield event
+        finally:
+            await self._save_session()
+
+    async def _conversation_loop(self) -> AsyncIterator[AgentEvent]:
+        while self._iteration_count < self.config.llm.max_iterations:
+            self._iteration_count += 1
+            try:
+                async for event in self._call_llm():
+                    yield event
+            except Exception as e:  # noqa: BLE001
+                yield ErrorEvent(message=f"LLM error: {e}")
+                return
+
+            last = self.messages[-1]
+            if not last.tool_calls:
+                break
+
+            for tc in last.tool_calls:
+                name = tc["function"]["name"]
+                arguments = tc["function"]["arguments"]
+                yield ToolCallRequest(id=tc["id"], name=name, arguments=arguments)
+                result = self.registry.execute(name, arguments, dry_run=True)
+                if result.requires_confirmation:
+                    self._pending_tool = tc
+                yield ToolResultEvent(
+                    id=tc["id"], name=name, result=result, arguments=arguments
+                )
+                if result.requires_confirmation:
+                    return
                 self.messages.append(
                     Message(
                         role="tool",
@@ -144,8 +158,37 @@ class Agent:
                         tool_call_id=tc["id"],
                     )
                 )
-                break
+
+    def apply_tool(self, name: str, arguments: dict[str, Any]) -> ToolResult:
+        """Apply the tool that is currently pending confirmation.
+
+        Validates that ``name`` and ``arguments`` match the stored pending tool
+        call. Returns an error result and leaves the pending state untouched
+        when they do not match.
+        """
+        if self._pending_tool is None:
+            return ToolResult(success=False, error="No tool is pending confirmation.")
+
+        pending_name = self._pending_tool["function"]["name"]
+        pending_arguments = self._pending_tool["function"]["arguments"]
+        if name != pending_name or arguments != pending_arguments:
+            return ToolResult(
+                success=False,
+                error=(
+                    f"Tool {name} does not match pending tool {pending_name}."
+                ),
+            )
+
+        result = self.registry.execute(name, arguments, dry_run=False)
+        self.messages.append(
+            Message(
+                role="tool",
+                content=result.output or result.error or "",
+                tool_call_id=self._pending_tool["id"],
+            )
+        )
         self._pending_tool = None
+        self._confirmation_applied = True
         return result
 
     async def _call_llm(self) -> AsyncIterator[AgentEvent]:
