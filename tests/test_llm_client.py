@@ -1,4 +1,5 @@
 import json
+from unittest.mock import AsyncMock
 
 import pytest
 import respx
@@ -131,3 +132,19 @@ def test_message_to_openai_includes_content_for_assistant_tool_calls():
     assert "content" in result
     assert result["content"] == ""
     assert len(result["tool_calls"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_client_close_releases_http_client(client):
+    mock_client = AsyncMock()
+    client._client = mock_client
+    await client.close()
+    mock_client.close.assert_awaited_once()
+    assert client._client is None
+
+
+@pytest.mark.asyncio
+async def test_client_close_is_noop_when_not_initialized(client):
+    assert client._client is None
+    await client.close()
+    assert client._client is None

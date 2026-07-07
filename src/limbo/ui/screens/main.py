@@ -86,6 +86,11 @@ class MainScreen(Screen[None]):
         self._confirmation_result = False
         self._confirmation_event.set()
 
+    async def on_unmount(self) -> None:
+        """Close the LLM client on shutdown to release its HTTP resources."""
+        if isinstance(self.llm_client, OpenAICompatibleClient):
+            await self.llm_client.close()
+
     def on_user_submitted(self, event: UserSubmitted) -> None:
         chat = self.query_one("#chat", ChatWidget)
         chat.add_user_message(event.message)

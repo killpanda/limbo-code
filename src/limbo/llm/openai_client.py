@@ -28,6 +28,12 @@ class OpenAICompatibleClient:
             )
         return self._client
 
+    async def close(self) -> None:
+        """Close the underlying HTTP client if it has been created."""
+        if self._client is not None:
+            await self._client.close()
+            self._client = None
+
     async def chat(
         self,
         messages: list[Message],
