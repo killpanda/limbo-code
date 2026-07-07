@@ -18,6 +18,12 @@ def main() -> int:
         default=Path.cwd(),
         help="Working directory (default: current directory)",
     )
+    parser.add_argument(
+        "--session-dir",
+        type=Path,
+        default=None,
+        help="Directory for session JSONL files (default: ~/.limbo/sessions)",
+    )
     args = parser.parse_args()
 
     config = load_config()
@@ -29,7 +35,7 @@ def main() -> int:
         )
         return 1
 
-    app = LimboApp(workdir=args.workdir, config=config)
+    app = LimboApp(workdir=args.workdir, config=config, session_dir=args.session_dir)
     app.run()
     return 0
 
