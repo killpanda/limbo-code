@@ -8,7 +8,12 @@ from pathlib import Path
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 
-from limbo.agent import Agent
+from limbo.agent import (
+    Agent,
+    ErrorEvent,
+    TextDelta,
+    ToolResultEvent,
+)
 from limbo.config import Config
 from limbo.llm.client import LLMClient
 from limbo.llm.openai_client import OpenAICompatibleClient
@@ -17,6 +22,8 @@ from limbo.ui.widgets.confirm import ConfirmDialog, Confirmed, Rejected
 from limbo.ui.widgets.file_preview import FilePreviewWidget
 from limbo.ui.widgets.input import InputWidget, UserSubmitted
 from limbo.ui.widgets.sidebar import SidebarWidget
+
+CONFIRMATION_TIMEOUT = 300.0
 
 
 class MainScreen(Screen[None]):
@@ -70,16 +77,44 @@ class MainScreen(Screen[None]):
         sidebar = self.query_one("#sidebar", SidebarWidget)
         preview = self.query_one("#preview", FilePreviewWidget)
 
-        for event in self.agent.run(user_input):
-            if hasattr(event, "text"):
+        async for event in self.agent.run(user_input):
+            if isinstance(event, TextDelta):
                 chat.append_assistant_text(event.text)
-            elif hasattr(event, "name") and hasattr(event, "result"):
+            elif isinstance(event, ErrorEvent):
+                chat.append_assistant_text(event.message)
+            elif isinstance(event, ToolResultEvent):
                 result = event.result
                 sidebar.set_status(f"Tool: {event.name}")
                 if result.output:
                     preview.show(f"{event.name} result", result.output)
 
+                if (
+                    event.name == "read"
+                    and result.success
+                    and "path" in event.arguments
+                ):
+                    sidebar.add_recent_file(event.arguments["path"])
+
                 if result.requires_confirmation:
+                    skip = False
+                    if event.name == "write" and not self.config.ui.confirm_writes:
+                        skip = True
+                    elif event.name == "edit" and not self.config.ui.confirm_edits:
+                        skip = True
+
+                    if skip:
+                        apply_result = self.agent.apply_tool(
+                            event.name, event.arguments
+                        )
+                        preview.show(
+                            f"{event.name} applied",
+                            apply_result.output or "",
+                        )
+                        path = event.arguments.get("path")
+                        if path and apply_result.success:
+                            sidebar.add_recent_file(path)
+                        continue
+
                     self._confirmation_event.clear()
                     self._confirmation_result = None
                     self.app.push_screen(
@@ -88,12 +123,29 @@ class MainScreen(Screen[None]):
                             body=result.output or "",
                         )
                     )
-                    await self._confirmation_event.wait()
+                    try:
+                        await asyncio.wait_for(
+                            self._confirmation_event.wait(),
+                            timeout=CONFIRMATION_TIMEOUT,
+                        )
+                    except asyncio.TimeoutError:
+                        chat.append_assistant_text(
+                            f"\n[{event.name} confirmation timed out; action rejected.]"
+                        )
+                        continue
+
                     if self._confirmation_result:
-                        apply_result = self.agent.apply_tool(event.name, event.arguments)
+                        apply_result = self.agent.apply_tool(
+                            event.name, event.arguments
+                        )
                         preview.show(
                             f"{event.name} applied",
                             apply_result.output or "",
                         )
+                        path = event.arguments.get("path")
+                        if path and apply_result.success:
+                            sidebar.add_recent_file(path)
                     else:
-                        chat.append_assistant_text(f"\n[{event.name} was rejected by user.]")
+                        chat.append_assistant_text(
+                            f"\n[{event.name} was rejected by user.]"
+                        )

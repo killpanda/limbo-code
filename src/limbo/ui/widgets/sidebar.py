@@ -21,6 +21,7 @@ class SidebarWidget(Vertical):
         self.title = Static("Limbo", id="session-title")
         self.recent_files = Static("Recent files:\n(none)", id="recent-files")
         self.status = Static("Idle", id="tool-status")
+        self._recent_files: list[str] = []
 
     def compose(self):
         yield self.title
@@ -31,11 +32,11 @@ class SidebarWidget(Vertical):
         self.status.update(text)
 
     def add_recent_file(self, path: str) -> None:
-        current = str(self.recent_files.renderable)
-        if "(none)" in current:
-            lines = ["Recent files:", path]
+        if path not in self._recent_files:
+            self._recent_files.append(path)
+            self._recent_files = self._recent_files[:10]
+        if self._recent_files:
+            lines = ["Recent files:"] + self._recent_files
         else:
-            lines = current.splitlines()
-            lines.append(path)
-            lines = lines[:12]
+            lines = ["Recent files:", "(none)"]
         self.recent_files.update("\n".join(lines))
