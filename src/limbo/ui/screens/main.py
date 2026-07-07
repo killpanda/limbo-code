@@ -20,7 +20,7 @@ from limbo.config import Config
 from limbo.llm.client import LLMClient
 from limbo.llm.openai_client import OpenAICompatibleClient
 from limbo.ui.widgets.chat import ChatWidget
-from limbo.ui.widgets.confirm import ConfirmDialog, Confirmed, Rejected
+from limbo.ui.widgets.confirm import ConfirmDialog
 from limbo.ui.widgets.file_preview import FilePreviewWidget
 from limbo.ui.widgets.input import InputWidget, UserSubmitted
 from limbo.ui.widgets.sidebar import SidebarWidget
@@ -61,11 +61,13 @@ class MainScreen(Screen[None]):
             with Vertical(id="preview-container"):
                 yield FilePreviewWidget(id="preview")
 
-    def on_confirmed(self, _event: Confirmed) -> None:
+    def handle_confirmation(self) -> None:
+        """Handle an approval from the confirmation dialog."""
         self._confirmation_result = True
         self._confirmation_event.set()
 
-    def on_rejected(self, _event: Rejected) -> None:
+    def handle_rejection(self) -> None:
+        """Handle a rejection from the confirmation dialog."""
         self._confirmation_result = False
         self._confirmation_event.set()
 
@@ -75,15 +77,20 @@ class MainScreen(Screen[None]):
         self.run_worker(self._handle_turn(event.message))
 
     async def _handle_turn(self, user_input: str) -> None:
-        stream: AsyncIterator[AgentEvent] = self.agent.run(user_input)
-        while True:
-            async for event in stream:
-                await self._process_agent_event(event)
+        input_widget = self.query_one("#input", InputWidget)
+        input_widget.disabled = True
+        try:
+            stream: AsyncIterator[AgentEvent] = self.agent.run(user_input)
+            while True:
+                async for event in stream:
+                    await self._process_agent_event(event)
 
-            if self.agent._confirmation_applied:
-                stream = self.agent.continue_after_confirmation()
-                continue
-            break
+                if self.agent._confirmation_applied:
+                    stream = self.agent.continue_after_confirmation()
+                    continue
+                break
+        finally:
+            input_widget.disabled = False
 
     async def _process_agent_event(self, event: AgentEvent) -> None:
         chat = self.query_one("#chat", ChatWidget)
@@ -147,6 +154,7 @@ class MainScreen(Screen[None]):
                     )
                     dialog.dismiss()
                     input_widget.disabled = False
+                    self.agent.reject_pending_tool()
                     return
 
                 input_widget.disabled = False
@@ -165,3 +173,4 @@ class MainScreen(Screen[None]):
                     chat.append_assistant_text(
                         f"\n[{event.name} was rejected by user.]"
                     )
+                    self.agent.reject_pending_tool()

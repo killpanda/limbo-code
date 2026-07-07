@@ -94,7 +94,17 @@ class Agent:
             )
         )
 
+    def reject_pending_tool(self) -> None:
+        """Clear any tool awaiting confirmation."""
+        self._pending_tool = None
+
     async def run(self, user_input: str) -> AsyncIterator[AgentEvent]:
+        # Reset per-user-turn state and discard stale pending confirmations.
+        self._iteration_count = 0
+        self._confirmation_applied = False
+        if self._pending_tool is not None:
+            self.reject_pending_tool()
+
         self.messages.append(Message(role="user", content=user_input))
 
         try:

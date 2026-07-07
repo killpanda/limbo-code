@@ -42,11 +42,11 @@ class LimboApp(App[None]):
     def on_confirmed(self, _event: Confirmed) -> None:
         for screen in reversed(self.screen_stack):
             if isinstance(screen, MainScreen):
-                screen.on_confirmed(_event)
+                screen.handle_confirmation()
                 break
 
     def on_rejected(self, _event: Rejected) -> None:
         for screen in reversed(self.screen_stack):
             if isinstance(screen, MainScreen):
-                screen.on_rejected(_event)
+                screen.handle_rejection()
                 break

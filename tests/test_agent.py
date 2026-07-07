@@ -217,3 +217,68 @@ async def test_agent_error_event_on_llm_failure(workdir):
     error_events = [e for e in events if isinstance(e, ErrorEvent)]
     assert len(error_events) == 1
     assert "network down" in error_events[0].message
+
+
+@pytest.mark.asyncio
+async def test_agent_iteration_count_resets_per_turn(workdir):
+    cfg = Config()
+    cfg.llm.max_iterations = 1
+    fake_llm = FakeLLMClient([
+        [ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"})],
+        [TextChunk(text="second turn")],
+    ])
+    (workdir / "main.py").write_text("x = 1\n")
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    events = await _collect(agent.run("turn one"))
+    assert agent._iteration_count == 1
+    assert any(hasattr(e, "name") and e.name == "read" for e in events)
+
+    events = await _collect(agent.run("turn two"))
+    assert agent._iteration_count == 1
+    assert any(hasattr(e, "text") and e.text == "second turn" for e in events)
+
+
+@pytest.mark.asyncio
+async def test_agent_reject_pending_tool_clears_state(workdir):
+    cfg = Config()
+    fake_llm = FakeLLMClient([
+        [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
+    ])
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    await _collect(agent.run("write x.txt"))
+    assert agent._pending_tool is not None
+
+    agent.reject_pending_tool()
+    assert agent._pending_tool is None
+
+
+@pytest.mark.asyncio
+async def test_agent_new_turn_clears_stale_pending_tool(workdir):
+    cfg = Config()
+    fake_llm = FakeLLMClient([
+        [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
+        [TextChunk(text="fresh turn")],
+    ])
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    await _collect(agent.run("write x.txt"))
+    assert agent._pending_tool is not None
+
+    events = await _collect(agent.run("new turn"))
+    assert agent._pending_tool is None
+    assert any(hasattr(e, "text") and e.text == "fresh turn" for e in events)
