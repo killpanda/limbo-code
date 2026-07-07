@@ -20,7 +20,8 @@ class GrepTool(BaseTool):
     name = "grep"
     description = (
         "Search file contents for a pattern. Respects .gitignore (basic rules). "
-        "Install ripgrep for full gitignore, glob, and context-line support."
+        "Install ripgrep for full gitignore, glob, and context-line support. "
+        "The Python fallback does not support `**` recursive glob patterns."
     )
     parameters = {
         "type": "object",

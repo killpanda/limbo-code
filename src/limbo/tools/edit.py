@@ -72,4 +72,6 @@ class EditTool(BaseTool):
         return ToolResult(success=True, output=f"Edited {raw_path}.\n{diff}")
 
     def _make_diff(self, old: str, new: str) -> str:
-        return "\n".join(difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm=""))
+        return "".join(
+            difflib.unified_diff(old.splitlines(), new.splitlines(), lineterm="\n")
+        )
