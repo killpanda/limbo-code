@@ -198,6 +198,24 @@ async def test_agent_saves_session(workdir):
 
 
 @pytest.mark.asyncio
+async def test_agent_save_session_failure_is_ignored(workdir):
+    cfg = Config()
+    fake_llm = FakeLLMClient([[TextChunk(text="hello")]])
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    agent._save_session_sync = lambda: (_ for _ in ()).throw(RuntimeError("disk full"))
+
+    with pytest.warns(UserWarning, match="Failed to save session"):
+        events = await _collect(agent.run("hi"))
+
+    assert any(hasattr(e, "text") and e.text == "hello" for e in events)
+
+
+@pytest.mark.asyncio
 async def test_agent_error_event_on_llm_failure(workdir):
     class FailingLLMClient:
         async def chat(self, messages, tools):

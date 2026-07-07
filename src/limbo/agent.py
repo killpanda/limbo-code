@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import warnings
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -179,7 +180,10 @@ class Agent:
             async for event in self._conversation_loop():
                 yield event
         finally:
-            await self._save_session()
+            try:
+                await self._save_session()
+            except Exception as e:  # noqa: BLE001
+                warnings.warn(f"Failed to save session: {e}", stacklevel=2)
 
     async def continue_after_confirmation(self) -> AsyncIterator[AgentEvent]:
         """Resume the conversation loop after a confirmed tool was applied.
@@ -208,7 +212,10 @@ class Agent:
             async for event in self._conversation_loop():
                 yield event
         finally:
-            await self._save_session()
+            try:
+                await self._save_session()
+            except Exception as e:  # noqa: BLE001
+                warnings.warn(f"Failed to save session: {e}", stacklevel=2)
 
     async def _execute_remaining_tools(self) -> AsyncIterator[AgentEvent]:
         """Execute remaining placeholder tool calls from the last assistant turn.
