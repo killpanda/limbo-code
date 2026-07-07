@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import toml  # type: ignore[import-untyped]
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from toml import TomlDecodeError
 
 DEFAULT_CONFIG_PATH = Path.home() / ".limbo" / "config.toml"
@@ -67,4 +67,11 @@ def load_config(path: Path | None = None) -> Config:
             stacklevel=2,
         )
         return Config()
-    return Config.model_validate(data)
+    try:
+        return Config.model_validate(data)
+    except ValidationError as e:
+        warnings.warn(
+            f"Invalid config file {path}: {e}. Using defaults.",
+            stacklevel=2,
+        )
+        return Config()

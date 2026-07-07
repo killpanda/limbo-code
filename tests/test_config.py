@@ -63,3 +63,11 @@ def test_load_config_permission_error_uses_defaults(tmp_path):
     finally:
         path.chmod(0o644)
     assert cfg.llm.model == "deepseek-chat"
+
+
+def test_load_config_validation_error_uses_defaults(tmp_path):
+    path = tmp_path / "invalid.toml"
+    path.write_text('[llm]\nmax_iterations = "ten"\n')
+    with pytest.warns(UserWarning, match="Invalid config file"):
+        cfg = load_config(path)
+    assert cfg.llm.max_iterations == 10
