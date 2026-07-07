@@ -56,6 +56,14 @@ def test_is_dangerous_detects_rm():
     assert is_dangerous("echo hello", ["rm"]) is False
 
 
+def test_is_dangerous_allows_benign_token_matches():
+    """Dangerous single-token patterns only match command-name positions."""
+    assert is_dangerous("echo rm", ["rm"]) is False
+    assert is_dangerous("git status | grep rm", ["rm"]) is False
+    assert is_dangerous("git status && rm -rf /", ["rm"]) is True
+    assert is_dangerous("echo ok; git reset --hard", ["git reset --hard"]) is True
+
+
 def test_bash_rejects_dangerous_command(workdir):
     tool = BashTool(workdir=workdir)
     result = tool.execute({"command": "rm -rf /"})
@@ -172,3 +180,13 @@ def test_bash_handles_non_utf8_output(workdir):
     )
     assert result.success is True
     assert "\ufffd" in result.output
+
+
+def test_bash_truncates_excessive_output(workdir):
+    tool = BashTool(workdir=workdir)
+    result = tool.execute(
+        {"command": "python -c \"print('x' * (600 * 1024), end='')\""}
+    )
+    assert result.success is True
+    assert len(result.output) <= 512 * 1024 + 100
+    assert "truncated" in result.output.lower()

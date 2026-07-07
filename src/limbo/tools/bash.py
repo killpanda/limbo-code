@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import shlex
 import shutil
 import subprocess
@@ -12,6 +13,7 @@ from limbo.models import ToolResult
 from limbo.tools.base import BaseTool
 
 DEFAULT_TIMEOUT = 30.0
+MAX_OUTPUT_BYTES = 512 * 1024
 
 
 class BashTool(BaseTool):
@@ -81,6 +83,12 @@ class BashTool(BaseTool):
         if proc.stderr:
             output += ("\n" if output else "") + f"[stderr]\n{proc.stderr}"
 
+        if len(output) > MAX_OUTPUT_BYTES:
+            output = (
+                output[:MAX_OUTPUT_BYTES]
+                + f"\n\n[output truncated: exceeded {MAX_OUTPUT_BYTES} byte limit]"
+            )
+
         if proc.returncode != 0:
             exit_msg = f"Command failed with exit code {proc.returncode}."
             output = f"{exit_msg}\n{output}" if output else exit_msg
@@ -93,8 +101,27 @@ class BashTool(BaseTool):
         return ToolResult(success=True, output=output or "")
 
 
+_CONTROL_OPERATOR_RE = re.compile(r"(;|&&|\|\||\|)")
+
+
+def _tokenize_command(command: str) -> list[str]:
+    """Split a command into tokens, treating shell control operators as separate tokens."""
+    raw_tokens = shlex.split(command)
+    tokens: list[str] = []
+    for raw in raw_tokens:
+        for part in _CONTROL_OPERATOR_RE.split(raw):
+            if part:
+                tokens.append(part)
+    return tokens
+
+
 def is_dangerous(command: str, patterns: list[str]) -> bool:
     """Return True if command matches a dangerous pattern.
+
+    Single-token patterns are matched only in command-name positions: the first
+    token of the command or the first token after a shell control operator
+    (``;``, ``&&``, ``||``, ``|``). Multi-token patterns are matched against
+    the leading tokens starting at each command position.
 
     .. warning::
         This check is heuristic only. It tokenizes the top-level command, so
@@ -102,16 +129,25 @@ def is_dangerous(command: str, patterns: list[str]) -> bool:
         variable indirection, and other shell constructs can bypass it. Review
         all commands before confirming destructive actions.
     """
-    tokens = shlex.split(command)
+    tokens = _tokenize_command(command)
+    control_operators = {";", "&&", "||", "|"}
+    command_starts = [0]
+    for i in range(1, len(tokens)):
+        if tokens[i - 1] in control_operators:
+            command_starts.append(i)
+
     for pattern in patterns:
         if not pattern:
             continue
-        pattern_tokens = shlex.split(pattern)
-        if len(pattern_tokens) == 1:
-            name = pattern_tokens[0]
-            for token in tokens:
+        pattern_tokens = _tokenize_command(pattern)
+        for start in command_starts:
+            if start >= len(tokens):
+                continue
+            if len(pattern_tokens) == 1:
+                name = pattern_tokens[0]
+                token = tokens[start]
                 if token == name or Path(token).name == name:
                     return True
-        elif tokens[: len(pattern_tokens)] == pattern_tokens:
-            return True
+            elif tokens[start : start + len(pattern_tokens)] == pattern_tokens:
+                return True
     return False
