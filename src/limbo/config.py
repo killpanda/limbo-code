@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 from typing import Any
 
 import toml  # type: ignore[import-untyped]
 from pydantic import BaseModel, Field
+from toml import TomlDecodeError
 
 DEFAULT_CONFIG_PATH = Path.home() / ".limbo" / "config.toml"
 
@@ -46,5 +48,12 @@ def load_config(path: Path | None = None) -> Config:
     path = path or DEFAULT_CONFIG_PATH
     if not path.exists():
         return Config()
-    data: dict[str, Any] = toml.load(path)
+    try:
+        data: dict[str, Any] = toml.load(path)
+    except TomlDecodeError as e:
+        warnings.warn(
+            f"Malformed config file {path}: {e}. Using defaults.",
+            stacklevel=2,
+        )
+        return Config()
     return Config.model_validate(data)

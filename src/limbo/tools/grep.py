@@ -27,7 +27,10 @@ class GrepTool(BaseTool):
             "ignore_case": {"type": "boolean", "description": "Case-insensitive"},
             "fixed_string": {"type": "boolean", "description": "Literal string"},
             "context": {"type": "integer", "description": "Lines before/after match"},
-            "limit": {"type": "integer", "description": "Max matches"},
+            "limit": {
+                "type": "integer",
+                "description": "Max matches (per file when using ripgrep)",
+            },
         },
         "required": ["pattern"],
     }

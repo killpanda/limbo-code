@@ -2,6 +2,7 @@ import pytest
 from textual.app import App
 
 from limbo.ui.widgets.chat import ChatWidget
+from limbo.ui.widgets.file_preview import FilePreviewWidget
 from limbo.ui.widgets.input import InputWidget, UserSubmitted
 
 
@@ -39,3 +40,18 @@ async def test_input_submits_event():
     assert len(submitted) == 1
     assert isinstance(submitted[0], UserSubmitted)
     assert submitted[0].message == "hello"
+
+
+@pytest.mark.asyncio
+async def test_file_preview_escapes_markup():
+    class TestApp(App[None]):
+        def compose(self):
+            yield FilePreviewWidget(id="preview")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(FilePreviewWidget)
+        widget.show("title", "[bold]not bold[/bold]")
+        # The literal brackets should be escaped in the stored content string.
+        content = widget._Static__content
+        assert r"\[bold]not bold\[/bold]" in content

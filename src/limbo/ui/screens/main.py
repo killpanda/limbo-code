@@ -61,6 +61,18 @@ class MainScreen(Screen[None]):
             with Vertical(id="preview-container"):
                 yield FilePreviewWidget(id="preview")
 
+    def _normalized_recent_path(self, path: str) -> str | None:
+        """Return a workdir-relative path for the recent-files sidebar.
+
+        Returns ``None`` when the path cannot be resolved inside the workdir.
+        """
+        try:
+            resolved = (self.workdir / path).resolve()
+            rel = resolved.relative_to(self.workdir)
+            return str(rel)
+        except (ValueError, OSError):
+            return None
+
     def handle_confirmation(self) -> None:
         """Handle an approval from the confirmation dialog."""
         self._confirmation_result = True
@@ -113,7 +125,9 @@ class MainScreen(Screen[None]):
                 and result.success
                 and "path" in event.arguments
             ):
-                sidebar.add_recent_file(event.arguments["path"])
+                recent = self._normalized_recent_path(event.arguments["path"])
+                if recent is not None:
+                    sidebar.add_recent_file(recent)
 
             if result.requires_confirmation:
                 skip = False
@@ -132,7 +146,9 @@ class MainScreen(Screen[None]):
                     )
                     path = event.arguments.get("path")
                     if path and apply_result.success:
-                        sidebar.add_recent_file(path)
+                        recent = self._normalized_recent_path(path)
+                        if recent is not None:
+                            sidebar.add_recent_file(recent)
                     return
 
                 input_widget.disabled = True
@@ -167,7 +183,9 @@ class MainScreen(Screen[None]):
                     )
                     path = event.arguments.get("path")
                     if path and apply_result.success:
-                        sidebar.add_recent_file(path)
+                        recent = self._normalized_recent_path(path)
+                        if recent is not None:
+                            sidebar.add_recent_file(recent)
                 else:
                     chat.append_assistant_text(
                         f"\n[{event.name} was rejected by user.]"

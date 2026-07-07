@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from rich.markup import escape
 from textual.widgets import Static
 
 
@@ -17,4 +18,5 @@ class FilePreviewWidget(Static):
     """
 
     def show(self, title: str, content: str) -> None:
-        self.update(f"[#888888]{title}[/#888888]\n{content}")
+        # Escape untrusted tool output so it is not interpreted as Rich markup.
+        self.update(f"[#888888]{title}[/#888888]\n{escape(content)}")

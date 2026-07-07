@@ -2,6 +2,8 @@ import os
 import tempfile
 from pathlib import Path
 
+import pytest
+
 from limbo.config import Config, load_config
 
 
@@ -31,4 +33,12 @@ model = "gpt-4o"
 
 def test_load_config_missing_file_uses_defaults():
     cfg = load_config(Path("/nonexistent/config.toml"))
+    assert cfg.llm.model == "deepseek-chat"
+
+
+def test_load_config_malformed_file_uses_defaults(tmp_path):
+    path = tmp_path / "malformed.toml"
+    path.write_text("[unclosed = ")
+    with pytest.warns(UserWarning, match="Malformed config file"):
+        cfg = load_config(path)
     assert cfg.llm.model == "deepseek-chat"

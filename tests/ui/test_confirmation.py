@@ -11,6 +11,7 @@ from limbo.ui.screens.main import MainScreen
 from limbo.ui.widgets.chat import ChatWidget
 from limbo.ui.widgets.confirm import ConfirmDialog
 from limbo.ui.widgets.input import InputWidget
+from limbo.ui.widgets.sidebar import SidebarWidget
 
 
 class FakeLLMClient:
@@ -356,3 +357,29 @@ async def test_input_disabled_during_streaming(tmp_path, monkeypatch):
         await pilot.pause()
 
         assert input_widget.disabled is False
+
+
+@pytest.mark.asyncio
+async def test_recent_file_path_is_normalized(tmp_path, monkeypatch):
+    monkeypatch.setattr("limbo.agent.Path.home", lambda: tmp_path)
+    (tmp_path / "subdir").mkdir()
+    (tmp_path / "x.txt").write_text("hello")
+    cfg = Config()
+    cfg.llm.api_key = "test"
+    fake_llm = FakeLLMClient(
+        [
+            [ToolCallEvent(id="c1", name="read", arguments={"path": "./subdir/../x.txt"})],
+        ]
+    )
+    app = LimboApp(workdir=tmp_path, config=cfg, llm_client=fake_llm)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        main_screen = pilot.app.screen_stack[-1]
+        assert isinstance(main_screen, MainScreen)
+
+        main_screen.run_worker(main_screen._handle_turn("read x.txt"))
+        await pilot.pause()
+
+        sidebar = main_screen.query_one("#sidebar", SidebarWidget)
+        assert "x.txt" in sidebar._recent_files
+        assert "subdir/../x.txt" not in sidebar._recent_files
