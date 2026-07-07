@@ -33,7 +33,10 @@ class GrepTool(BaseTool):
             "context": {"type": "integer", "description": "Lines before/after match"},
             "limit": {
                 "type": "integer",
-                "description": "Max matches (per file when using ripgrep)",
+                "description": (
+                    "Max matches (per file with ripgrep,"
+                    " total across files in Python fallback)"
+                ),
             },
         },
         "required": ["pattern"],

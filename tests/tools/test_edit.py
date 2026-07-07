@@ -110,3 +110,18 @@ def test_edit_handles_read_error(workdir):
         assert "could not read file" in result.error.lower()
     finally:
         target.chmod(0o644)
+
+
+def test_edit_rejects_symlink_escape(workdir):
+    outside = workdir.parent / "outside_edit_target.py"
+    outside.write_text("x = 1\n")
+    link = workdir / "escape_link.py"
+    link.symlink_to(outside)
+    tool = EditTool(workdir=workdir)
+    result = tool.execute(
+        {"path": "escape_link.py", "old_text": "x = 1", "new_text": "x = 42"},
+        dry_run=False,
+    )
+    assert result.success is False
+    assert "outside" in result.error.lower()
+    assert outside.read_text() == "x = 1\n"

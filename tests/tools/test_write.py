@@ -42,3 +42,16 @@ def test_write_dry_run_does_not_create_file(workdir):
     assert result.requires_confirmation is True
     assert "Will create/overwrite" in result.output
     assert not (workdir / "new.txt").exists()
+
+
+def test_write_rejects_symlink_escape(workdir):
+    outside = workdir.parent / "outside_write_target.txt"
+    link = workdir / "escape_link"
+    link.symlink_to(outside)
+    tool = WriteTool(workdir=workdir)
+    result = tool.execute(
+        {"path": "escape_link", "content": "escaped"}, dry_run=False
+    )
+    assert result.success is False
+    assert "outside" in result.error.lower()
+    assert not outside.exists()

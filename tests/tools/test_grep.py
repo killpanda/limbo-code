@@ -100,3 +100,12 @@ def test_grep_python_fallback_rejects_context(workdir):
     result = tool.execute({"pattern": "def foo", "context": 2})
     assert result.success is False
     assert "ripgrep" in result.error.lower()
+
+
+def test_grep_python_fallback_limit_is_global(workdir):
+    tool = GrepTool(workdir=workdir)
+    tool._find_rg = lambda: None
+    result = tool.execute({"pattern": "def ", "limit": 1})
+    assert result.success is True
+    # Only one match total should be returned, even though both files match.
+    assert len(result.output.splitlines()) == 1
