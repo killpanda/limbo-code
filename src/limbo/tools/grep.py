@@ -143,6 +143,8 @@ class GrepTool(BaseTool):
 
         matches = []
         matcher = _GitignoreMatcher(self.workdir)
+        # ``rglob`` may traverse directory symlinks before we can filter them;
+        # we resolve and enforce the workdir boundary for each candidate.
         files = [target] if target.is_file() else target.rglob("*")
         count = 0
         for f in files:

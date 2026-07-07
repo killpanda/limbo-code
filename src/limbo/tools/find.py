@@ -142,6 +142,8 @@ class FindTool(BaseTool):
             return ToolResult(success=False, error="Path is outside working directory.")
 
         try:
+            # ``glob`` may traverse directory symlinks before we can filter them;
+            # we resolve and enforce the workdir boundary below.
             matches = sorted(target.glob(pattern))
         except ValueError as e:
             return ToolResult(success=False, error=f"Invalid glob pattern: {e}")

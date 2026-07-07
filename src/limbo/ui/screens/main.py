@@ -96,6 +96,10 @@ class MainScreen(Screen[None]):
         input_widget.disabled = True
         try:
             stream: AsyncIterator[AgentEvent] = self.agent.run(user_input)
+            # The agent may pause for confirmation mid-turn. When a tool is
+            # confirmed, `confirmation_applied` becomes True and the stream is
+            # replaced with the continuation so remaining tools/responses are
+            # processed before returning to the user.
             while True:
                 async for event in stream:
                     await self._process_agent_event(event)
