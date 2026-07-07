@@ -172,6 +172,35 @@ class Agent:
         self._pending_placeholders.discard(pending_id)
         self._pending_tool = None
 
+    def _set_tool_message(self, tool_call_id: str, content: str) -> None:
+        """Replace an existing tool result message or append a new one."""
+        for idx, msg in enumerate(self.messages):
+            if msg.role == "tool" and msg.tool_call_id == tool_call_id:
+                self.messages[idx] = msg.model_copy(update={"content": content})
+                return
+        self.messages.append(
+            Message(role="tool", content=content, tool_call_id=tool_call_id)
+        )
+
+    def _record_tool_error(
+        self,
+        assistant: Message,
+        start_idx: int,
+        crashed_id: str,
+        error_message: str,
+    ) -> None:
+        """Record an error result for a crashed tool and its later siblings."""
+        tool_calls = assistant.tool_calls or []
+        for idx in range(start_idx, len(tool_calls)):
+            tc = tool_calls[idx]
+            content = (
+                error_message
+                if tc["id"] == crashed_id
+                else "Action not executed: earlier tool failed."
+            )
+            self._set_tool_message(tc["id"], content)
+            self._pending_placeholders.discard(tc["id"])
+
     async def run(self, user_input: str) -> AsyncIterator[AgentEvent]:
         # Reset per-user-turn state and discard stale pending confirmations.
         self._iteration_count = 0
@@ -240,7 +269,7 @@ class Agent:
         if assistant is None or assistant.tool_calls is None:
             return
 
-        for tc in assistant.tool_calls:
+        for start_idx, tc in enumerate(assistant.tool_calls):
             if tc["id"] not in self._pending_placeholders:
                 continue
 
@@ -250,7 +279,11 @@ class Agent:
             try:
                 result = await self.registry.execute(name, arguments, dry_run=True)
             except Exception as e:  # noqa: BLE001
-                yield ErrorEvent(message=f"Tool error: {e}")
+                error_message = f"Tool error: {e}"
+                yield ErrorEvent(message=error_message)
+                self._record_tool_error(
+                    assistant, start_idx, tc["id"], error_message
+                )
                 return
             yield ToolResultEvent(
                 id=tc["id"], name=name, result=result, arguments=arguments
@@ -287,7 +320,11 @@ class Agent:
                 try:
                     result = await self.registry.execute(name, arguments, dry_run=True)
                 except Exception as e:  # noqa: BLE001
-                    yield ErrorEvent(message=f"Tool error: {e}")
+                    error_message = f"Tool error: {e}"
+                    yield ErrorEvent(message=error_message)
+                    self._record_tool_error(
+                        last, idx, tc["id"], error_message
+                    )
                     return
                 if result.requires_confirmation:
                     self._pending_tool = tc

@@ -489,6 +489,99 @@ async def test_agent_tool_crash_yields_tool_error_event(workdir):
 
 
 @pytest.mark.asyncio
+async def test_agent_tool_crash_appends_tool_results(workdir):
+    """A crashed tool must not leave the assistant's tool_calls unmatched."""
+    cfg = Config()
+    fake_llm = FakeLLMClient([
+        [
+            ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"}),
+            ToolCallEvent(id="c2", name="write", arguments={"path": "x.txt", "content": "hi"}),
+        ],
+    ])
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    async def crashing_execute(name, arguments, dry_run=False):
+        raise RuntimeError("tool exploded")
+
+    agent.registry.execute = crashing_execute
+
+    events = await _collect(agent.run("multi"))
+    error_events = [e for e in events if isinstance(e, ErrorEvent)]
+    assert len(error_events) == 1
+
+    assistant = [m for m in agent.messages if m.role == "assistant" and m.tool_calls]
+    assert len(assistant) == 1
+    tool_call_ids = {tc["id"] for tc in assistant[0].tool_calls or []}
+    tool_result_ids = {m.tool_call_id for m in agent.messages if m.role == "tool"}
+    assert tool_call_ids == tool_result_ids
+
+    crashed_message = next(
+        m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c1"
+    )
+    assert "tool exploded" in (crashed_message.content or "")
+    remaining_message = next(
+        m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c2"
+    )
+    assert "not executed" in (remaining_message.content or "").lower()
+
+
+@pytest.mark.asyncio
+async def test_agent_continue_after_confirmation_replaces_placeholder_on_crash(workdir):
+    """A crash while executing remaining tools must replace the placeholder."""
+    (workdir / "main.py").write_text("x = 1\n")
+    cfg = Config()
+    fake_llm = FakeLLMClient([
+        [
+            ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"}),
+            ToolCallEvent(id="c2", name="read", arguments={"path": "main.py"}),
+        ],
+        [TextChunk(text="done")],
+    ])
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    events = await _collect(agent.run("multi"))
+    result_events = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(result_events) == 1
+    assert agent._pending_tool is not None
+    assert agent._pending_tool["id"] == "c1"
+
+    apply_result = await agent.apply_tool(
+        "write", {"path": "x.txt", "content": "hi"}
+    )
+    assert apply_result.success is True
+
+    original_execute = agent.registry.execute
+
+    async def crashing_read(name, arguments, dry_run=False):
+        if name == "read":
+            raise RuntimeError("read crashed")
+        return await original_execute(name, arguments, dry_run)
+
+    agent.registry.execute = crashing_read
+
+    continuation = await _collect(agent.continue_after_confirmation())
+    error_events = [e for e in continuation if isinstance(e, ErrorEvent)]
+    assert len(error_events) == 1
+    assert "read crashed" in error_events[0].message
+
+    c2_message = next(
+        m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c2"
+    )
+    assert "pending" not in (c2_message.content or "").lower()
+    assert "read crashed" in (c2_message.content or "")
+
+
+@pytest.mark.asyncio
 async def test_agent_appends_session_on_subsequent_turns(workdir):
     cfg = Config()
     fake_llm = FakeLLMClient([
