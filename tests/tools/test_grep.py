@@ -78,3 +78,25 @@ def test_grep_python_fallback_does_not_follow_symlinks_outside_workdir(workdir):
     result = tool.execute({"pattern": "SECRET_OUTSIDE_WORKDIR"})
     assert result.success is True
     assert "SECRET_OUTSIDE_WORKDIR" not in result.output
+
+
+def test_grep_python_fallback_uses_glob(workdir):
+    tool = GrepTool(workdir=workdir)
+    tool._find_rg = lambda: None
+    result = tool.execute({"pattern": "def ", "glob": "*.py"})
+    assert result.success is True
+    assert "a.py" in result.output
+    assert "b.py" in result.output
+
+    result = tool.execute({"pattern": "def ", "glob": "a.py"})
+    assert result.success is True
+    assert "a.py" in result.output
+    assert "b.py" not in result.output
+
+
+def test_grep_python_fallback_rejects_context(workdir):
+    tool = GrepTool(workdir=workdir)
+    tool._find_rg = lambda: None
+    result = tool.execute({"pattern": "def foo", "context": 2})
+    assert result.success is False
+    assert "ripgrep" in result.error.lower()

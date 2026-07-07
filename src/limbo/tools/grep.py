@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import fnmatch
 import re
 import subprocess
 from pathlib import Path
@@ -17,7 +18,10 @@ MAX_BYTES = 512 * 1024
 
 class GrepTool(BaseTool):
     name = "grep"
-    description = "Search file contents for a pattern. Respects .gitignore."
+    description = (
+        "Search file contents for a pattern. Respects .gitignore (basic rules). "
+        "Install ripgrep for full gitignore, glob, and context-line support."
+    )
     parameters = {
         "type": "object",
         "properties": {
@@ -55,7 +59,9 @@ class GrepTool(BaseTool):
             return self._run_rg(
                 rg, target, pattern, glob, ignore_case, fixed_string, context, limit
             )
-        return self._run_python_regex(target, pattern, ignore_case, fixed_string, limit)
+        return self._run_python_regex(
+            target, pattern, glob, ignore_case, fixed_string, context, limit
+        )
 
     def _find_rg(self) -> str | None:
         import shutil
@@ -106,13 +112,20 @@ class GrepTool(BaseTool):
         self,
         target: Path,
         pattern: str,
+        glob: str | None,
         ignore_case: bool,
         fixed_string: bool,
+        context: int,
         limit: int,
     ) -> ToolResult:
-        # Fallback path: supports pattern/ignore_case/fixed_string/limit. The
-        # ``context`` and ``glob`` parameters are not implemented in this path;
-        # install ripgrep for full parameter support.
+        # Fallback path: supports pattern/glob/ignore_case/fixed_string/limit.
+        # Context lines are only available through ripgrep.
+        if context:
+            return ToolResult(
+                success=False,
+                error="Context lines require ripgrep. Install ripgrep or omit 'context'.",
+            )
+
         flags = re.IGNORECASE if ignore_case else 0
         try:
             compiled = re.compile(
@@ -136,7 +149,10 @@ class GrepTool(BaseTool):
                 rel = resolved.relative_to(self.workdir)
             except ValueError:
                 continue
-            if matcher.is_ignored(str(rel)):
+            rel_str = str(rel)
+            if matcher.is_ignored(rel_str):
+                continue
+            if glob is not None and not fnmatch.fnmatch(rel_str, glob):
                 continue
             try:
                 text = resolved.read_text(encoding="utf-8", errors="replace")
