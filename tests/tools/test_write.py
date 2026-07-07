@@ -1,0 +1,35 @@
+import tempfile
+from pathlib import Path
+
+import pytest
+
+from limbo.tools.write import WriteTool
+
+
+@pytest.fixture
+def workdir():
+    with tempfile.TemporaryDirectory() as tmp:
+        yield Path(tmp)
+
+
+def test_write_creates_file(workdir):
+    tool = WriteTool(workdir=workdir)
+    result = tool.execute({"path": "new.txt", "content": "hello"})
+    assert result.success is True
+    assert result.requires_confirmation is True
+    assert (workdir / "new.txt").read_text() == "hello"
+
+
+def test_write_overwrites_file(workdir):
+    (workdir / "x.txt").write_text("old")
+    tool = WriteTool(workdir=workdir)
+    result = tool.execute({"path": "x.txt", "content": "new"})
+    assert result.success is True
+    assert (workdir / "x.txt").read_text() == "new"
+
+
+def test_write_outside_workdir(workdir):
+    tool = WriteTool(workdir=workdir)
+    result = tool.execute({"path": "../x.txt", "content": "x"})
+    assert result.success is False
+    assert "outside" in result.error.lower()
