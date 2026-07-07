@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from limbo.models import ToolResult
-from limbo.tools.base import BaseTool
+from limbo.tools.base import BaseTool, is_within_workdir
 
 MAX_ENTRIES = 500
 
@@ -27,6 +27,8 @@ class LsTool(BaseTool):
         limit = arguments.get("limit", MAX_ENTRIES)
 
         target = (self.workdir / path).resolve()
+        if not is_within_workdir(target, self.workdir):
+            return ToolResult(success=False, error="Path is outside working directory.")
         if not target.exists():
             return ToolResult(success=False, error=f"Path not found: {path}")
         if not target.is_dir():

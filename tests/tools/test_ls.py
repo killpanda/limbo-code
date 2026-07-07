@@ -29,3 +29,10 @@ def test_ls_limit(workdir):
     result = tool.execute({"path": ".", "limit": 2})
     lines = [line for line in result.output.splitlines() if line.strip()]
     assert len(lines) == 2
+
+
+def test_ls_rejects_paths_outside_workdir(workdir):
+    tool = LsTool(workdir=workdir)
+    assert tool.execute({"path": ".."}).success is False
+    assert tool.execute({"path": "../"}).success is False
+    assert tool.execute({"path": "/tmp"}).success is False
