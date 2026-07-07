@@ -8,6 +8,9 @@ from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import Static
 
+from limbo.ui.widgets.chat import ChatWidget
+from limbo.ui.widgets.input import InputWidget
+
 
 class MainScreen(Screen[None]):
     """Main three-column layout."""
@@ -21,6 +24,7 @@ class MainScreen(Screen[None]):
             with Vertical(id="sidebar"):
                 yield Static("Sidebar", id="sidebar-title")
             with Vertical(id="chat-container"):
-                yield Static("Chat", id="chat-title")
+                yield ChatWidget(id="chat")
+                yield InputWidget(id="input")
             with Vertical(id="preview-container"):
                 yield Static("Preview", id="preview-title")
