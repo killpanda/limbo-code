@@ -5,6 +5,7 @@ from limbo.ui.widgets.chat import ChatWidget
 from limbo.ui.widgets.confirm import ConfirmDialog, Rejected
 from limbo.ui.widgets.file_preview import FilePreviewWidget
 from limbo.ui.widgets.input import InputWidget, UserSubmitted
+from limbo.ui.widgets.sidebar import SidebarWidget
 
 
 @pytest.mark.asyncio
@@ -137,3 +138,17 @@ async def test_chat_append_does_not_interpret_markup():
         assert "[italic]chunk2[/italic]" in combined
         # The rendered visual must contain the literal brackets, not styled text.
         assert "[bold]chunk1[/bold][italic]chunk2[/italic]" == last.visual.plain
+
+
+@pytest.mark.asyncio
+async def test_sidebar_recent_files_does_not_interpret_markup():
+    class TestApp(App[None]):
+        def compose(self):
+            yield SidebarWidget(id="sidebar")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(SidebarWidget)
+        widget.add_recent_file("[bold]x[/bold].py")
+        # The literal brackets should be preserved in the rendered content.
+        assert "[bold]x[/bold].py" in widget.recent_files.render().plain

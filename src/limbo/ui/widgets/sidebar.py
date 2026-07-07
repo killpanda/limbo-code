@@ -22,7 +22,10 @@ class SidebarWidget(Vertical):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         self.title = Static("Limbo", id="session-title")
-        self.recent_files = Static("Recent files:\n(none)", id="recent-files")
+        # Disable Rich markup interpretation so file paths are rendered literally.
+        self.recent_files = Static(
+            "Recent files:\n(none)", id="recent-files", markup=False
+        )
         self.status = Static("Idle", id="tool-status")
         self._recent_files: list[str] = []
 
