@@ -6,7 +6,10 @@ from pathlib import Path
 
 from textual.app import App
 
+from limbo.config import Config
+from limbo.llm.client import LLMClient
 from limbo.ui.screens.main import MainScreen
+from limbo.ui.widgets.confirm import Confirmed, Rejected
 
 
 class LimboApp(App[None]):
@@ -14,9 +17,36 @@ class LimboApp(App[None]):
 
     CSS_PATH = None
 
-    def __init__(self, workdir: str | Path, *args, **kwargs):
+    def __init__(
+        self,
+        workdir: str | Path,
+        config: Config | None = None,
+        llm_client: LLMClient | None = None,
+        *args,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
         self.workdir = Path(workdir).resolve()
+        self.config = config
+        self.llm_client = llm_client
 
     def on_mount(self) -> None:
-        self.push_screen(MainScreen(workdir=self.workdir))
+        self.push_screen(
+            MainScreen(
+                workdir=self.workdir,
+                config=self.config,
+                llm_client=self.llm_client,
+            )
+        )
+
+    def on_confirmed(self, _event: Confirmed) -> None:
+        for screen in reversed(self.screen_stack):
+            if isinstance(screen, MainScreen):
+                screen.on_confirmed(_event)
+                break
+
+    def on_rejected(self, _event: Rejected) -> None:
+        for screen in reversed(self.screen_stack):
+            if isinstance(screen, MainScreen):
+                screen.on_rejected(_event)
+                break

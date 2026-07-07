@@ -10,9 +10,7 @@ from limbo.tools.base import BaseTool, is_within_workdir
 
 class WriteTool(BaseTool):
     name = "write"
-    description = (
-        "Create or overwrite a file. Use only for new files or complete rewrites."
-    )
+    description = "Create or overwrite a file. Use only for new files or complete rewrites."
     parameters = {
         "type": "object",
         "properties": {
@@ -25,7 +23,6 @@ class WriteTool(BaseTool):
     def execute(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
         raw_path = arguments.get("path", "")
         content = arguments.get("content", "")
-
         target = (self.workdir / raw_path).resolve()
         if not is_within_workdir(target, self.workdir):
             return ToolResult(success=False, error="Path is outside working directory.")
@@ -33,7 +30,7 @@ class WriteTool(BaseTool):
         if dry_run:
             return ToolResult(
                 success=True,
-                output=f"File ready to write: {raw_path}",
+                output=f"Will create/overwrite {raw_path} ({len(content)} chars).",
                 requires_confirmation=True,
             )
 
@@ -43,8 +40,4 @@ class WriteTool(BaseTool):
         except OSError as e:
             return ToolResult(success=False, error=f"Could not write file: {e}")
 
-        return ToolResult(
-            success=True,
-            output=f"File written: {raw_path}",
-            requires_confirmation=True,
-        )
+        return ToolResult(success=True, output=f"Wrote {raw_path}.")

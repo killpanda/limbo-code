@@ -16,10 +16,16 @@ class OpenAICompatibleClient:
 
     def __init__(self, config: Config):
         self.config = config
-        self.client = OpenAI(
-            api_key=config.llm.api_key or "",
-            base_url=config.llm.base_url,
-        )
+        self._client: OpenAI | None = None
+
+    @property
+    def client(self) -> OpenAI:
+        if self._client is None:
+            self._client = OpenAI(
+                api_key=self.config.llm.api_key or "",
+                base_url=self.config.llm.base_url,
+            )
+        return self._client
 
     def chat(
         self,
