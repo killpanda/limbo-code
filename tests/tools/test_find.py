@@ -31,3 +31,24 @@ def test_find_with_limit(workdir):
     result = tool.execute({"pattern": "**/*.py", "limit": 2})
     lines = [line for line in result.output.splitlines() if line.strip()]
     assert len(lines) == 2
+
+
+@pytest.fixture
+def workdir_with_gitignore():
+    with tempfile.TemporaryDirectory() as tmp:
+        (Path(tmp) / "src").mkdir()
+        (Path(tmp) / "src" / "a.py").write_text("x")
+        (Path(tmp) / ".gitignore").write_text("ignored.py\nignored_dir/\n")
+        (Path(tmp) / "ignored.py").write_text("y")
+        (Path(tmp) / "ignored_dir").mkdir()
+        (Path(tmp) / "ignored_dir" / "x.py").write_text("z")
+        yield Path(tmp)
+
+
+def test_find_respects_gitignore(workdir_with_gitignore):
+    tool = FindTool(workdir=workdir_with_gitignore)
+    result = tool.execute({"pattern": "**/*.py"})
+    assert result.success is True
+    assert "src/a.py" in result.output
+    assert "ignored.py" not in result.output
+    assert "ignored_dir/x.py" not in result.output
