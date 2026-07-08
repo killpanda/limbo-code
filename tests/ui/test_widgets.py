@@ -95,8 +95,8 @@ async def test_file_preview_escapes_markup():
     async with app.run_test() as pilot:
         widget = pilot.app.query_one(FilePreviewWidget)
         widget.show("title", "[bold]not bold[/bold]")
-        # The literal brackets should be escaped in the stored content string.
-        assert r"\[bold]not bold\[/bold]" in widget.content
+        # The literal brackets should be preserved in the rendered content.
+        assert "[bold]not bold[/bold]" in widget.content.plain
 
 
 @pytest.mark.asyncio

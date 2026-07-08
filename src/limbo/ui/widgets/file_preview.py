@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from rich.markup import escape
+from rich.text import Text
 from textual.widgets import Static
 
 
@@ -18,5 +18,8 @@ class FilePreviewWidget(Static):
     """
 
     def show(self, title: str, content: str) -> None:
-        # Escape untrusted tool output so it is not interpreted as Rich markup.
-        self.update(f"[#888888]{title}[/#888888]\n{escape(content)}")
+        # Render as a Text object so untrusted tool output is not parsed as Rich markup.
+        text = Text(title, style="#888888")
+        text.append("\n")
+        text.append(content)
+        self.update(text)
