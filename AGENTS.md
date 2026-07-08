@@ -1,0 +1,168 @@
+# Limbo — Agent Guide
+
+## Overview
+
+**Limbo** is a minimal terminal AI coding agent built with Python 3.11+ and Textual. It provides a TUI where users converse with an LLM (OpenAI-compatible, defaulting to DeepSeek) to explore, read, edit, and write code using a set of 7 tools. All destructive operations (`write`, `edit`, `bash`) require explicit user confirmation in the TUI.
+
+## Quick Start
+
+```bash
+pip install -e .            # install
+limbo --workdir /path/to/project   # run
+```
+
+Configuration lives in `~/.limbo/config.toml` (see [README](./README.md)).
+
+## Architecture
+
+```
+src/limbo/
+├── app.py                  # CLI entry point: arg parsing, config loading, app launch
+├── __init__.py             # Version string
+├── __main__.py             # `python -m limbo` support
+├── config.py               # Pydantic models for config (LLM, UI, safety, tools)
+├── models.py               # Shared data types: Message, ToolCall, ToolResult, LLMEvent
+├── agent.py                # Conversation loop: orchestrates LLM + tools, handles confirmation
+├── llm/
+│   ├── client.py           # LLMClient Protocol
+│   └── openai_client.py    # OpenAI-compatible streaming client
+├── tools/
+│   ├── base.py             # BaseTool abstract class + path helpers
+│   ├── registry.py         # ToolRegistry: collects and dispatches tools
+│   ├── read.py             # Read file contents
+│   ├── bash.py             # Execute bash commands (with safety filter)
+│   ├── edit.py             # Surgical text replacement in files
+│   ├── write.py            # Create/overwrite files
+│   ├── grep.py             # Search file contents (ripgrep or Python fallback)
+│   ├── find.py             # Find files by glob
+│   └── ls.py               # List directory contents
+└── ui/
+    ├── app.py              # Textual App subclass
+    ├── screens/
+    │   └── main.py         # Main 3-column layout + event handling
+    └── widgets/
+        ├── chat.py         # Message display area
+        ├── input.py        # Multi-line user input
+        ├── sidebar.py      # Left sidebar: recent files, status
+        ├── file_preview.py # Right preview panel for tool output
+        └── confirm.py      # Confirmation modal (ConfirmDialog, Confirmed/Rejected events)
+
+tests/
+├── test_models.py
+├── test_config.py
+├── test_agent.py
+├── test_llm_client.py
+├── tools/
+│   ├── test_read.py, test_bash.py, test_edit.py, test_write.py
+│   ├── test_grep.py, test_find.py, test_ls.py, test_registry.py
+└── ui/
+    ├── test_app_smoke.py
+    ├── test_confirmation.py
+    └── test_widgets.py
+```
+
+## Data Flow
+
+1. **User input** → `InputWidget` emits `UserSubmitted` → `MainScreen._handle_turn()`
+2. **Agent** (`agent.py`) appends user message, calls `_conversation_loop()`
+3. **LLM call** → `OpenAICompatibleClient.chat()` streams `TextChunk` / `ToolCallEvent`
+4. **Text deltas** → rendered live in `ChatWidget` (streaming effect)
+5. **Tool calls** → `ToolRegistry.execute(name, args, dry_run=True)` run dry first
+6. **Confirmation-gated tools** (`edit`, `write`, `bash`): `ToolResult.requires_confirmation=True` pauses the loop; a `ConfirmDialog` modal is pushed
+7. **User approves** → `Agent.apply_tool()` re-executes with `dry_run=False`
+8. **User rejects** → `Agent.reject_pending_tool()` replaces placeholder with rejection message
+9. **Loop continues** until LLM produces final text or `max_iterations` is hit
+10. **Session saved** as JSONL to `~/.limbo/sessions/`
+
+## AgentLoop Details
+
+- `Agent.run()` yields `AgentEvent` types: `TextDelta`, `ToolCallRequest`, `ToolResultEvent`, `ErrorEvent`
+- The loop respects `config.llm.max_iterations` (default 10)
+- Multi-tool calls in a single assistant turn are executed sequentially
+- When a tool requires confirmation, placeholder `role="tool"` messages are inserted for all remaining calls in that turn so the message history stays valid for the OpenAI API
+- After a confirmed tool is applied, `Agent.continue_after_confirmation()` resumes the loop, first executing remaining placeholders, then returning to the LLM
+
+## Tools
+
+All tools extend `BaseTool` and implement `execute(arguments, dry_run=False) -> ToolResult`.
+
+| Tool | Confirmation | Description |
+|------|-------------|-------------|
+| `read` | Never | Read file with `offset`/`limit`. Rejects paths outside workdir. Blocks sensitive files (`.env`, SSH keys, configurable). |
+| `bash` | Always | Execute command with timeout. Safety filter blocks dangerous patterns (configurable). Output capped at 512KB. |
+| `edit` | Always | Find exact `old_text` and replace with `new_text`. Requires uniqueness. Shows unified diff on confirmation. |
+| `write` | Always | Create/overwrite file. Creates parent dirs automatically. |
+| `grep` | Never | Search using ripgrep (preferred) or Python regex fallback. Respects `.gitignore`. Context lines require ripgrep. |
+| `find` | Never | Glob-based file search. Respects root `.gitignore`. Built-in matcher supports basic gitignore rules. |
+| `ls` | Never | List directory contents with dotfiles. Sorted: dirs first, then files. |
+
+### Path Safety
+
+All file tools use `resolve_path()` from `base.py`, which:
+- Resolves the path via `Path.resolve()`
+- Checks it's inside the workdir via `is_within_workdir()`
+- Rejects broken symlinks when `strict=True` (default for read/edit)
+- Returns `ToolResult(error=...)` on failure, never raises
+
+## Configuration (`config.py`)
+
+`~/.limbo/config.toml` is loaded by `load_config()`. Key sections:
+
+```toml
+[llm]
+api_key = "..."           # Required
+model = "deepseek-chat"   # Default
+base_url = "https://api.deepseek.com/v1"
+temperature = 0.2
+max_iterations = 10
+
+[tools]
+bash_enabled = true
+
+[safety]
+dangerous_commands = ["rm", "git reset --hard"]
+sensitive_files = [".env", "id_rsa", "id_ed25519", ".ssh"]
+```
+
+## UI Layout
+
+Three-column layout:
+- **Left (sidebar)**: Session title, recent files list (last 10 read files), current tool status
+- **Center (chat)**: Conversation messages, user input at bottom
+- **Right (preview)**: Tool output display (read contents, bash results, diffs)
+
+Confirmation modal: `ConfirmDialog` shows tool output and "Apply"/"Reject" buttons.
+
+## Key Design Decisions
+
+- **No provider field**: Provider is inferred from `base_url`, `model`, `api_key`
+- **Async Agent, sync tools**: Tools run via `asyncio.to_thread()` — they are synchronous by default but executed in a thread pool
+- **Session persistence**: Full conversation history rewritten on each save (safe for MVP-scale conversations)
+- **System message**: Built into `Agent._init_system_message()` — tool descriptions and guidelines are hardcoded
+- **Bash safety filter**: Heuristic only — tokenizes the command, checks against pattern list. Known bypass vectors (subshells, command substitution, variable indirection) are documented.
+
+## Testing
+
+```bash
+pytest tests/ -v                     # all tests
+ruff check src tests                 # lint
+mypy src                             # type check (strict=false)
+```
+
+Tests use `pytest-asyncio` for async tests, `respx` for HTTP mocking (LLM client), and temp directories for tool tests.
+
+## Common Patterns
+
+### Adding a new tool
+
+1. Create `src/limbo/tools/<name>.py` with a class extending `BaseTool`
+2. Set `name`, `description`, `parameters` (JSON schema)
+3. Implement `execute()` returning `ToolResult`
+4. Register in `ToolRegistry.__init__()` (add to the tool-class list or add conditional logic)
+5. Add tests in `tests/tools/test_<name>.py`
+6. If the tool needs config, wire it through `Config` and pass to the tool constructor in the registry
+7. The tool will automatically appear in the LLM's tool definitions
+
+### Confirmation flow for a new tool
+
+Set `requires_confirmation=True` in the returned `ToolResult` when `dry_run=True`. The agent loop and UI handle the rest.
