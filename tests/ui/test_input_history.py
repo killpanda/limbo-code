@@ -171,6 +171,38 @@ async def test_height_grows_on_soft_wrap():
 
 
 @pytest.mark.asyncio
+async def test_up_on_soft_wrapped_line_moves_cursor_visually_first():
+    """On a soft-wrapped single line, up walks visual rows before recalling."""
+    submitted = []
+    app = make_app(submitted)
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(InputWidget)
+        widget.focus()
+        await submit(pilot, widget, "earlier")
+
+        wrap_width = widget.wrap_width
+        long_line = "x" * (wrap_width * 2 + 1)  # wraps to 3 visual rows
+        widget.text = long_line
+        widget.move_cursor(widget.document.end)
+        await pilot.pause()
+        assert widget.cursor_location[1] > wrap_width  # visual row 2
+
+        # First up: cursor moves up a visual row, no history recall.
+        await pilot.press("up")
+        await pilot.pause()
+        assert widget.text == long_line
+        assert widget.cursor_location[1] < wrap_width * 2
+
+        # Walk to the first visual row, then up recalls history.
+        await pilot.press("up")
+        await pilot.pause()
+        assert widget.text == long_line
+        await pilot.press("up")
+        await pilot.pause()
+        assert widget.text == "earlier"
+
+
+@pytest.mark.asyncio
 async def test_submit_resets_history_navigation():
     submitted = []
     app = make_app(submitted)

@@ -81,8 +81,10 @@ class InputWidget(TextArea):
 
     def _auto_resize(self) -> None:
         height = min(self._visual_rows(), MAX_TEXT_ROWS) + 2
-        if self.styles.height != height:
-            self.styles.height = height
+        current = self.styles.height
+        if current is not None and getattr(current, "value", None) == height:
+            return
+        self.styles.height = height
 
     def on_text_area_changed(self, event: TextArea.Changed) -> None:
         if event.text_area is not self:
@@ -127,15 +129,28 @@ class InputWidget(TextArea):
         self.text = value
         self.move_cursor(self.document.end)
 
+    def _cursor_on_first_visual_row(self) -> bool:
+        """Whether the cursor sits on the first *visual* (soft-wrapped) row.
+
+        With soft wrap a single logical line spans several display rows; the
+        logical row from ``cursor_location`` stays 0, so the column is used
+        to approximate the visual position (wide chars make this approximate).
+        """
+        row, col = self.cursor_location
+        if row > 0:
+            return False
+        width = self.wrap_width
+        return width <= 0 or col < width
+
     def _history_prev(self) -> None:
         if not self._history:
             self.action_cursor_up()
             return
         if self._history_index is None:
-            # Multi-line input: up moves the cursor until it reaches the
-            # first row; only then does it start recalling history.
-            row, _ = self.cursor_location
-            if row > 0:
+            # Multi-line/soft-wrapped input: up moves the cursor until it
+            # reaches the first visual row; only then does it start
+            # recalling history.
+            if not self._cursor_on_first_visual_row():
                 self.action_cursor_up()
                 return
             self._draft = self.text
