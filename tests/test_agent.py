@@ -64,6 +64,57 @@ async def test_agent_text_only_response(workdir):
     assert "".join([e.text for e in events if isinstance(e, TextDelta)]) == "hello"
 
 
+def test_system_prompt_includes_skills_catalog(workdir):
+    skill_dir = workdir / ".agents" / "skills" / "tdd"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: tdd\ndescription: Test-driven development workflow.\n---\n\nDo TDD.\n"
+    )
+    agent = Agent(
+        config=Config(),
+        llm_client=FakeLLMClient([]),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    prompt = agent.messages[0].content
+    assert "<available_skills>" in prompt
+    assert "<name>tdd</name>" in prompt
+    assert "<description>Test-driven development workflow.</description>" in prompt
+    assert "<location>" in prompt
+    assert "Do TDD." not in prompt  # body stays on disk
+
+
+def test_system_prompt_skips_catalog_when_no_skills(workdir, monkeypatch):
+    # Point the user skills dir at an empty location so only the (empty)
+    # project dir is scanned.
+    monkeypatch.setattr("limbo.agent.discover_skills", lambda workdir: [])
+    agent = Agent(
+        config=Config(),
+        llm_client=FakeLLMClient([]),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    assert "<available_skills>" not in agent.messages[0].content
+
+
+def test_system_prompt_wraps_agents_md_in_xml_boundary(workdir):
+    (workdir / "AGENTS.md").write_text("# Project rules\n")
+    agent = Agent(
+        config=Config(),
+        llm_client=FakeLLMClient([]),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    prompt = agent.messages[0].content
+    assert "<project_context>" in prompt
+    assert f'<project_instructions path="{workdir / "AGENTS.md"}">' in prompt
+    assert "# Project rules" in prompt
+    assert "</project_context>" in prompt
+
+
 @pytest.mark.asyncio
 async def test_agent_calls_tool_and_loops(workdir):
     (workdir / "main.py").write_text("x = 1\n")
