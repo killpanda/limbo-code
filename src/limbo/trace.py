@@ -3,8 +3,7 @@
 The trace lives in a ``traces/`` subdirectory of the session directory
 (``traces/<session>.trace.jsonl``) and records everything the message
 history cannot reconstruct after the fact: full LLM request bodies,
-token usage, tool execution timing, confirmation decisions, and
-errors/interruptions.
+token usage, tool execution timing, and errors/interruptions.
 
 Writes are appended and flushed immediately so a crash or interrupt loses
 at most the in-flight event. Tracing must never break the agent: all write

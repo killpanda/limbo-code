@@ -105,8 +105,6 @@ class Agent:
         self.workdir = workdir
         self.registry = ToolRegistry(workdir=workdir, config=config)
         self._history = ToolHistory([])
-        self._pending_tool: dict[str, Any] | None = None
-        self._confirmation_applied = False
         self._iteration_count = 0
         self._init_system_message()
 
@@ -136,7 +134,6 @@ class Agent:
         self.trace = TraceLogger(trace_path_for(self._session_file))
         self._turn_count = 0
         self._turn_start: float | None = None
-        self._pending_since: float | None = None
         self.trace.log(
             "session_start",
             session_id=self._meta.id,
@@ -168,11 +165,6 @@ class Agent:
         if not self._meta.title:
             self._meta.title = derive_title(self.messages)
         return self._meta
-
-    @property
-    def confirmation_applied(self) -> bool:
-        """Whether a confirmed tool has been applied and the loop can resume."""
-        return self._confirmation_applied
 
     def _init_system_message(self) -> None:
         content_parts = [
@@ -233,41 +225,6 @@ class Agent:
     def messages(self, value: list[Message]) -> None:
         self._history.messages = value
 
-    @property
-    def _pending_placeholders(self) -> set[str]:
-        """Backward-compatible view of the ledger's pending placeholder ids."""
-        return self._history.pending_ids
-
-    def reject_pending_tool(
-        self, reason: str = "Action rejected.", decision: str = "rejected"
-    ) -> None:
-        """Clear any tool awaiting confirmation.
-
-        Records the rejection in the message history (cancelling any later
-        tool calls from the same assistant turn) so the assistant message
-        that referenced the tool call remains valid for the OpenAI API.
-        """
-        if self._pending_tool is None:
-            return
-        self._history.record_rejection(self._pending_tool["id"], reason)
-        self.trace.log(
-            "confirmation",
-            turn=self._turn_count,
-            decision=decision,
-            reason=reason,
-            tool_call_id=self._pending_tool["id"],
-            name=self._pending_tool["function"]["name"],
-            wait=self._pending_wait(),
-        )
-        self._pending_tool = None
-        self._pending_since = None
-
-    def _pending_wait(self) -> float | None:
-        """Seconds the current confirmation has been waiting, if known."""
-        if self._pending_since is None:
-            return None
-        return time.monotonic() - self._pending_since
-
     def _log_turn_end(self) -> None:
         if self._turn_start is None:
             return
@@ -276,21 +233,15 @@ class Agent:
             turn=self._turn_count,
             duration=time.monotonic() - self._turn_start,
             iterations=self._iteration_count,
-            status="awaiting_confirmation" if self._pending_tool else "completed",
+            status="completed",
         )
         self._turn_start = None
 
     async def run(self, user_input: str) -> AsyncIterator[AgentEvent]:
-        # Reset per-user-turn state and discard stale pending confirmations.
+        # Reset per-user-turn state.
         self._iteration_count = 0
-        self._confirmation_applied = False
         self._turn_count += 1
         self._turn_start = time.monotonic()
-        if self._pending_tool is not None:
-            self.reject_pending_tool(
-                reason="Action timed out or was superseded by a new turn.",
-                decision="superseded",
-            )
 
         self.messages.append(Message(role="user", content=user_input))
         self.trace.log(
@@ -310,61 +261,11 @@ class Agent:
                 )
                 warnings.warn(f"Failed to save session: {e}", stacklevel=2)
 
-    async def continue_after_confirmation(self) -> AsyncIterator[AgentEvent]:
-        """Resume the conversation loop after a confirmed tool was applied.
-
-        Before returning to the LLM, any remaining tool calls from the
-        original assistant turn are executed and their placeholder results are
-        replaced with real results. If a remaining tool requires confirmation,
-        the loop stops and yields its confirmation event.
-
-        Yields the remaining assistant responses and any follow-up tool events
-        until the assistant produces a final response without pending tool calls.
-        """
-        if self._pending_tool is not None:
-            self.trace.log(
-                "error",
-                turn=self._turn_count,
-                kind="invalid_continuation",
-                message="Cannot continue: a tool is still pending confirmation.",
-            )
-            yield ErrorEvent(
-                message="Cannot continue: a tool is still pending confirmation."
-            )
-            return
-        if not self._confirmation_applied:
-            self.trace.log(
-                "error",
-                turn=self._turn_count,
-                kind="invalid_continuation",
-                message="Cannot continue: no confirmed tool to resume from.",
-            )
-            yield ErrorEvent(message="Cannot continue: no confirmed tool to resume from.")
-            return
-        self._confirmation_applied = False
-        self._turn_start = time.monotonic()
-
-        try:
-            async for event in self._execute_remaining_tools():
-                yield event
-            async for event in self._conversation_loop():
-                yield event
-        finally:
-            self._log_turn_end()
-            try:
-                await self._save_session()
-            except Exception as e:  # noqa: BLE001
-                self.trace.log(
-                    "session_save_error", turn=self._turn_count, error=str(e)
-                )
-                warnings.warn(f"Failed to save session: {e}", stacklevel=2)
-
     async def _execute_tool(
         self,
         call_id: str,
         name: str,
         arguments: dict[str, Any],
-        dry_run: bool,
     ) -> ToolResult:
         """Execute a tool with full trace logging. Re-raises on crash."""
         self.trace.log(
@@ -374,11 +275,10 @@ class Agent:
             id=call_id,
             name=name,
             arguments=arguments,
-            dry_run=dry_run,
         )
         start = time.monotonic()
         try:
-            result = await self.registry.execute(name, arguments, dry_run=dry_run)
+            result = await self.registry.execute(name, arguments)
         except Exception as e:  # noqa: BLE001
             self.trace.log(
                 "tool_result",
@@ -386,7 +286,6 @@ class Agent:
                 iteration=self._iteration_count,
                 id=call_id,
                 name=name,
-                dry_run=dry_run,
                 success=False,
                 error=f"Tool error: {e}",
                 exception_type=type(e).__name__,
@@ -400,56 +299,12 @@ class Agent:
             iteration=self._iteration_count,
             id=call_id,
             name=name,
-            dry_run=dry_run,
             success=result.success,
             output=result.output,
             error=result.error,
-            requires_confirmation=result.requires_confirmation,
             duration=time.monotonic() - start,
         )
         return result
-
-    async def _execute_remaining_tools(self) -> AsyncIterator[AgentEvent]:
-        """Execute remaining placeholder tool calls from the last assistant turn.
-
-        The assistant message already references every tool call in a multi-tool
-        turn, but the calls after a confirmation pause only have placeholder
-        results. Run those calls, replacing placeholders with real outputs, and
-        stop if another call requires confirmation.
-        """
-        assistant = self._history.latest_assistant_with_tools()
-        if assistant is None or assistant.tool_calls is None:
-            return
-
-        for start_idx, tc in enumerate(assistant.tool_calls):
-            if tc["id"] not in self._history.pending_ids:
-                continue
-
-            name = tc["function"]["name"]
-            arguments = tc["function"]["arguments"]
-            yield ToolCallRequest(id=tc["id"], name=name, arguments=arguments)
-            try:
-                result = await self._execute_tool(
-                    tc["id"], name, arguments, dry_run=True
-                )
-            except Exception as e:  # noqa: BLE001
-                error_message = f"Tool error: {e}"
-                yield ErrorEvent(message=error_message)
-                self._history.record_error(
-                    assistant, start_idx, tc["id"], error_message
-                )
-                return
-            if result.requires_confirmation:
-                self._pending_tool = tc
-                self._pending_since = time.monotonic()
-            yield ToolResultEvent(
-                id=tc["id"], name=name, result=result, arguments=arguments
-            )
-            if result.requires_confirmation:
-                return
-            self._history.record_result(
-                tc["id"], result.output or result.error or ""
-            )
 
     async def _conversation_loop(self) -> AsyncIterator[AgentEvent]:
         while self._iteration_count < self.config.llm.max_iterations:
@@ -503,9 +358,7 @@ class Agent:
                 arguments = tc["function"]["arguments"]
                 yield ToolCallRequest(id=tc["id"], name=name, arguments=arguments)
                 try:
-                    result = await self._execute_tool(
-                        tc["id"], name, arguments, dry_run=True
-                    )
+                    result = await self._execute_tool(tc["id"], name, arguments)
                 except Exception as e:  # noqa: BLE001
                     error_message = f"Tool error: {e}"
                     yield ErrorEvent(message=error_message)
@@ -513,78 +366,12 @@ class Agent:
                         last, idx, tc["id"], error_message
                     )
                     return
-                if result.requires_confirmation:
-                    self._pending_tool = tc
-                    self._pending_since = time.monotonic()
-                    # The assistant message already references every tool call in
-                    # this turn, but only the calls before this one have results.
-                    # Append placeholders for this pending call and the remaining
-                    # calls so the message history stays valid for OpenAI. The
-                    # pending call's placeholder is replaced by the real result
-                    # when the user confirms it. Placeholders are installed
-                    # before yielding the ToolResultEvent so confirmation handlers
-                    # can update them immediately.
-                    self._history.install_placeholders(
-                        [t["id"] for t in last.tool_calls[idx:]]
-                    )
                 yield ToolResultEvent(
                     id=tc["id"], name=name, result=result, arguments=arguments
                 )
-                if result.requires_confirmation:
-                    return
                 self._history.record_result(
                     tc["id"], result.output or result.error or ""
                 )
-
-    async def apply_tool(self, name: str, arguments: dict[str, Any]) -> ToolResult:
-        """Apply the tool that is currently pending confirmation.
-
-        Validates that ``name`` and ``arguments`` match the stored pending tool
-        call. Returns an error result and leaves the pending state untouched
-        when they do not match or when execution fails, so the user can retry
-        after transient failures.
-        """
-        if self._pending_tool is None:
-            return ToolResult(success=False, error="No tool is pending confirmation.")
-
-        pending_name = self._pending_tool["function"]["name"]
-        pending_arguments = self._pending_tool["function"]["arguments"]
-        if name != pending_name or arguments != pending_arguments:
-            return ToolResult(
-                success=False,
-                error=(
-                    f"Tool {name} does not match pending tool {pending_name}."
-                ),
-            )
-
-        self.trace.log(
-            "confirmation",
-            turn=self._turn_count,
-            decision="approved",
-            tool_call_id=self._pending_tool["id"],
-            name=pending_name,
-            wait=self._pending_wait(),
-        )
-        try:
-            result = await self._execute_tool(
-                self._pending_tool["id"], name, arguments, dry_run=False
-            )
-        except Exception as e:  # noqa: BLE001
-            error_message = f"Tool error: {e}"
-            result = ToolResult(success=False, error=error_message)
-
-        # Replace the placeholder tool result installed when the pending call
-        # was first encountered, so the message history stays valid and shows
-        # the actual outcome. Only clear the pending state on success so a
-        # transient failure can be retried.
-        self._history.record_result(
-            self._pending_tool["id"], result.output or result.error or ""
-        )
-        if result.success:
-            self._pending_tool = None
-            self._pending_since = None
-            self._confirmation_applied = True
-        return result
 
     async def _call_llm(self) -> AsyncIterator[AgentEvent]:
         tool_definitions = self.registry.definitions()
@@ -659,9 +446,8 @@ class Agent:
         )
 
     def _save_session_sync(self) -> None:
-        # Rewrite the whole session on every save. This guarantees that in-place
-        # updates to placeholder messages (e.g. after a confirmation) are
-        # reflected on disk, and it is still cheap for MVP-sized conversations.
+        # Rewrite the whole session on every save. It is cheap for MVP-sized
+        # conversations.
         if not self._meta.title:
             self._meta.title = derive_title(self.messages)
         save_session(self._session_file, self._meta, self.messages)

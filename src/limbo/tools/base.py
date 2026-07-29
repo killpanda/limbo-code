@@ -1,8 +1,8 @@
 """Base class and shared helpers for tools.
 
 The base module owns the rituals every tool used to repeat: workdir-safe
-path resolution (raising ``ToolError`` instead of returning union types),
-the dry-run confirmation stub, and the output truncation policy.
+path resolution (raising ``ToolError`` instead of returning union types)
+and the output truncation policy.
 """
 
 from __future__ import annotations
@@ -34,14 +34,14 @@ class BaseTool(ABC):
     def __init__(self, workdir: Path):
         self.workdir = workdir.resolve()
 
-    def execute(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
+    def execute(self, arguments: dict[str, Any]) -> ToolResult:
         try:
-            return self.run(arguments, dry_run=dry_run)
+            return self.run(arguments)
         except ToolError as e:
             return ToolResult(success=False, error=str(e))
 
     @abstractmethod
-    def run(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
+    def run(self, arguments: dict[str, Any]) -> ToolResult:
         ...
 
     # -- path resolution -------------------------------------------------------
@@ -82,13 +82,6 @@ class BaseTool(ABC):
     def resolve_creatable(self, raw_path: str) -> Path:
         """Resolve a path that may not exist yet (e.g. for writing)."""
         return self.resolve(raw_path, strict=False)
-
-    # -- confirmation ------------------------------------------------------------
-
-    def confirm(self, message: str) -> ToolResult:
-        """Build the dry-run stub that asks the user for confirmation."""
-        return ToolResult(success=True, output=message, requires_confirmation=True)
-
 
 def is_within_workdir(path: Path, workdir: Path) -> bool:
     """Return True if resolved path is inside or equal to workdir."""

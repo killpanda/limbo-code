@@ -1,4 +1,4 @@
-"""Tests for the BaseTool seam: resolution helpers, confirm stub, ToolError."""
+"""Tests for the BaseTool seam: resolution helpers, ToolError."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ class DummyTool(BaseTool):
     description = "dummy"
     parameters: dict[str, Any] = {}
 
-    def run(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
+    def run(self, arguments: dict[str, Any]) -> ToolResult:
         action = arguments.get("action")
         if action == "raise":
             raise ToolError("boom")
@@ -28,8 +28,6 @@ class DummyTool(BaseTool):
             return ToolResult(
                 success=True, output=str(self.resolve_creatable("new.txt"))
             )
-        if action == "confirm":
-            return self.confirm("please confirm")
         return ToolResult(success=False, error="unknown")
 
 
@@ -78,13 +76,6 @@ def test_resolve_creatable_allows_missing(tool):
     result = tool.execute({"action": "creatable"})
     assert result.success is True
     assert result.output.endswith("new.txt")
-
-
-def test_confirm_stub_shape(tool):
-    result = tool.execute({"action": "confirm"})
-    assert result.success is True
-    assert result.requires_confirmation is True
-    assert result.output == "please confirm"
 
 
 def test_truncate_output_by_bytes():

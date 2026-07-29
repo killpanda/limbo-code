@@ -22,7 +22,7 @@ class LsTool(BaseTool):
         "required": [],
     }
 
-    def run(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
+    def run(self, arguments: dict[str, Any]) -> ToolResult:
         path = arguments.get("path", ".")
         limit = arguments.get("limit", MAX_ENTRIES)
 

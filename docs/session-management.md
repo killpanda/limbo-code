@@ -84,7 +84,7 @@ Esc 关闭），不发往 LLM，走命令路由：
 |------|------|
 | `/sessions` | 弹出会话选择器，Enter 切换，Esc 取消 |
 | `/new` | 清空当前对话，开始新会话（新文件） |
-| `/export [path]` | 导出会话日志：默认 JSONL 全量日志（`~/.limbo/exports/<id>.jsonl`，含完整 LLM 请求体、token 用量、工具执行、确认决策、报错）；路径以 `.md` 结尾时导出 Markdown |
+| `/export [path]` | 导出会话日志：默认 JSONL 全量日志（`~/.limbo/exports/<id>.jsonl`，含完整 LLM 请求体、token 用量、工具执行、报错）；路径以 `.md` 结尾时导出 Markdown |
 | `/help` | 显示命令列表 |
 
 切换会话时聊天区重绘：user / assistant 文本原样渲染，历史 tool 消息
@@ -106,14 +106,13 @@ append-only，崩溃/打断最多丢失写入中的一条）。`/export` 默认�
 | `llm_request` | `turn`、`iteration`、`body`（完整请求体：messages 含 system prompt、tools、所有参数） |
 | `llm_response` | `duration`、`ttft`、`finish_reason`、`usage`（原始用量，含 provider 缓存字段）、`cached_tokens`（归一化缓存命中）、content/reasoning 长度、tool_calls 摘要 |
 | `llm_error` | `exception_type`、`error`、`traceback` |
-| `tool_call` / `tool_result` | `id`、`name`、`arguments`、`dry_run`、`success`、`output`/`error`、耗时；崩溃时带 `exception_type` + `traceback` |
-| `confirmation` | `decision`（approved / rejected / timeout / superseded）、`wait`（等待秒数） |
-| `error` | `kind`（如 max_iterations、invalid_continuation）、`message` |
-| `turn_end` | `iterations`、`duration`、`status`（completed / awaiting_confirmation） |
+| `tool_call` / `tool_result` | `id`、`name`、`arguments`、`success`、`output`/`error`、耗时；崩溃时带 `exception_type` + `traceback` |
+| `error` | `kind`（如 max_iterations）、`message` |
+| `turn_end` | `iterations`、`duration`、`status`（completed） |
 | `session_save_error` | `error` |
 
 导出文件布局：`meta` 行 → trace 记录（按时间序；trace 缺失时退化为原始
-消息）→ `messages_snapshot`（持久化后的完整消息历史，含占位/拒绝记录）。
+消息）→ `messages_snapshot`（持久化后的完整消息历史）。
 
 ## 测试接缝（seams）
 
