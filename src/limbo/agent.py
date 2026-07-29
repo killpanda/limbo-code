@@ -20,6 +20,7 @@ from limbo.config import Config
 from limbo.history import ToolHistory
 from limbo.history import repair as repair_history
 from limbo.llm.client import LLMClient
+from limbo.llm.retry import friendly_message
 from limbo.models import (
     CompletionMeta,
     Message,
@@ -321,7 +322,7 @@ class Agent:
                     exception_type=type(e).__name__,
                     traceback=traceback.format_exc(),
                 )
-                yield ErrorEvent(message=f"LLM error: {e}")
+                yield ErrorEvent(message=friendly_message(e) or f"LLM error: {e}")
                 return
 
             last = self.messages[-1]

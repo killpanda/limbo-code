@@ -16,6 +16,7 @@ from limbo.agent import (
     ToolResultEvent,
 )
 from limbo.config import Config
+from limbo.llm.retry import LLMHttpError
 from limbo.models import CompletionMeta, Message, TextChunk, ToolCallEvent
 from limbo.trace import read_trace
 
@@ -681,6 +682,57 @@ async def test_agent_trace_records_llm_error(workdir):
     assert error["exception_type"] == "RuntimeError"
     assert "network down" in error["error"]
     assert "network down" in error["traceback"]
+
+
+@pytest.mark.asyncio
+async def test_agent_friendly_error_on_rate_limit(workdir):
+    """429-class failures surface the friendly hint; trace keeps the raw error."""
+
+    class RateLimitedLLMClient:
+        async def chat(self, messages, tools, on_request=None):
+            raise LLMHttpError(429, "Error code: 429 - rate limit exceeded")
+            if False:
+                yield TextChunk(text="")
+
+    agent = Agent(
+        config=Config(),
+        llm_client=RateLimitedLLMClient(),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    events = await _collect(agent.run("hi"))
+    error_events = [e for e in events if isinstance(e, ErrorEvent)]
+    assert len(error_events) == 1
+    assert "稍后重发" in error_events[0].message
+
+    records = read_trace(agent.trace.path)
+    error = next(r for r in records if r["type"] == "llm_error")
+    assert error["exception_type"] == "LLMHttpError"
+    assert "429" in error["error"]
+
+
+@pytest.mark.asyncio
+async def test_agent_friendly_message_fallback_for_unknown_error(workdir):
+    """friendly_message returns None for unclassified errors -> raw text kept."""
+
+    class FailingLLMClient:
+        async def chat(self, messages, tools, on_request=None):
+            raise ValueError("weird failure")
+            if False:
+                yield TextChunk(text="")
+
+    agent = Agent(
+        config=Config(),
+        llm_client=FailingLLMClient(),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    events = await _collect(agent.run("hi"))
+    error_events = [e for e in events if isinstance(e, ErrorEvent)]
+    assert len(error_events) == 1
+    assert error_events[0].message == "LLM error: weird failure"
 
 
 @pytest.mark.asyncio
