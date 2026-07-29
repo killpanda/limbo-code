@@ -1,0 +1,923 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Limbo UI Redesign Prototype</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        :root {
+            --bg-base: #0d1117;
+            --bg-panel: #161b22;
+            --bg-hover: #21262d;
+            --bg-active: #1f6feb;
+            --border: #30363d;
+            --border-focus: #58a6ff;
+            --text-primary: #c9d1d9;
+            --text-secondary: #8b949e;
+            --text-accent: #58a6ff;
+            --success: #238636;
+            --warning: #d29922;
+            --error: #da3633;
+            --info: #1f6feb;
+        }
+        
+        body {
+            background: #000;
+            font-family: 'SF Mono', 'Fira Code', 'JetBrains Mono', Consolas, monospace;
+            font-size: 13px;
+            line-height: 1.5;
+            color: var(--text-primary);
+            height: 100vh;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+        }
+        
+        .prototype-container {
+            width: 1200px;
+            height: 750px;
+            background: var(--bg-base);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+        }
+        
+        /* ===== Header ===== */
+        .header {
+            height: 32px;
+            background: var(--bg-panel);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            padding: 0 12px;
+            justify-content: space-between;
+            font-size: 12px;
+        }
+        
+        .header-left {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+        
+        .brand {
+            color: var(--text-accent);
+            font-weight: bold;
+            font-size: 13px;
+        }
+        
+        .model-name {
+            color: var(--text-secondary);
+        }
+        
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            color: var(--success);
+        }
+        
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--success);
+            animation: pulse 2s infinite;
+        }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.4; }
+        }
+        
+        .header-right {
+            color: var(--text-secondary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 300px;
+        }
+        
+        /* ===== Main Content ===== */
+        .main-content {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+        }
+        
+        /* ===== Sidebar ===== */
+        .sidebar {
+            width: 200px;
+            background: var(--bg-panel);
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        
+        .sidebar-section {
+            padding: 8px 0;
+        }
+        
+        .sidebar-section-title {
+            color: var(--text-secondary);
+            font-weight: bold;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            padding: 0 10px 6px;
+            border-bottom: 1px solid var(--border);
+            margin-bottom: 4px;
+        }
+        
+        .sidebar-item {
+            padding: 3px 10px;
+            color: var(--text-primary);
+            cursor: pointer;
+            font-size: 12px;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        .sidebar-item:hover {
+            background: var(--bg-hover);
+        }
+        
+        .sidebar-item.active {
+            background: var(--bg-active);
+            color: white;
+        }
+        
+        .sidebar-icon {
+            font-size: 10px;
+            opacity: 0.7;
+            width: 14px;
+            text-align: center;
+        }
+        
+        .tool-list {
+            padding: 4px 0;
+        }
+        
+        .tool-item {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 2px 10px;
+            font-size: 12px;
+        }
+        
+        .tool-name {
+            color: var(--text-primary);
+        }
+        
+        .tool-badge {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--error);
+        }
+        
+        .tool-badge.safe {
+            background: var(--success);
+        }
+        
+        .sidebar-status {
+            margin-top: auto;
+            padding: 8px 10px;
+            border-top: 1px solid var(--border);
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+        
+        .status-running {
+            color: var(--warning);
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        
+        .spinner {
+            animation: spin 1s linear infinite;
+            display: inline-block;
+        }
+        
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+        
+        /* ===== Chat Area ===== */
+        .chat-area {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            background: var(--bg-base);
+        }
+        
+        .chat-messages {
+            flex: 1;
+            overflow-y: auto;
+            padding: 12px 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+        
+        .message {
+            max-width: 92%;
+            animation: fadeIn 0.2s ease-out;
+        }
+        
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(4px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        
+        .message-header {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            margin-bottom: 4px;
+            font-size: 11px;
+            font-weight: bold;
+        }
+        
+        .user-message .message-header {
+            color: var(--info);
+        }
+        
+        .assistant-message .message-header {
+            color: var(--success);
+        }
+        
+        .message-time {
+            color: var(--text-secondary);
+            font-weight: normal;
+            font-size: 10px;
+        }
+        
+        .message-bubble {
+            background: var(--bg-panel);
+            border-left: 3px solid;
+            padding: 10px 14px;
+            border-radius: 0 6px 6px 0;
+            font-size: 13px;
+            line-height: 1.6;
+        }
+        
+        .user-message .message-bubble {
+            border-left-color: var(--info);
+        }
+        
+        .assistant-message .message-bubble {
+            border-left-color: var(--success);
+        }
+        
+        .message-bubble p {
+            margin-bottom: 8px;
+        }
+        
+        .message-bubble p:last-child {
+            margin-bottom: 0;
+        }
+        
+        .cursor {
+            display: inline-block;
+            width: 8px;
+            height: 16px;
+            background: var(--success);
+            animation: blink 1s step-end infinite;
+            vertical-align: text-bottom;
+            margin-left: 2px;
+        }
+        
+        @keyframes blink {
+            50% { opacity: 0; }
+        }
+        
+        /* ===== Tool Card ===== */
+        .tool-card {
+            background: var(--bg-base);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            margin: 8px 0;
+            overflow: hidden;
+        }
+        
+        .tool-card-header {
+            padding: 6px 10px;
+            background: rgba(48, 54, 61, 0.5);
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            font-size: 12px;
+            cursor: pointer;
+        }
+        
+        .tool-card-header .tool-icon {
+            color: var(--text-accent);
+            font-size: 10px;
+        }
+        
+        .tool-card-header .tool-title {
+            color: var(--text-accent);
+            font-weight: bold;
+        }
+        
+        .tool-card-header .tool-status {
+            margin-left: auto;
+            color: var(--success);
+            font-size: 11px;
+        }
+        
+        .tool-card-body {
+            padding: 8px 10px;
+            font-size: 12px;
+            color: var(--text-secondary);
+            max-height: 120px;
+            overflow-y: auto;
+            font-family: monospace;
+            line-height: 1.5;
+        }
+        
+        .code-block {
+            background: var(--bg-base);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 10px 12px;
+            margin: 8px 0;
+            overflow-x: auto;
+        }
+        
+        .code-block-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 8px;
+            padding-bottom: 6px;
+            border-bottom: 1px solid var(--border);
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+        
+        .code-block pre {
+            font-family: 'SF Mono', 'Fira Code', monospace;
+            font-size: 12px;
+            line-height: 1.5;
+            color: var(--text-primary);
+            overflow-x: auto;
+        }
+        
+        .code-keyword { color: #ff7b72; }
+        .code-string { color: #a5d6ff; }
+        .code-comment { color: #8b949e; }
+        .code-function { color: #d2a8ff; }
+        .code-class { color: #ffa657; }
+        
+        /* ===== Preview Panel ===== */
+        .preview-panel {
+            width: 340px;
+            background: var(--bg-base);
+            border-left: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+        
+        .preview-header {
+            height: 32px;
+            background: var(--bg-panel);
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            padding: 0 10px;
+            gap: 8px;
+            font-size: 12px;
+        }
+        
+        .preview-path {
+            color: var(--text-accent);
+            font-weight: bold;
+            flex: 1;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+        
+        .preview-lang {
+            background: var(--bg-hover);
+            color: var(--text-secondary);
+            padding: 1px 6px;
+            border-radius: 3px;
+            font-size: 10px;
+        }
+        
+        .preview-content {
+            flex: 1;
+            overflow-y: auto;
+            padding: 0;
+            font-size: 12px;
+            line-height: 1.6;
+        }
+        
+        .code-preview {
+            display: flex;
+            font-family: 'SF Mono', 'Fira Code', monospace;
+        }
+        
+        .line-numbers {
+            background: var(--bg-panel);
+            color: var(--text-secondary);
+            padding: 8px 10px;
+            text-align: right;
+            border-right: 1px solid var(--border);
+            user-select: none;
+            font-size: 12px;
+            line-height: 1.6;
+        }
+        
+        .code-lines {
+            padding: 8px 12px;
+            flex: 1;
+            overflow-x: auto;
+            white-space: pre;
+            font-size: 12px;
+            line-height: 1.6;
+        }
+        
+        /* ===== Input Area ===== */
+        .input-area {
+            height: auto;
+            min-height: 48px;
+            background: var(--bg-panel);
+            border-top: 1px solid var(--border);
+            padding: 8px 12px;
+            display: flex;
+            flex-direction: column;
+        }
+        
+        .input-box {
+            background: var(--bg-base);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 8px 12px;
+            min-height: 32px;
+            color: var(--text-primary);
+            font-family: inherit;
+            font-size: 13px;
+            line-height: 1.5;
+            outline: none;
+            transition: border-color 0.2s;
+        }
+        
+        .input-box:focus {
+            border-color: var(--border-focus);
+        }
+        
+        .input-placeholder {
+            color: var(--text-secondary);
+            font-style: italic;
+        }
+        
+        .input-hint {
+            display: flex;
+            justify-content: flex-end;
+            margin-top: 4px;
+            font-size: 11px;
+            color: var(--text-secondary);
+        }
+        
+        .input-hint kbd {
+            background: var(--bg-hover);
+            border: 1px solid var(--border);
+            border-radius: 3px;
+            padding: 1px 4px;
+            font-size: 10px;
+        }
+        
+        /* ===== Scrollbar ===== */
+        ::-webkit-scrollbar { width: 8px; height: 8px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+        ::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
+        
+        /* ===== Confirm Dialog Overlay ===== */
+        .dialog-overlay {
+            position: absolute;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.6);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 100;
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 0.2s;
+        }
+        
+        .dialog-overlay.active {
+            opacity: 1;
+            pointer-events: all;
+        }
+        
+        .confirm-dialog {
+            width: 520px;
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 16px 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.4);
+        }
+        
+        .dialog-title {
+            font-size: 14px;
+            font-weight: bold;
+            color: var(--text-primary);
+            margin-bottom: 4px;
+        }
+        
+        .dialog-subtitle {
+            font-size: 12px;
+            color: var(--text-accent);
+            margin-bottom: 12px;
+        }
+        
+        .dialog-body {
+            background: var(--bg-base);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            max-height: 280px;
+            overflow-y: auto;
+            margin-bottom: 12px;
+        }
+        
+        .diff-line {
+            padding: 1px 10px;
+            font-size: 12px;
+            font-family: monospace;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        
+        .diff-line.minus {
+            background: rgba(218, 54, 51, 0.15);
+            color: #ff7b72;
+        }
+        
+        .diff-line.plus {
+            background: rgba(35, 134, 54, 0.15);
+            color: #7ee787;
+        }
+        
+        .diff-line.context {
+            color: var(--text-secondary);
+        }
+        
+        .diff-line .diff-marker {
+            display: inline-block;
+            width: 16px;
+            margin-right: 4px;
+            text-align: center;
+        }
+        
+        .dialog-warning {
+            background: rgba(210, 153, 34, 0.1);
+            border: 1px solid var(--warning);
+            border-radius: 4px;
+            padding: 8px 10px;
+            font-size: 12px;
+            color: var(--warning);
+            margin-bottom: 12px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        
+        .dialog-actions {
+            display: flex;
+            justify-content: flex-end;
+            gap: 8px;
+        }
+        
+        .btn {
+            padding: 6px 16px;
+            border-radius: 4px;
+            border: 1px solid var(--border);
+            background: var(--bg-hover);
+            color: var(--text-primary);
+            font-family: inherit;
+            font-size: 12px;
+            cursor: pointer;
+            transition: all 0.15s;
+        }
+        
+        .btn:hover {
+            background: var(--bg-panel);
+            border-color: var(--text-secondary);
+        }
+        
+        .btn-success {
+            background: var(--success);
+            border-color: var(--success);
+            color: white;
+        }
+        
+        .btn-success:hover {
+            background: #2ea043;
+            border-color: #2ea043;
+        }
+        
+        .btn-error {
+            background: var(--error);
+            border-color: var(--error);
+            color: white;
+        }
+        
+        .btn-error:hover {
+            background: #f85149;
+            border-color: #f85149;
+        }
+        
+        .toggle-btn {
+            position: absolute;
+            bottom: 20px;
+            right: 20px;
+            padding: 8px 14px;
+            background: var(--bg-panel);
+            border: 1px solid var(--border);
+            color: var(--text-primary);
+            border-radius: 4px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 12px;
+        }
+        
+        .toggle-btn:hover {
+            background: var(--bg-hover);
+        }
+    </style>
+</head>
+<body>
+    <div class="prototype-container" id="app">
+        <!-- Header -->
+        <div class="header">
+            <div class="header-left">
+                <span class="brand">🌀 Limbo</span>
+                <span class="model-name">deepseek-chat</span>
+                <span class="status-indicator">
+                    <span class="status-dot"></span>
+                    <span>Running</span>
+                </span>
+            </div>
+            <div class="header-right">~/project/limbo-code</div>
+        </div>
+        
+        <!-- Main Content -->
+        <div class="main-content">
+            <!-- Sidebar -->
+            <div class="sidebar">
+                <div class="sidebar-section">
+                    <div class="sidebar-section-title">📁 FILES</div>
+                    <div class="sidebar-item"><span class="sidebar-icon">🐍</span> app.py</div>
+                    <div class="sidebar-item"><span class="sidebar-icon">📁</span> src/</div>
+                    <div class="sidebar-item" style="padding-left: 20px;"><span class="sidebar-icon">🐍</span> config.py</div>
+                    <div class="sidebar-item active" style="padding-left: 20px;"><span class="sidebar-icon">🐍</span> agent.py</div>
+                    <div class="sidebar-item" style="padding-left: 20px;"><span class="sidebar-icon">📁</span> tools/</div>
+                    <div class="sidebar-item" style="padding-left: 36px;"><span class="sidebar-icon">🐍</span> read.py</div>
+                    <div class="sidebar-item" style="padding-left: 36px;"><span class="sidebar-icon">🐍</span> edit.py</div>
+                    <div class="sidebar-item" style="padding-left: 20px;"><span class="sidebar-icon">📁</span> llm/</div>
+                    <div class="sidebar-item" style="padding-left: 20px;"><span class="sidebar-icon">📁</span> ui/</div>
+                    <div class="sidebar-item"><span class="sidebar-icon">⚙️</span> pyproject.toml</div>
+                    <div class="sidebar-item"><span class="sidebar-icon">📄</span> README.md</div>
+                </div>
+                
+                <div class="sidebar-section">
+                    <div class="sidebar-section-title">🔧 TOOLS</div>
+                    <div class="tool-list">
+                        <div class="tool-item">
+                            <span class="tool-name">read</span>
+                            <span class="tool-badge safe"></span>
+                        </div>
+                        <div class="tool-item">
+                            <span class="tool-name">edit</span>
+                            <span class="tool-badge"></span>
+                        </div>
+                        <div class="tool-item">
+                            <span class="tool-name">write</span>
+                            <span class="tool-badge"></span>
+                        </div>
+                        <div class="tool-item">
+                            <span class="tool-name">bash</span>
+                            <span class="tool-badge"></span>
+                        </div>
+                        <div class="tool-item">
+                            <span class="tool-name">grep</span>
+                            <span class="tool-badge safe"></span>
+                        </div>
+                        <div class="tool-item">
+                            <span class="tool-name">find</span>
+                            <span class="tool-badge safe"></span>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="sidebar-status">
+                    <div class="status-running">
+                        <span class="spinner">◐</span>
+                        <span>Thinking...</span>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Chat Area -->
+            <div class="chat-area">
+                <div class="chat-messages">
+                    <!-- User Message -->
+                    <div class="message user-message">
+                        <div class="message-header">
+                            <span>You</span>
+                            <span class="message-time">14:32</span>
+                        </div>
+                        <div class="message-bubble">
+                            帮我分析一下这个项目的架构，并给出优化建议
+                        </div>
+                    </div>
+                    
+                    <!-- Assistant Message -->
+                    <div class="message assistant-message">
+                        <div class="message-header">
+                            <span>🤖 Assistant</span>
+                            <span class="message-time">14:32</span>
+                        </div>
+                        <div class="message-bubble">
+                            <p>我来分析这个项目的代码结构。让我先读取核心文件...</p>
+                            
+                            <!-- Tool Card -->
+                            <div class="tool-card">
+                                <div class="tool-card-header">
+                                    <span class="tool-icon">▶</span>
+                                    <span class="tool-title">read src/limbo/config.py</span>
+                                    <span class="tool-status">✓ Completed</span>
+                                </div>
+                                <div class="tool-card-body">
+                                    <span class="code-keyword">from</span> pydantic <span class="code-keyword">import</span> BaseModel<br>
+                                    <span class="code-keyword">class</span> <span class="code-class">Config</span>(BaseModel):<br>
+                                    &nbsp;&nbsp;&nbsp;&nbsp;model: <span class="code-function">str</span> = <span class="code-string">"deepseek-chat"</span><br>
+                                    &nbsp;&nbsp;&nbsp;&nbsp;api_key: <span class="code-function">str</span> = <span class="code-string">""</span><br>
+                                    &nbsp;&nbsp;&nbsp;&nbsp;temperature: <span class="code-function">float</span> = <span class="code-string">0.2</span>
+                                </div>
+                            </div>
+                            
+                            <div class="tool-card">
+                                <div class="tool-card-header">
+                                    <span class="tool-icon">▶</span>
+                                    <span class="tool-title">read src/limbo/agent.py</span>
+                                    <span class="tool-status">✓ Completed</span>
+                                </div>
+                                <div class="tool-card-body" style="display: none;">
+                                    Click to expand...
+                                </div>
+                            </div>
+                            
+                            <p>基于分析，这个项目是一个基于 Textual 的 TUI Coding Agent，整体架构清晰：</p>
+                            
+                            <div class="code-block">
+                                <div class="code-block-header">
+                                    <span>architecture.md</span>
+                                    <span style="color: var(--text-secondary);">Markdown</span>
+                                </div>
+                                <pre><span class="code-comment"># 核心架构</span>
+<span class="code-keyword">-</span> Agent: 对话循环 orchestrator
+<span class="code-keyword">-</span> LLMClient: OpenAI-compatible streaming
+<span class="code-keyword">-</span> ToolRegistry: 7 个工具的统一注册与分发
+<span class="code-keyword">-</span> UI: Textual 三栏布局 (sidebar + chat + preview)</pre>
+                            </div>
+                            
+                            <p><strong>优化建议：</strong></p>
+                            <p>1. UI 层目前缺乏自定义样式，建议引入完整的 CSS 主题系统</p>
+                            <p>2. Chat 区域消息展示过于简陋，需要消息气泡和代码高亮</p>
+                            <p>3. 工具调用过程缺乏可视化，建议增加工具链步骤指示器<span class="cursor"></span></p>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Input Area -->
+                <div class="input-area">
+                    <div class="input-box">
+                        <span class="input-placeholder">💬 Message Limbo...</span>
+                    </div>
+                    <div class="input-hint">
+                        <kbd>Ctrl</kbd> + <kbd>Enter</kbd> to send
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Preview Panel -->
+            <div class="preview-panel">
+                <div class="preview-header">
+                    <span class="preview-path">src/limbo/agent.py</span>
+                    <span class="preview-lang">Python</span>
+                </div>
+                <div class="preview-content">
+                    <div class="code-preview">
+                        <div class="line-numbers">
+                            1<br>2<br>3<br>4<br>5<br>6<br>7<br>8<br>9<br>10<br>11<br>12<br>13<br>14<br>15<br>16<br>17<br>18
+                        </div>
+                        <div class="code-lines">
+                            <span class="code-keyword">import</span> asyncio
+                            <span class="code-keyword">from</span> typing <span class="code-keyword">import</span> AsyncIterator
+                            
+                            <span class="code-keyword">class</span> <span class="code-class">Agent</span>:
+                                <span class="code-string">"""Conversation loop orchestrator."""</span>
+                                
+                                <span class="code-keyword">def</span> <span class="code-function">__init__</span>(
+                                    <span class="code-function">self</span>,
+                                    config: Config,
+                                    llm_client: LLMClient,
+                                    workdir: Path,
+                                ):
+                                    <span class="code-function">self</span>.config = config
+                                    <span class="code-function">self</span>.llm_client = llm_client
+                                    <span class="code-function">self</span>.workdir = workdir
+                                    <span class="code-function">self</span>.messages = []
+                                    
+                                <span class="code-keyword">async def</span> <span class="code-function">run</span>(<span class="code-function">self</span>, user_input: <span class="code-function">str</span>):
+                                    <span class="code-comment"># Main conversation loop</span>
+                                    <span class="code-keyword">pass</span>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- Confirm Dialog (Hidden by default) -->
+        <div class="dialog-overlay" id="dialog">
+            <div class="confirm-dialog">
+                <div class="dialog-title">Apply edit?</div>
+                <div class="dialog-subtitle">src/limbo/ui/widgets/chat.py</div>
+                
+                <div class="dialog-body">
+                    <div class="diff-line minus">
+                        <span class="diff-marker">─</span>        color: <span class="code-string">$text-accent</span>;
+                    </div>
+                    <div class="diff-line minus">
+                        <span class="diff-marker">─</span>        text-align: right;
+                    </div>
+                    <div class="diff-line context">
+                        <span class="diff-marker"> </span>    }
+                    </div>
+                    <div class="diff-line context">
+                        <span class="diff-marker"> </span>    .assistant-message {
+                    </div>
+                    <div class="diff-line plus">
+                        <span class="diff-marker">+</span>        color: <span class="code-string">$text</span>;
+                    </div>
+                    <div class="diff-line plus">
+                        <span class="diff-marker">+</span>        text-align: left;
+                    </div>
+                    <div class="diff-line plus">
+                        <span class="diff-marker">+</span>        border-left: outer <span class="code-string">$success</span>;
+                    </div>
+                    <div class="diff-line plus">
+                        <span class="diff-marker">+</span>        padding: 1 2;
+                    </div>
+                    <div class="diff-line context">
+                        <span class="diff-marker"> </span>    }
+                    </div>
+                </div>
+                
+                <div class="dialog-warning">
+                    <span>⚠️</span>
+                    <span>Warning: This edit will modify the file directly. Review carefully before confirming.</span>
+                </div>
+                
+                <div class="dialog-actions">
+                    <button class="btn btn-error" onclick="toggleDialog()">Reject</button>
+                    <button class="btn btn-success" onclick="toggleDialog()">Apply</button>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <button class="toggle-btn" onclick="toggleDialog()">Toggle Confirm Dialog</button>
+    
+    <script>
+        function toggleDialog() {
+            const dialog = document.getElementById('dialog');
+            dialog.classList.toggle('active');
+        }
+    </script>
+</body>
+</html>

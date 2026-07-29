@@ -123,3 +123,25 @@ ConfirmDialog #dialog-buttons {
 ConfirmDialog Button {
     margin: 0 1;
 }
+
+/* ---- 会话选择弹窗 ---- */
+SessionPicker {
+    align: center middle;
+}
+SessionPicker #session-picker {
+    width: 80%;
+    max-width: 110;
+    height: auto;
+    max-height: 80%;
+    border: round $accent;
+    background: $surface;
+    padding: 1 2;
+}
+SessionPicker #picker-title {
+    text-style: bold;
+    margin-bottom: 1;
+}
+SessionPicker ListView {
+    height: auto;
+    max-height: 20;
+}

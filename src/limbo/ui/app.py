@@ -24,6 +24,7 @@ class LimboApp(App[None]):
         config: Config | None = None,
         llm_client: LLMClient | None = None,
         session_dir: Path | None = None,
+        resume: Path | None = None,
         *args,
         **kwargs,
     ):
@@ -32,6 +33,7 @@ class LimboApp(App[None]):
         self.config = config
         self.llm_client = llm_client
         self.session_dir = session_dir
+        self.resume = resume
         theme = (config.ui.theme if config else None) or None
         if theme:
             try:
@@ -46,6 +48,7 @@ class LimboApp(App[None]):
                 config=self.config,
                 llm_client=self.llm_client,
                 session_dir=self.session_dir,
+                resume=self.resume,
             )
         )
 

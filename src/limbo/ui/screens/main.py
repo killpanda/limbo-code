@@ -22,12 +22,19 @@ from limbo.agent import (
 from limbo.config import Config
 from limbo.llm.client import LLMClient
 from limbo.llm.openai_client import OpenAICompatibleClient
+from limbo.sessions import derive_title, export_markdown, list_sessions
+from limbo.ui.screens.session_picker import SessionPicker
 from limbo.ui.widgets.chat import ChatWidget
 from limbo.ui.widgets.confirm import ConfirmDialog
 from limbo.ui.widgets.input import InputWidget, UserSubmitted
 from limbo.ui.widgets.status_bar import StatusBar
 
 CONFIRMATION_TIMEOUT = 300.0
+
+SLASH_COMMANDS_HELP = (
+    "可用命令：/sessions 切换会话 · /new 新会话 · "
+    "/export [path] 导出 Markdown · /help 帮助"
+)
 
 
 class MainScreen(Screen[None]):
@@ -43,6 +50,7 @@ class MainScreen(Screen[None]):
         config: Config | None = None,
         llm_client: LLMClient | None = None,
         session_dir: Path | None = None,
+        resume: Path | None = None,
         *args,
         **kwargs,
     ):
@@ -50,14 +58,19 @@ class MainScreen(Screen[None]):
         self.workdir = workdir
         self.config = config or Config()
         self.llm_client = llm_client or OpenAICompatibleClient(self.config)
-        self.agent = Agent(
-            config=self.config,
-            llm_client=self.llm_client,
-            workdir=workdir,
-            session_dir=session_dir,
-        )
+        self.session_dir = session_dir or Path.home() / ".limbo" / "sessions"
+        self.agent = self._new_agent(resume=resume)
         self._confirmation_event = asyncio.Event()
         self._confirmation_result: bool | None = None
+
+    def _new_agent(self, resume: Path | None = None) -> Agent:
+        return Agent(
+            config=self.config,
+            llm_client=self.llm_client,
+            workdir=self.workdir,
+            session_dir=self.session_dir,
+            resume=resume,
+        )
 
     def compose(self) -> ComposeResult:
         yield StatusBar(
@@ -76,7 +89,89 @@ class MainScreen(Screen[None]):
     def on_mount(self) -> None:
         chat = self.query_one("#chat", ChatWidget)
         chat.add_info(f"Limbo ready · {self.config.llm.model} · {self.workdir}")
+        resumed = len(self.agent.messages) > 1
+        if resumed:
+            self._render_history()
+            meta = self.agent.session_meta
+            chat.add_info(
+                f"已恢复会话 {meta.id} · {meta.title or '(无标题)'}"
+            )
         self.query_one("#input", InputWidget).focus()
+
+    # -- slash commands ---------------------------------------------------------
+
+    def _handle_command(self, text: str) -> None:
+        chat = self.query_one("#chat", ChatWidget)
+        command, _, arg = text.partition(" ")
+        command = command.lower()
+        arg = arg.strip()
+
+        if command == "/help":
+            chat.add_info(SLASH_COMMANDS_HELP)
+        elif command == "/sessions":
+            self._open_session_picker()
+        elif command == "/new":
+            self.agent = self._new_agent()
+            chat.clear()
+            chat.add_info(f"已开始新会话 {self.agent.session_id}")
+        elif command == "/export":
+            self._export_session(arg)
+        else:
+            chat.add_info(f"未知命令 {command}，{SLASH_COMMANDS_HELP}")
+
+    def _open_session_picker(self) -> None:
+        chat = self.query_one("#chat", ChatWidget)
+        sessions = list_sessions(self.session_dir, workdir=self.workdir)
+        if not sessions:
+            chat.add_info("没有可切换的历史会话")
+            return
+        self.app.push_screen(SessionPicker(sessions), self._on_session_picked)
+
+    def _on_session_picked(self, path: Path | None) -> None:
+        if path is None:
+            return
+        chat = self.query_one("#chat", ChatWidget)
+        self.agent = self._new_agent(resume=path)
+        chat.clear()
+        self._render_history()
+        meta = self.agent.session_meta
+        chat.add_info(f"已切换到会话 {meta.id} · {meta.title or '(无标题)'}")
+
+    def _render_history(self) -> None:
+        """Render the agent's restored history into the chat flow.
+
+        User/assistant text is rendered as-is; raw tool outputs are summarized
+        (tool cards are not rebuilt for history).
+        """
+        chat = self.query_one("#chat", ChatWidget)
+        skipped_tools = 0
+        for msg in self.agent.messages[1:]:  # skip the system message
+            if msg.role == "user" and msg.content:
+                chat.add_user_message(msg.content)
+            elif msg.role == "assistant" and msg.content:
+                chat.add_assistant_message(msg.content)
+            elif msg.role == "tool":
+                skipped_tools += 1
+        if skipped_tools:
+            chat.add_info(f"（已省略 {skipped_tools} 条历史工具输出）")
+
+    def _export_session(self, arg: str) -> None:
+        chat = self.query_one("#chat", ChatWidget)
+        meta = self.agent.session_meta
+        if not meta.title:
+            meta.title = derive_title(self.agent.messages)
+        if arg:
+            out = Path(arg).expanduser()
+        else:
+            out = (
+                Path.home() / ".limbo" / "exports" / f"{self.agent.session_id}.md"
+            )
+        try:
+            export_markdown(meta, self.agent.messages, out)
+        except OSError as e:
+            chat.add_error(f"导出失败：{e}")
+            return
+        chat.add_info(f"已导出到 {out}")
 
     def action_toggle_tools(self) -> None:
         self.query_one("#chat", ChatWidget).toggle_tool_bodies()
@@ -97,9 +192,13 @@ class MainScreen(Screen[None]):
             await self.llm_client.close()
 
     def on_user_submitted(self, event: UserSubmitted) -> None:
+        text = event.message
+        if text.startswith("/"):
+            self._handle_command(text)
+            return
         chat = self.query_one("#chat", ChatWidget)
-        chat.add_user_message(event.message)
-        self.run_worker(self._handle_turn(event.message))
+        chat.add_user_message(text)
+        self.run_worker(self._handle_turn(text))
 
     async def _handle_turn(self, user_input: str) -> None:
         input_widget = self.query_one("#input", InputWidget)
@@ -122,6 +221,9 @@ class MainScreen(Screen[None]):
                 break
         finally:
             input_widget.disabled = False
+            # Disabling the input mid-turn moves focus away; give it back so
+            # the user can keep typing without clicking.
+            input_widget.focus()
             statusbar.set_state("idle")
 
     async def _process_agent_event(self, event: AgentEvent) -> None:

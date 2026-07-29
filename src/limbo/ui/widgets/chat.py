@@ -58,6 +58,21 @@ class ChatWidget(VerticalScroll):
         self._current_assistant.append(text)
         self.scroll_end(animate=False)
 
+    def add_assistant_message(self, text: str) -> None:
+        """Add a complete (non-streamed) assistant Markdown block."""
+        self._current_assistant = None
+        md = Markdown(text, classes="assistant-message")
+        self.messages.append(md)
+        self._mount_and_scroll(md)
+
+    def clear(self) -> None:
+        """Remove all rendered messages and tool cards."""
+        for child in list(self.children):
+            child.remove()
+        self.messages.clear()
+        self.tool_cards.clear()
+        self._current_assistant = None
+
     # -- tool cards -----------------------------------------------------------
 
     def add_tool_card(

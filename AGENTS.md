@@ -23,6 +23,7 @@ src/limbo/
 ├── config.py               # Pydantic models for config (LLM, UI, safety, tools)
 ├── models.py               # Shared data types: Message, ToolCall, ToolResult, LLMEvent
 ├── agent.py                # Conversation loop: orchestrates LLM + tools, handles confirmation
+├── sessions.py             # Session storage: save/load/list/find/export (meta line + JSONL messages)
 ├── llm/
 │   ├── client.py           # LLMClient Protocol
 │   └── openai_client.py    # OpenAI-compatible streaming client
@@ -40,7 +41,8 @@ src/limbo/
     ├── app.py              # Textual App subclass (CSS_PATH = app.tcss)
     ├── app.tcss            # Centralized stylesheet for the whole TUI
     ├── screens/
-    │   └── main.py         # Single-column chat screen + event handling
+    │   └── main.py         # Single-column chat screen + event handling + slash commands
+    │   └── session_picker.py # Modal session switcher (/sessions)
     └── widgets/
         ├── chat.py         # Chat flow: user/assistant(Markdown)/tool cards/errors
         ├── input.py        # Multi-line user input
@@ -73,7 +75,7 @@ tests/
 7. **User approves** → `Agent.apply_tool()` re-executes with `dry_run=False`
 8. **User rejects** → `Agent.reject_pending_tool()` replaces placeholder with rejection message
 9. **Loop continues** until LLM produces final text or `max_iterations` is hit
-10. **Session saved** as JSONL to `~/.limbo/sessions/`
+10. **Session saved** as JSONL (meta line + messages) to `~/.limbo/sessions/`
 
 ## AgentLoop Details
 
@@ -144,7 +146,7 @@ All styles live in `ui/app.tcss`; widgets do not define `DEFAULT_CSS`. The theme
 
 - **No provider field**: Provider is inferred from `base_url`, `model`, `api_key`
 - **Async Agent, sync tools**: Tools run via `asyncio.to_thread()` — they are synchronous by default but executed in a thread pool
-- **Session persistence**: Full conversation history rewritten on each save (safe for MVP-scale conversations)
+- **Session persistence**: Full conversation history rewritten on each save (safe for MVP-scale conversations). Sessions are resumable — see [docs/session-management.md](./docs/session-management.md): `limbo --continue` / `--resume <id>`, and in-TUI `/sessions`, `/new`, `/export` commands
 - **System message**: Built into `Agent._init_system_message()` — tool descriptions and guidelines are hardcoded
 - **Bash safety filter**: Heuristic only — tokenizes the command, checks against pattern list. Known bypass vectors (subshells, command substitution, variable indirection) are documented.
 

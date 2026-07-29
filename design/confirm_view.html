@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html>
+<head><meta charset="UTF-8">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg-base: #0d1117; --bg-panel: #161b22; --bg-hover: #21262d; --border: #30363d;
+  --text-primary: #c9d1d9; --text-secondary: #8b949e; --text-accent: #58a6ff;
+  --success: #238636; --warning: #d29922; --error: #da3633; --info: #1f6feb;
+}
+body {
+  background: #000; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 13px;
+  line-height: 1.5; color: var(--text-primary); height: 100vh;
+  display: flex; justify-content: center; align-items: center; overflow: hidden;
+}
+.prototype-container {
+  width: 900px; height: 750px; background: var(--bg-base); border: 1px solid var(--border);
+  border-radius: 8px; display: flex; flex-direction: column; overflow: hidden;
+  box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+}
+.header {
+  height: 28px; background: var(--bg-panel); border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; padding: 0 12px; justify-content: space-between; font-size: 12px;
+}
+.header-left { display: flex; align-items: center; gap: 10px; }
+.brand { color: var(--text-accent); font-weight: bold; font-size: 12px; }
+.model-name { color: var(--text-secondary); font-size: 11px; }
+.status-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--success); display: inline-block; }
+.header-right { color: var(--text-secondary); font-size: 11px; }
+.chat-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: var(--bg-base); }
+.chat-messages { flex: 1; overflow-y: auto; padding: 12px 16px; display: flex; flex-direction: column; gap: 10px; }
+.message-block { width: 100%; }
+.message-header { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; font-size: 11px; font-weight: bold; }
+.user .message-header { color: var(--info); }
+.assistant .message-header { color: var(--success); }
+.system .message-header { color: var(--warning); }
+.message-time { color: var(--text-secondary); font-weight: normal; font-size: 10px; }
+.message-body { background: var(--bg-panel); border-left: 3px solid var(--border); padding: 10px 14px; border-radius: 0 6px 6px 0; font-size: 13px; line-height: 1.6; }
+.user .message-body { border-left-color: var(--info); }
+.assistant .message-body { border-left-color: var(--success); }
+.system .message-body { border-left-color: var(--warning); background: rgba(210,153,34,0.05); }
+.tool-card { border: 1px solid var(--border); border-radius: 4px; margin: 8px 0; overflow: hidden; background: var(--bg-base); }
+.tool-card-header { padding: 5px 10px; display: flex; align-items: center; gap: 6px; font-size: 12px; cursor: pointer; background: rgba(48,54,61,0.3); }
+.tool-card-header .tool-icon { color: var(--text-accent); font-size: 9px; }
+.tool-card-header .tool-title { color: var(--text-accent); font-weight: bold; }
+.tool-card-header .tool-status { margin-left: auto; color: var(--success); font-size: 11px; }
+.tool-card-body { padding: 8px 10px; font-size: 12px; color: var(--text-secondary); font-family: 'SF Mono', monospace; line-height: 1.6; max-height: 140px; overflow-y: auto; }
+.code-block { border: 1px solid var(--border); border-radius: 4px; margin: 8px 0; overflow: hidden; background: #0d1117; }
+.code-block-header { display: flex; justify-content: space-between; align-items: center; padding: 5px 10px; border-bottom: 1px solid var(--border); font-size: 11px; color: var(--text-secondary); background: var(--bg-panel); }
+.code-block-body { display: flex; font-family: 'SF Mono', monospace; font-size: 12px; line-height: 1.6; }
+.line-numbers { background: var(--bg-panel); color: var(--text-secondary); padding: 8px 8px; text-align: right; border-right: 1px solid var(--border); user-select: none; font-size: 11px; min-width: 32px; }
+.code-lines { padding: 8px 12px; flex: 1; overflow-x: auto; white-space: pre; color: var(--text-primary); }
+.diff-block { border: 1px solid var(--border); border-radius: 4px; margin: 8px 0; overflow: hidden; background: #0d1117; }
+.diff-header { padding: 5px 10px; background: var(--bg-panel); border-bottom: 1px solid var(--border); font-size: 11px; color: var(--text-secondary); display: flex; justify-content: space-between; align-items: center; }
+.diff-body { font-family: 'SF Mono', monospace; font-size: 12px; line-height: 1.6; }
+.diff-line { padding: 1px 10px; white-space: pre-wrap; word-break: break-all; }
+.diff-line.minus { background: rgba(218,54,51,0.12); color: #ff7b72; }
+.diff-line.plus { background: rgba(35,134,54,0.12); color: #7ee787; }
+.diff-line.context { color: var(--text-secondary); }
+.diff-line .diff-marker { display: inline-block; width: 14px; margin-right: 4px; text-align: center; }
+.confirm-actions { display: flex; gap: 8px; margin-top: 10px; padding-top: 8px; border-top: 1px solid var(--border); }
+.btn { padding: 4px 12px; border-radius: 4px; border: 1px solid var(--border); background: var(--bg-hover); color: var(--text-primary); font-family: inherit; font-size: 12px; cursor: pointer; }
+.btn-success { background: var(--success); border-color: var(--success); color: white; }
+.btn-error { background: var(--error); border-color: var(--error); color: white; }
+.kbd { background: var(--bg-hover); border: 1px solid var(--border); border-radius: 3px; padding: 1px 4px; font-size: 10px; color: var(--text-secondary); }
+.input-area { height: auto; min-height: 48px; background: var(--bg-panel); border-top: 1px solid var(--border); padding: 8px 12px; display: flex; flex-direction: column; }
+.input-box { background: var(--bg-base); border: 1px solid var(--border); border-radius: 6px; padding: 8px 12px; min-height: 32px; color: var(--text-primary); font-family: inherit; font-size: 13px; line-height: 1.5; }
+.input-placeholder { color: var(--text-secondary); font-style: italic; }
+.input-hint { display: flex; justify-content: space-between; margin-top: 4px; font-size: 11px; color: var(--text-secondary); }
+.code-keyword { color: #ff7b72; } .code-string { color: #a5d6ff; } .code-comment { color: #8b949e; } .code-function { color: #d2a8ff; } .code-class { color: #ffa657; } .code-number { color: #79c0ff; }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-secondary); }
+</style>
+</head>
+<body>
+<div class="prototype-container">
+  <div class="header">
+    <div class="header-left">
+      <span class="brand">🌀 Limbo</span>
+      <span class="model-name">deepseek-chat</span>
+      <span class="status-dot"></span>
+    </div>
+    <div class="header-right">~/project/limbo-code</div>
+  </div>
+  <div class="chat-area">
+    <div class="chat-messages">
+      <div class="message-block user">
+        <div class="message-header"><span>You</span><span class="message-time">14:32</span></div>
+        <div class="message-body">帮我分析这个项目的架构</div>
+      </div>
+      <div class="message-block assistant">
+        <div class="message-header"><span>🤖 Assistant</span><span class="message-time">14:32</span></div>
+        <div class="message-body">
+          <p>我来分析一下。让我先读取核心文件...</p>
+          <div class="tool-card">
+            <div class="tool-card-header"><span>▶</span><span class="tool-title">read src/limbo/config.py</span><span class="tool-status">✓ Completed</span></div>
+          </div>
+          <div class="tool-card">
+            <div class="tool-card-header"><span>▶</span><span class="tool-title">read src/limbo/agent.py</span><span class="tool-status">✓ Completed</span></div>
+          </div>
+          <p>基于分析，项目架构如下。现在我需要修改 UI 组件：</p>
+        </div>
+      </div>
+      <div class="message-block system">
+        <div class="message-header"><span>⚠️ System</span><span class="message-time">14:33</span></div>
+        <div class="message-body">
+          <p><strong>edit src/limbo/ui/widgets/chat.py</strong> 需要确认</p>
+          <div class="diff-block">
+            <div class="diff-header"><span>Diff</span><span>4 lines changed</span></div>
+            <div class="diff-body">
+              <div class="diff-line minus"><span class="diff-marker">─</span>    <span class="code-keyword">color</span>: <span class="code-string">$text-accent</span>;</div>
+              <div class="diff-line minus"><span class="diff-marker">─</span>    <span class="code-keyword">text-align</span>: right;</div>
+              <div class="diff-line context"><span class="diff-marker"> </span>}</div>
+              <div class="diff-line context"><span class="diff-marker"> </span>.assistant-message {</div>
+              <div class="diff-line plus"><span class="diff-marker">+</span>    <span class="code-keyword">color</span>: <span class="code-string">$text</span>;</div>
+              <div class="diff-line plus"><span class="diff-marker">+</span>    <span class="code-keyword">text-align</span>: left;</div>
+              <div class="diff-line plus"><span class="diff-marker">+</span>    <span class="code-keyword">border-left</span>: outer <span class="code-string">$success</span>;</div>
+              <div class="diff-line context"><span class="diff-marker"> </span>}</div>
+            </div>
+          </div>
+          <div class="confirm-actions">
+            <button class="btn btn-error">取消 (N)</button>
+            <button class="btn btn-success">确认 (Y)</button>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="input-area">
+      <div class="input-box"><span class="input-placeholder">💬 Ask anything...</span></div>
+      <div class="input-hint"><span>Press <span class="kbd">Enter</span> to send</span><span><span class="kbd">Shift</span> + <span class="kbd">Enter</span> for new line</span></div>
+    </div>
+  </div>
+</div>
+</body>
+</html>

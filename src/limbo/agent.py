@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 import warnings
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ from typing import Any
 from limbo.config import Config
 from limbo.llm.client import LLMClient
 from limbo.models import Message, TextChunk, ToolCallEvent, ToolResult
+from limbo.sessions import SessionMeta, derive_title, load_session, save_session
 from limbo.tools.registry import ToolRegistry
 
 
@@ -54,6 +56,7 @@ class Agent:
         llm_client: LLMClient,
         workdir: Path,
         session_dir: Path | None = None,
+        resume: Path | None = None,
     ):
         self.config = config
         self.llm_client = llm_client
@@ -67,8 +70,36 @@ class Agent:
         self._init_system_message()
 
         self._session_dir = session_dir or Path.home() / ".limbo" / "sessions"
-        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
-        self._session_file = self._session_dir / f"{timestamp}-{os.getpid()}.jsonl"
+        if resume is not None:
+            self._meta, history = load_session(resume)
+            self._session_file = resume
+            self.messages.extend(_restore_history(history))
+        else:
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+            # Random suffix avoids collisions when sessions are created in
+            # quick succession within the same process (e.g. `/new`).
+            self._session_file = (
+                self._session_dir
+                / f"{timestamp}-{os.getpid()}-{secrets.token_hex(2)}.jsonl"
+            )
+            self._meta = SessionMeta(
+                id=self._session_file.stem,
+                workdir=str(workdir.resolve()),
+                model=config.llm.model,
+                created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            )
+
+    @property
+    def session_id(self) -> str:
+        """Stable id of the current session (the session file stem)."""
+        return self._meta.id
+
+    @property
+    def session_meta(self) -> SessionMeta:
+        """Metadata of the current session (title filled in on first save)."""
+        if not self._meta.title:
+            self._meta.title = derive_title(self.messages)
+        return self._meta
 
     @property
     def confirmation_applied(self) -> bool:
@@ -76,29 +107,52 @@ class Agent:
         return self._confirmation_applied
 
     def _init_system_message(self) -> None:
+        content_parts = [
+            (
+                "You are an expert coding assistant operating inside limbo, "
+                "a coding agent harness. You help users by reading files, "
+                "executing commands, editing code, and writing new files.\n\n"
+                "Available tools:\n"
+                "- read: Read file contents\n"
+                "- bash: Execute bash commands\n"
+                "- edit: Make surgical edits to files (find exact text and replace)\n"
+                "- write: Create or overwrite files\n"
+                "- grep: Search file contents for patterns (respects root .gitignore)\n"
+                "- find: Find files by glob pattern (respects root .gitignore only)\n"
+                "- ls: List directory contents\n\n"
+                "Guidelines:\n"
+                "- Prefer grep/find/ls tools over bash for file exploration\n"
+                "- Use read to examine files before editing\n"
+                "- Use edit for precise changes (old_text must match exactly)\n"
+                "- Use write only for new files or complete rewrites\n"
+                "- Be concise in your responses\n"
+                "- Show file paths clearly when working with files"
+            ),
+        ]
+        # Load optional project-level AGENTS.md for extra context.
+        project_md = self.workdir / "AGENTS.md"
+        if project_md.is_file():
+            try:
+                text = project_md.read_text(encoding="utf-8")
+                content_parts.append(
+                    f"\n\n## Project context from AGENTS.md\n\n{text}"
+                )
+            except OSError:
+                pass
+        # Load optional global AGENTS.md for personal preferences.
+        global_md = Path.home() / ".limbo" / "AGENTS.md"
+        if global_md.is_file():
+            try:
+                text = global_md.read_text(encoding="utf-8")
+                content_parts.append(
+                    f"\n\n## User preferences from ~/.limbo/AGENTS.md\n\n{text}"
+                )
+            except OSError:
+                pass
         self.messages.append(
             Message(
                 role="system",
-                content=(
-                    "You are an expert coding assistant operating inside limbo, "
-                    "a coding agent harness. You help users by reading files, "
-                    "executing commands, editing code, and writing new files.\n\n"
-                    "Available tools:\n"
-                    "- read: Read file contents\n"
-                    "- bash: Execute bash commands\n"
-                    "- edit: Make surgical edits to files (find exact text and replace)\n"
-                    "- write: Create or overwrite files\n"
-                    "- grep: Search file contents for patterns (respects root .gitignore)\n"
-                    "- find: Find files by glob pattern (respects root .gitignore only)\n"
-                    "- ls: List directory contents\n\n"
-                    "Guidelines:\n"
-                    "- Prefer grep/find/ls tools over bash for file exploration\n"
-                    "- Use read to examine files before editing\n"
-                    "- Use edit for precise changes (old_text must match exactly)\n"
-                    "- Use write only for new files or complete rewrites\n"
-                    "- Be concise in your responses\n"
-                    "- Show file paths clearly when working with files"
-                ),
+                content="".join(content_parts),
             )
         )
 
@@ -472,19 +526,54 @@ class Agent:
         )
 
     def _save_session_sync(self) -> None:
-        self._session_file.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         # Rewrite the whole session on every save. This guarantees that in-place
         # updates to placeholder messages (e.g. after a confirmation) are
         # reflected on disk, and it is still cheap for MVP-sized conversations.
-        # Write to a temp file and atomically replace to avoid truncation on crash.
-        tmp_file = self._session_file.with_suffix(".tmp")
-        file_existed = self._session_file.exists()
-        with tmp_file.open("w", encoding="utf-8") as f:
-            for msg in self.messages:
-                f.write(msg.model_dump_json() + "\n")
-        os.replace(tmp_file, self._session_file)
-        if not file_existed:
-            self._session_file.chmod(0o600)
+        if not self._meta.title:
+            self._meta.title = derive_title(self.messages)
+        save_session(self._session_file, self._meta, self.messages)
 
     async def _save_session(self) -> None:
         await asyncio.to_thread(self._save_session_sync)
+
+
+def _restore_history(messages: list[Message]) -> list[Message]:
+    """Prepare persisted messages for reuse as LLM history.
+
+    - Drops the leading system message (a fresh one is generated on resume).
+    - Repairs dangling tool_calls: if the previous session crashed between a
+      tool call and its result, placeholder tool messages are inserted
+      immediately after the assistant message so the API history stays valid.
+    """
+    history = list(messages)
+    if history and history[0].role == "system":
+        history = history[1:]
+
+    restored: list[Message] = []
+    pending_tool_ids: list[str] = []
+
+    def flush_pending() -> None:
+        for tool_id in pending_tool_ids:
+            restored.append(
+                Message(
+                    role="tool",
+                    tool_call_id=tool_id,
+                    content="[session restored: tool call interrupted]",
+                )
+            )
+        pending_tool_ids.clear()
+
+    for msg in history:
+        if msg.role == "assistant" and msg.tool_calls:
+            flush_pending()
+            pending_tool_ids.extend(
+                tc["id"] for tc in msg.tool_calls if tc.get("id")
+            )
+        elif msg.role == "tool":
+            if msg.tool_call_id in pending_tool_ids:
+                pending_tool_ids.remove(msg.tool_call_id)
+        else:
+            flush_pending()
+        restored.append(msg)
+    flush_pending()
+    return restored

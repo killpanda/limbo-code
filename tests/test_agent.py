@@ -16,7 +16,7 @@ from limbo.agent import (
     ToolResultEvent,
 )
 from limbo.config import Config
-from limbo.models import TextChunk, ToolCallEvent
+from limbo.models import Message, TextChunk, ToolCallEvent
 
 
 @pytest.fixture
@@ -244,7 +244,9 @@ async def test_agent_saves_session(workdir):
     assert len(files) == 1
     lines = files[0].read_text().strip().splitlines()
     assert len(lines) >= 2
-    assert '"role":"system"' in lines[0]
+    # First line is the session meta record, followed by messages.
+    assert json.loads(lines[0])["type"] == "meta"
+    assert '"role":"system"' in lines[1]
     assert any('"role":"user"' in line for line in lines)
 
 
@@ -739,7 +741,9 @@ async def test_agent_rewrites_session_on_subsequent_turns(workdir):
     files = list(session_dir.iterdir())
     assert len(files) == 1
     lines = files[0].read_text().strip().splitlines()
-    roles = [json.loads(line)["role"] for line in lines]
+    roles = [
+        json.loads(line).get("role", "meta") for line in lines
+    ]
     assert roles.count("system") == 1
     assert roles.count("user") == 2
     assert "assistant" in roles
@@ -839,3 +843,146 @@ async def test_agent_save_session_is_atomic(workdir, monkeypatch):
     # The temp file should not be left behind after a successful save.
     assert not src.exists()
     assert dst.exists()
+
+
+# --- session resume -------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_agent_saves_meta_with_title(workdir):
+    from limbo.sessions import list_sessions, load_session
+
+    cfg = Config()
+    fake_llm = FakeLLMClient([[TextChunk(text="hi")]])
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    await _collect(agent.run("fix the   grep bug please"))
+
+    sessions = list_sessions(workdir / "sessions")
+    assert len(sessions) == 1
+    assert sessions[0].title == "fix the grep bug please"
+    assert sessions[0].workdir == str(workdir.resolve())
+    assert sessions[0].id == agent.session_id
+
+    _, messages = load_session(sessions[0].path)
+    assert messages[0].role == "system"
+    assert any(m.role == "user" for m in messages)
+
+
+@pytest.mark.asyncio
+async def test_agent_resume_continues_same_file_and_history(workdir):
+    from limbo.sessions import latest_session, list_sessions
+
+    session_dir = workdir / "sessions"
+    cfg = Config()
+    agent1 = Agent(
+        config=cfg,
+        llm_client=FakeLLMClient([[TextChunk(text="answer one")]]),
+        workdir=workdir,
+        session_dir=session_dir,
+    )
+    await _collect(agent1.run("first question"))
+    session_path = latest_session(session_dir)
+
+    agent2 = Agent(
+        config=cfg,
+        llm_client=FakeLLMClient([[TextChunk(text="answer two")]]),
+        workdir=workdir,
+        session_dir=session_dir,
+        resume=session_path,
+    )
+    assert agent2.session_id == agent1.session_id
+    await _collect(agent2.run("second question"))
+
+    # No new session file was created; history was sent to the LLM.
+    assert len(list_sessions(session_dir)) == 1
+    sent_messages = agent2.llm_client.calls[0][0]
+    assert sent_messages[0].role == "system"
+    contents = [m.content for m in sent_messages]
+    assert "first question" in contents
+    assert "answer one" in contents
+    assert "second question" in contents
+
+
+@pytest.mark.asyncio
+async def test_agent_resume_regenerates_system_message(workdir):
+    from limbo.sessions import SessionMeta, save_session
+
+    session_dir = workdir / "sessions"
+    session_dir.mkdir()
+    path = session_dir / "abc123.jsonl"
+    save_session(
+        path,
+        SessionMeta(id="abc123"),
+        [
+            Message(role="system", content="OLD SYSTEM PROMPT"),
+            Message(role="user", content="hi"),
+        ],
+    )
+
+    agent = Agent(
+        config=Config(),
+        llm_client=FakeLLMClient([[TextChunk(text="ok")]]),
+        workdir=workdir,
+        session_dir=session_dir,
+        resume=path,
+    )
+    await _collect(agent.run("again"))
+
+    sent_messages = agent.llm_client.calls[0][0]
+    system_messages = [m for m in sent_messages if m.role == "system"]
+    assert len(system_messages) == 1
+    assert "OLD SYSTEM PROMPT" not in (system_messages[0].content or "")
+
+
+@pytest.mark.asyncio
+async def test_agent_resume_repairs_dangling_tool_calls(workdir):
+    from limbo.models import Message
+    from limbo.sessions import SessionMeta, save_session
+
+    session_dir = workdir / "sessions"
+    session_dir.mkdir()
+    path = session_dir / "dangling.jsonl"
+    save_session(
+        path,
+        SessionMeta(id="dangling"),
+        [
+            Message(role="user", content="do something"),
+            Message(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {"name": "read", "arguments": "{}"},
+                    }
+                ],
+            ),
+            # Crash before the tool result was recorded.
+        ],
+    )
+
+    agent = Agent(
+        config=Config(),
+        llm_client=FakeLLMClient([[TextChunk(text="recovered")]]),
+        workdir=workdir,
+        session_dir=session_dir,
+        resume=path,
+    )
+    await _collect(agent.run("continue"))
+
+    sent_messages = agent.llm_client.calls[0][0]
+    tool_messages = [m for m in sent_messages if m.role == "tool"]
+    assert len(tool_messages) == 1
+    assert tool_messages[0].tool_call_id == "c1"
+    # The placeholder must immediately follow its assistant message.
+    assistant_idx = next(
+        i for i, m in enumerate(sent_messages) if m.tool_calls
+    )
+    assert sent_messages[assistant_idx + 1].role == "tool"
