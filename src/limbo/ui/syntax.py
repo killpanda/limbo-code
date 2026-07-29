@@ -18,7 +18,6 @@ from pygments.token import (
     Text,
 )
 
-
 # 色值直接取自 theme.py 的变量定义（单一事实来源，防止两处漂移）。
 from limbo.ui.theme import LIMBO_DARK, LIMBO_LIGHT
 
