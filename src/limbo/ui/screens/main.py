@@ -16,12 +16,13 @@ from limbo.agent import (
     AgentEvent,
     ErrorEvent,
     TextDelta,
+    ThinkingDelta,
     ToolCallRequest,
     ToolResultEvent,
 )
 from limbo.config import Config
 from limbo.llm.client import LLMClient
-from limbo.llm.openai_client import OpenAICompatibleClient
+from limbo.llm.factory import create_llm_client
 from limbo.sessions import derive_title, export_markdown, list_sessions
 from limbo.skills import Skill, discover_skills
 from limbo.ui.commands import SlashCommand, SlashCommandRegistry
@@ -57,7 +58,7 @@ class MainScreen(Screen[None]):
         super().__init__(*args, **kwargs)
         self.workdir = workdir
         self.config = config or Config()
-        self.llm_client = llm_client or OpenAICompatibleClient(self.config)
+        self.llm_client = llm_client or create_llm_client(self.config)
         self.session_dir = session_dir or Path.home() / ".limbo" / "sessions"
         self.agent = self._new_agent(resume=resume)
         self._confirmation_event = asyncio.Event()
@@ -325,8 +326,9 @@ class MainScreen(Screen[None]):
 
     async def on_unmount(self) -> None:
         """Close the LLM client on shutdown to release its HTTP resources."""
-        if isinstance(self.llm_client, OpenAICompatibleClient):
-            await self.llm_client.close()
+        close = getattr(self.llm_client, "close", None)
+        if close is not None:
+            await close()
 
     def on_user_submitted(self, event: UserSubmitted) -> None:
         text = event.message
@@ -370,6 +372,8 @@ class MainScreen(Screen[None]):
 
         if isinstance(event, TextDelta):
             await chat.append_assistant_text(event.text)
+        elif isinstance(event, ThinkingDelta):
+            await chat.append_thinking_text(event.text)
         elif isinstance(event, ErrorEvent):
             chat.add_error(event.message)
         elif isinstance(event, ToolCallRequest):
