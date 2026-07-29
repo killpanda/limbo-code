@@ -7,7 +7,13 @@ from pathlib import Path
 from typing import Any
 
 import toml  # type: ignore[import-untyped]
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+)
 from toml import TomlDecodeError
 
 DEFAULT_CONFIG_PATH = Path.home() / ".limbo" / "config.toml"
@@ -29,12 +35,73 @@ class LLMConfig(BaseModel):
     thinking_effort: str | None = None
     # Per-request output token cap; None = use the model catalog default.
     max_tokens: int | None = None
+    # LLM request retry/timeout knobs (see limbo.llm.retry).
+    max_retries: int = 3
+    retry_base_delay: float = 1.0
+    timeout: float = 600.0
+    connect_timeout: float = 30.0
 
     @field_validator("max_iterations")
     @classmethod
     def _max_iterations_must_be_positive(cls, value: int) -> int:
         if value < 1:
             raise ValueError("max_iterations must be at least 1")
+        return value
+
+    # The retry/timeout fields below clamp-and-warn instead of raising: a
+    # single invalid value must not discard the whole config (load_config
+    # falls back to *all* defaults on ValidationError).
+
+    @field_validator("max_retries")
+    @classmethod
+    def _max_retries_clamped(cls, value: int) -> int:
+        if value < 0:
+            warnings.warn(
+                f"max_retries={value} is invalid; clamped to 0 (retries disabled).",
+                stacklevel=2,
+            )
+            return 0
+        return value
+
+    @field_validator("retry_base_delay")
+    @classmethod
+    def _retry_base_delay_clamped(cls, value: float) -> float:
+        if value <= 0:
+            warnings.warn(
+                f"retry_base_delay={value} is invalid; reset to 1.0.",
+                stacklevel=2,
+            )
+            return 1.0
+        return value
+
+    @field_validator("timeout")
+    @classmethod
+    def _timeout_clamped(cls, value: float) -> float:
+        if value <= 0:
+            warnings.warn(
+                f"timeout={value} is invalid; reset to 600.0.",
+                stacklevel=2,
+            )
+            return 600.0
+        return value
+
+    @field_validator("connect_timeout")
+    @classmethod
+    def _connect_timeout_clamped(cls, value: float, info: ValidationInfo) -> float:
+        if value <= 0:
+            warnings.warn(
+                f"connect_timeout={value} is invalid; reset to 30.0.",
+                stacklevel=2,
+            )
+            return 30.0
+        timeout = info.data.get("timeout")
+        if isinstance(timeout, (int, float)) and value > timeout:
+            warnings.warn(
+                f"connect_timeout={value} exceeds timeout={timeout}; "
+                f"clamped to {timeout}.",
+                stacklevel=2,
+            )
+            return float(timeout)
         return value
 
     @field_validator("max_tokens")
