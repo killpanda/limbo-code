@@ -86,7 +86,7 @@ tests/
 ## AgentLoop Details
 
 - `Agent.run()` yields `AgentEvent` types: `TextDelta`, `ToolCallRequest`, `ToolResultEvent`, `ErrorEvent`
-- The loop respects `config.llm.max_iterations` (default 10)
+- The loop respects `config.llm.max_iterations` (default 50)
 - Multi-tool calls in a single assistant turn are executed sequentially
 - When a tool requires confirmation, placeholder `role="tool"` messages are inserted for all remaining calls in that turn so the message history stays valid for the OpenAI API
 - After a confirmed tool is applied, `Agent.continue_after_confirmation()` resumes the loop, first executing remaining placeholders, then returning to the LLM
@@ -123,7 +123,7 @@ api_key = "..."           # Required
 model = "deepseek-chat"   # Default
 base_url = "https://api.deepseek.com/v1"
 temperature = 0.2
-max_iterations = 10
+max_iterations = 50
 
 [tools]
 bash_enabled = true

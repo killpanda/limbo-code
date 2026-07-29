@@ -11,7 +11,7 @@ def test_default_config():
     cfg = Config()
     assert cfg.llm.base_url == "https://api.deepseek.com/v1"
     assert cfg.llm.model == "deepseek-chat"
-    assert cfg.llm.max_iterations == 10
+    assert cfg.llm.max_iterations == 50
     assert cfg.tools.bash_enabled is True
     assert ".ssh" in cfg.safety.sensitive_files
 
@@ -70,7 +70,7 @@ def test_load_config_validation_error_uses_defaults(tmp_path):
     path.write_text('[llm]\nmax_iterations = "ten"\n')
     with pytest.warns(UserWarning, match="Invalid config file"):
         cfg = load_config(path)
-    assert cfg.llm.max_iterations == 10
+    assert cfg.llm.max_iterations == 50
 
 
 def test_llm_config_rejects_non_positive_max_iterations():
