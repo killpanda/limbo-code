@@ -133,11 +133,42 @@ class ToolsConfig(BaseModel):
     parallel: bool = True
 
 
+class CompactionSettings(BaseModel):
+    """[compaction] section: auto context-window compaction (LIM-14)."""
+
+    enabled: bool = True
+    reserve_tokens: int = 16_384
+    keep_recent_tokens: int = 20_000
+
+    @field_validator("reserve_tokens")
+    @classmethod
+    def _reserve_tokens_clamped(cls, value: int) -> int:
+        if value < 1024:
+            warnings.warn(
+                f"reserve_tokens={value} is too small; reset to 16384.",
+                stacklevel=2,
+            )
+            return 16_384
+        return value
+
+    @field_validator("keep_recent_tokens")
+    @classmethod
+    def _keep_recent_tokens_clamped(cls, value: int) -> int:
+        if value < 1000:
+            warnings.warn(
+                f"keep_recent_tokens={value} is too small; reset to 20000.",
+                stacklevel=2,
+            )
+            return 20_000
+        return value
+
+
 class Config(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    compaction: CompactionSettings = Field(default_factory=CompactionSettings)
 
 
 def load_config(path: Path | None = None) -> Config:

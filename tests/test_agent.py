@@ -12,12 +12,14 @@ import pytest
 
 from limbo.agent import (
     Agent,
+    CompactionEvent,
     ErrorEvent,
     TextDelta,
     ToolCallRequest,
     ToolResultEvent,
 )
-from limbo.config import Config
+from limbo.compaction import SUMMARY_TAG
+from limbo.config import CompactionSettings, Config
 from limbo.llm.retry import LLMHttpError
 from limbo.models import CompletionMeta, Message, TextChunk, ToolCallEvent, ToolResult
 from limbo.trace import read_trace
@@ -506,7 +508,7 @@ async def test_agent_saves_meta_with_title(workdir):
     assert sessions[0].workdir == str(workdir.resolve())
     assert sessions[0].id == agent.session_id
 
-    _, messages = load_session(sessions[0].path)
+    _, messages, _ = load_session(sessions[0].path)
     assert messages[0].role == "system"
     assert any(m.role == "user" for m in messages)
 
@@ -1033,3 +1035,383 @@ async def test_agent_same_file_write_and_edit_do_not_interleave(workdir):
     # Both calls completed; the file ends in one of the two consistent states
     # (serialized), never an interleaved corruption.
     assert (workdir / "f.txt").read_text() in {"one", "two"}
+
+
+# -- auto-compaction (LIM-14) ---------------------------------------------------
+
+
+def _compact_cfg(**overrides) -> Config:
+    # 1000 is the validator floor; tests pad messages so history exceeds it.
+    defaults = {"keep_recent_tokens": 1000}
+    defaults.update(overrides)
+    return Config(compaction=CompactionSettings(**defaults))
+
+
+def _seed_history(agent: Agent) -> None:
+    """Give the agent enough history for find_split_point to work with."""
+    agent.messages.append(Message(role="user", content="a" * 3000))
+    agent.messages.append(Message(role="assistant", content="b" * 3000))
+
+
+def _big_usage(tokens: int = 120_000) -> CompletionMeta:
+    return CompletionMeta(usage={"prompt_tokens": tokens})
+
+
+@pytest.mark.asyncio
+async def test_auto_compaction_triggers_before_next_call(workdir):
+    cfg = _compact_cfg()
+    fake_llm = FakeLLMClient(
+        [
+            [
+                TextChunk(text="working"),
+                ToolCallEvent(id="c1", name="ls", arguments={}),
+                _big_usage(),
+            ],
+            [TextChunk(text="SUMMARY"), CompletionMeta()],  # the summary call
+            [TextChunk(text="final"), CompletionMeta(usage={"prompt_tokens": 100})],
+        ]
+    )
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    _seed_history(agent)
+
+    events = await _collect(agent.run("x" * 2000))
+
+    compacted = [e for e in events if isinstance(e, CompactionEvent)]
+    assert len(compacted) == 1
+    assert compacted[0].compacted and compacted[0].trigger == "auto"
+    # The summary call carried no tools...
+    assert fake_llm.calls[1][1] == []
+    # ...and the next real request went out with the compacted history.
+    next_messages = fake_llm.calls[2][0]
+    assert next_messages[1].content.startswith(f"<{SUMMARY_TAG}>")
+    assert "SUMMARY" in next_messages[1].content
+    # The turn completed normally after compacting.
+    assert "final" in "".join(e.text for e in events if isinstance(e, TextDelta))
+
+
+@pytest.mark.asyncio
+async def test_auto_compaction_catches_stale_usage_between_turns(workdir):
+    """P1-1: a huge paste between turns must trigger compaction even though
+    the last reported prompt_tokens was small."""
+    cfg = _compact_cfg()
+    fake_llm = FakeLLMClient(
+        [
+            [TextChunk(text="ok"), CompletionMeta(usage={"prompt_tokens": 1000})],
+            [TextChunk(text="SUMMARY"), CompletionMeta()],
+            [TextChunk(text="answer"), CompletionMeta(usage={"prompt_tokens": 100})],
+        ]
+    )
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    await _collect(agent.run("hi"))
+
+    # Simulate a huge paste landing between turns (before the next run).
+    agent.messages.append(Message(role="user", content="z" * 500_000))
+    events = await _collect(agent.run("please continue"))
+
+    compacted = [e for e in events if isinstance(e, CompactionEvent)]
+    assert compacted and compacted[0].compacted
+    # Compaction happened before this turn's first real LLM call.
+    first_real_call = fake_llm.calls[2][0]
+    assert first_real_call[1].content.startswith(f"<{SUMMARY_TAG}>")
+
+
+@pytest.mark.asyncio
+async def test_auto_compaction_summary_failure_keeps_history_and_guards_turn(
+    workdir,
+):
+    class SummaryFailingClient:
+        def __init__(self):
+            self.calls = []
+            self.summary_attempts = 0
+
+        async def chat(self, messages, tools, on_request=None):
+            self.calls.append((messages, tools))
+            if not tools:
+                self.summary_attempts += 1
+                raise RuntimeError("summary boom")
+            if len(self.calls) == 1:
+                for event in [
+                    TextChunk(text="working"),
+                    ToolCallEvent(id="c1", name="ls", arguments={}),
+                    _big_usage(),
+                ]:
+                    yield event
+            else:
+                for event in [
+                    TextChunk(text="final"),
+                    _big_usage(),  # still over threshold
+                ]:
+                    yield event
+
+    cfg = _compact_cfg()
+    client = SummaryFailingClient()
+    agent = Agent(
+        config=cfg,
+        llm_client=client,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    _seed_history(agent)
+
+    events = await _collect(agent.run("x" * 2000))
+
+    compacted = [e for e in events if isinstance(e, CompactionEvent)]
+    assert compacted and not compacted[0].compacted
+    assert "摘要生成失败" in (compacted[0].reason or "")
+    # History untouched: no summary message was inserted.
+    assert not any(
+        m.content and m.content.startswith(f"<{SUMMARY_TAG}>")
+        for m in agent.messages
+    )
+    # Guard: exactly one summary attempt this turn despite two loop
+    # iterations both being over threshold.
+    assert client.summary_attempts == 1
+    # Main flow continued anyway.
+    assert "final" in "".join(e.text for e in events if isinstance(e, TextDelta))
+
+    # The guard resets on the next user turn (and fails again here).
+    await _collect(agent.run("again"))
+    assert client.summary_attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_manual_compact_skips_threshold(workdir):
+    cfg = _compact_cfg()
+    fake_llm = FakeLLMClient(
+        [[TextChunk(text="SUMMARY"), CompletionMeta()]],
+    )
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    # History too short: polite no-op, no LLM call.
+    events = await _collect(agent.compact(trigger="manual"))
+    assert not events[0].compacted
+    assert "无需压缩" in (events[0].reason or "")
+    assert fake_llm.calls == []
+
+    # Enough history: compacts even though usage never crossed the threshold.
+    agent.messages.append(Message(role="user", content="x" * 3000))
+    agent.messages.append(Message(role="assistant", content="y" * 3000))
+    agent.messages.append(Message(role="user", content="z" * 3000))
+    agent.messages.append(Message(role="user", content="latest"))
+    events = await _collect(agent.compact(trigger="manual"))
+    assert events[0].compacted and events[0].trigger == "manual"
+    assert agent.messages[1].content.startswith(f"<{SUMMARY_TAG}>")
+
+
+@pytest.mark.asyncio
+async def test_compaction_freezes_title_before_summarizing(workdir):
+    """Compaction inside the very first turn must not let the summary
+    become the session title (titles are re-derived on every save)."""
+    cfg = _compact_cfg()
+    # A big tool result from round one lands *before* the recent tail, so
+    # find_split_point has something to summarize within the first turn.
+    (workdir / "big.txt").write_text("q" * 5000)
+    fake_llm = FakeLLMClient(
+        [
+            [
+                ToolCallEvent(id="c1", name="read", arguments={"path": "big.txt"}),
+                CompletionMeta(usage={"prompt_tokens": 100}),
+            ],
+            [
+                ToolCallEvent(id="c2", name="ls", arguments={}),
+                _big_usage(),
+            ],
+            [TextChunk(text="SUMMARY"), CompletionMeta()],
+            [TextChunk(text="final"), CompletionMeta(usage={"prompt_tokens": 100})],
+        ]
+    )
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    events = await _collect(agent.run("fix the frobnicate bug please"))
+
+    assert any(
+        isinstance(e, CompactionEvent) and e.compacted for e in events
+    ), "expected compaction within the first turn"
+    # The title comes from the real first user message, not the summary.
+    assert agent.session_meta.title.startswith("fix the frobnicate bug")
+
+
+@pytest.mark.asyncio
+async def test_resume_restores_iterative_summary_chain(workdir):
+    """P2-3: after resume, the next compaction folds into the old summary."""
+    cfg = _compact_cfg()
+    session_dir = workdir / "sessions"
+    fake_llm = FakeLLMClient(
+        [
+            [
+                TextChunk(text="working"),
+                ToolCallEvent(id="c1", name="ls", arguments={}),
+                _big_usage(),
+            ],
+            [TextChunk(text="FIRST SUMMARY"), CompletionMeta()],
+            [TextChunk(text="final"), CompletionMeta(usage={"prompt_tokens": 100})],
+        ]
+    )
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=session_dir,
+    )
+    _seed_history(agent)
+    await _collect(agent.run("x" * 2000))
+
+    resumed_llm = FakeLLMClient(
+        [
+            [
+                TextChunk(text="more work"),
+                ToolCallEvent(id="c2", name="ls", arguments={}),
+                _big_usage(),
+            ],
+            [TextChunk(text="SECOND SUMMARY"), CompletionMeta()],
+            [TextChunk(text="done"), CompletionMeta(usage={"prompt_tokens": 100})],
+        ]
+    )
+    resumed = Agent(
+        config=cfg,
+        llm_client=resumed_llm,
+        workdir=workdir,
+        session_dir=session_dir,
+        resume=agent._session_file,
+    )
+    assert resumed._previous_summary == "FIRST SUMMARY"
+    _seed_history(resumed)  # grow the history past keep_recent again
+
+    await _collect(resumed.run("carry on"))
+
+    # The second summary request received the first summary as context.
+    summary_request = resumed_llm.calls[1][0]
+    assert "<previous-summary>" in summary_request[0].content
+    assert "FIRST SUMMARY" in summary_request[0].content
+    assert resumed._previous_summary == "SECOND SUMMARY"
+
+
+@pytest.mark.asyncio
+async def test_auto_compaction_noop_reports_once_per_turn(workdir):
+    """P3-1: tail message too big to split -> auto path retries every
+    iteration but reports the no-op at most once per turn."""
+    cfg = _compact_cfg()
+    (workdir / "big.txt").write_text("q" * 5000)  # tool result > keep_recent
+    fake_llm = FakeLLMClient(
+        [
+            [
+                ToolCallEvent(id="c1", name="read", arguments={"path": "big.txt"}),
+                _big_usage(),
+            ],
+            [
+                ToolCallEvent(id="c2", name="read", arguments={"path": "big.txt"}),
+                _big_usage(),
+            ],
+            [TextChunk(text="final"), CompletionMeta(usage={"prompt_tokens": 100})],
+        ]
+    )
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    events = await _collect(agent.run("hi"))
+
+    compacted = [e for e in events if isinstance(e, CompactionEvent)]
+    # Two over-threshold iterations, each with an unsplittable tail, but
+    # only one no-op report — and the wording is no longer "历史太短".
+    assert len(compacted) == 1
+    assert not compacted[0].compacted
+    assert "无法安全切分" in (compacted[0].reason or "")
+    # No summary call was attempted; the turn completed normally.
+    assert len(fake_llm.calls) == 3
+    assert "final" in "".join(e.text for e in events if isinstance(e, TextDelta))
+
+
+@pytest.mark.asyncio
+async def test_auto_compaction_crash_does_not_kill_turn(workdir, monkeypatch):
+    """P3-3: an unexpected compaction error is contained, reported once,
+    and the turn continues."""
+    import limbo.agent as agent_module
+
+    def boom(messages, keep_recent_tokens):
+        raise RuntimeError("split exploded")
+
+    monkeypatch.setattr(agent_module, "find_split_point", boom)
+    cfg = _compact_cfg()
+    fake_llm = FakeLLMClient(
+        [
+            [
+                TextChunk(text="working"),
+                ToolCallEvent(id="c1", name="ls", arguments={}),
+                _big_usage(),
+            ],
+            [TextChunk(text="final"), CompletionMeta(usage={"prompt_tokens": 100})],
+        ]
+    )
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    events = await _collect(agent.run("hi"))
+
+    compacted = [e for e in events if isinstance(e, CompactionEvent)]
+    assert len(compacted) == 1
+    assert not compacted[0].compacted
+    assert "自动压缩异常" in (compacted[0].reason or "")
+    assert agent._auto_compaction_failed_this_turn  # guard engaged
+    assert "final" in "".join(e.text for e in events if isinstance(e, TextDelta))
+
+
+def test_compaction_config_cross_checked_against_window(workdir, monkeypatch):
+    """P3-2: reserve + keep_recent must fit inside the context window."""
+    import limbo.agent as agent_module
+    from limbo.llm.catalog import GENERIC_OPENAI, ModelSpec
+
+    def tiny_window(model_id: str) -> ModelSpec:
+        return ModelSpec(id=model_id, provider=GENERIC_OPENAI, context_window=30_000)
+
+    monkeypatch.setattr(agent_module, "resolve_model", tiny_window)
+    cfg = Config()  # defaults: 16384 + 20000 = 36384 >= 30000
+    with pytest.warns(UserWarning) as record:
+        agent = Agent(
+            config=cfg,
+            llm_client=FakeLLMClient([]),
+            workdir=workdir,
+            session_dir=workdir / "sessions",
+        )
+    messages = [str(w.message) for w in record]
+    assert any("reset to defaults" in m for m in messages)
+    assert any("too small for auto-compaction" in m for m in messages)
+    assert not agent._compaction_config.enabled
+
+    def roomy_window(model_id: str) -> ModelSpec:
+        return ModelSpec(id=model_id, provider=GENERIC_OPENAI, context_window=40_000)
+
+    monkeypatch.setattr(agent_module, "resolve_model", roomy_window)
+    agent = Agent(
+        config=cfg,
+        llm_client=FakeLLMClient([]),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    assert agent._compaction_config.enabled
+    assert agent._compaction_config.reserve_tokens == 16_384

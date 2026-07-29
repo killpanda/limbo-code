@@ -50,7 +50,7 @@ def test_save_then_load_roundtrip(tmp_path: Path):
     messages = make_messages()
 
     save_session(path, meta, messages)
-    loaded_meta, loaded_messages = load_session(path)
+    loaded_meta, loaded_messages, _ = load_session(path)
 
     assert loaded_meta.id == meta.id
     assert loaded_meta.workdir == meta.workdir
@@ -84,7 +84,7 @@ def test_load_legacy_file_without_meta(tmp_path: Path):
         '{"role":"user","content":"hi"}\n'
     )
 
-    meta, messages = load_session(path)
+    meta, messages, _ = load_session(path)
 
     assert meta.id == "legacy"  # falls back to file stem
     assert meta.title == ""
@@ -99,7 +99,7 @@ def test_load_skips_blank_and_malformed_lines(tmp_path: Path):
         '{"role":"user","content":"ok"}\n'
     )
 
-    _, messages = load_session(path)
+    _, messages, _ = load_session(path)
     assert [m.content for m in messages] == ["ok"]
 
 
@@ -274,3 +274,133 @@ def test_export_jsonl_every_line_is_valid_json(tmp_path: Path):
 
     # _read_jsonl raises on any malformed line.
     assert len(_read_jsonl(out)) >= 2
+
+
+# -- compaction records ---------------------------------------------------------
+
+
+def _compacted_messages() -> tuple[list[Message], str]:
+    """[system, summary, *kept] plus the boundary (first kept) entry id."""
+    from limbo.compaction import make_summary_message
+
+    messages = [
+        Message(role="system", content="sys"),
+        make_summary_message("OLD SUMMARY"),
+        Message(role="user", content="recent question"),
+        Message(role="assistant", content="recent answer"),
+    ]
+    return messages, messages[2].id
+
+
+def make_compaction_record(first_kept_entry_id: str, summary: str = "OLD SUMMARY"):
+    from limbo.sessions import CompactionRecord
+
+    return CompactionRecord(
+        id="cmp-1",
+        created_at="2026-07-20T11:00:00+00:00",
+        first_kept_entry_id=first_kept_entry_id,
+        summary=summary,
+        tokens_before=120_000,
+        tokens_after_estimate=22_000,
+        trigger="auto",
+    )
+
+
+def test_compaction_record_roundtrip(tmp_path: Path):
+    messages, boundary_id = _compacted_messages()
+    record = make_compaction_record(boundary_id)
+    path = tmp_path / "s.jsonl"
+
+    save_session(path, make_meta(), messages, compactions=[record])
+    _, loaded, compactions = load_session(path)
+
+    assert compactions == [record]
+    # File already holds the compacted history; load reproduces it verbatim.
+    assert [m.model_dump() for m in loaded] == [m.model_dump() for m in messages]
+
+
+def test_load_drops_messages_before_boundary(tmp_path: Path):
+    """A file that still carries pre-boundary messages gets them dropped."""
+    from limbo.compaction import is_summary_message
+
+    messages, boundary_id = _compacted_messages()
+    stale = [
+        messages[0],
+        Message(role="user", content="ancient history"),
+        Message(role="assistant", content="ancient reply"),
+        *messages[1:],
+    ]
+    record = make_compaction_record(boundary_id)
+    path = tmp_path / "s.jsonl"
+
+    save_session(path, make_meta(), stale, compactions=[record])
+    _, loaded, _ = load_session(path)
+
+    contents = [m.content for m in loaded]
+    assert "ancient history" not in contents
+    assert loaded[0].role == "system"
+    assert is_summary_message(loaded[1])
+    assert loaded[1].content and "OLD SUMMARY" in loaded[1].content
+    assert [m.id for m in loaded[2:]] == [m.id for m in messages[2:]]
+
+
+def test_load_inserts_summary_when_missing(tmp_path: Path):
+    """Boundary present but summary line lost -> rebuilt from the record."""
+    from limbo.compaction import is_summary_message
+
+    messages, boundary_id = _compacted_messages()
+    no_summary = [messages[0], *messages[2:]]  # summary line removed
+    record = make_compaction_record(boundary_id)
+    path = tmp_path / "s.jsonl"
+
+    save_session(path, make_meta(), no_summary, compactions=[record])
+    _, loaded, _ = load_session(path)
+
+    assert is_summary_message(loaded[1])
+    assert loaded[1].content and "OLD SUMMARY" in loaded[1].content
+
+
+def test_only_latest_compaction_record_is_applied(tmp_path: Path):
+    from limbo.sessions import CompactionRecord
+
+    messages, boundary_id = _compacted_messages()
+    older = CompactionRecord(
+        id="cmp-0",
+        first_kept_entry_id="does-not-exist",
+        summary="STALE",
+    )
+    newer = make_compaction_record(boundary_id)
+    path = tmp_path / "s.jsonl"
+
+    save_session(path, make_meta(), messages, compactions=[older, newer])
+    raw_lines = path.read_text().splitlines()
+    _, loaded, compactions = load_session(path)
+
+    # Both records stay on disk for audit; only the latest drives rebuild.
+    assert sum('"type": "compaction"' in line for line in raw_lines) == 2
+    assert [c.id for c in compactions] == ["cmp-0", "cmp-1"]
+    assert [m.model_dump() for m in loaded] == [m.model_dump() for m in messages]
+
+
+def test_missing_boundary_warns_and_keeps_full_history(tmp_path: Path):
+    messages, _ = _compacted_messages()
+    record = make_compaction_record("no-such-entry-id")
+    path = tmp_path / "s.jsonl"
+
+    save_session(path, make_meta(), messages, compactions=[record])
+    with pytest.warns(UserWarning, match="not found"):
+        _, loaded, _ = load_session(path)
+
+    assert [m.content for m in loaded] == [m.content for m in messages]
+
+
+def test_legacy_file_loads_with_empty_compactions(tmp_path: Path):
+    path = tmp_path / "legacy.jsonl"
+    path.write_text('{"role":"user","content":"hi"}\n')
+
+    _, messages, compactions = load_session(path)
+
+    assert [m.content for m in messages] == ["hi"]
+    assert compactions == []
+    # Messages minted from legacy lines still get entry ids.
+    assert messages[0].id

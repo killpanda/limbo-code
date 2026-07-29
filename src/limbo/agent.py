@@ -16,9 +16,18 @@ from pathlib import Path
 from typing import Any
 
 from limbo import __version__
+from limbo.compaction import (
+    CompactionConfig,
+    build_summary_prompt,
+    estimate_tokens,
+    find_split_point,
+    make_summary_message,
+    should_compact,
+)
 from limbo.config import Config
 from limbo.history import ToolHistory
 from limbo.history import repair as repair_history
+from limbo.llm.catalog import resolve_model
 from limbo.llm.client import LLMClient
 from limbo.llm.retry import friendly_message
 from limbo.models import (
@@ -29,7 +38,13 @@ from limbo.models import (
     ToolCallEvent,
     ToolResult,
 )
-from limbo.sessions import SessionMeta, derive_title, load_session, save_session
+from limbo.sessions import (
+    CompactionRecord,
+    SessionMeta,
+    derive_title,
+    load_session,
+    save_session,
+)
 from limbo.skills import discover_skills, format_skills_for_prompt
 from limbo.tools.registry import ToolRegistry
 from limbo.trace import TraceLogger, trace_path_for
@@ -67,7 +82,51 @@ class ErrorEvent:
     message: str
 
 
-AgentEvent = TextDelta | ThinkingDelta | ToolCallRequest | ToolResultEvent | ErrorEvent
+@dataclass(frozen=True)
+class CompactionEvent:
+    """Outcome of one compaction attempt (auto at loop top, or /compact)."""
+
+    compacted: bool
+    trigger: str  # "auto" | "manual"
+    before_tokens: int = 0
+    after_estimate: int | None = None
+    summary_chars: int = 0
+    # Why nothing happened (history too short, summary failed, ...).
+    reason: str | None = None
+    # Non-fatal follow-up note (e.g. still over budget after compacting).
+    warning: str | None = None
+
+
+AgentEvent = (
+    TextDelta
+    | ThinkingDelta
+    | ToolCallRequest
+    | ToolResultEvent
+    | ErrorEvent
+    | CompactionEvent
+)
+
+
+def _extract_prompt_tokens(usage: dict[str, Any] | None) -> int | None:
+    """Normalize provider-specific prompt-size counters.
+
+    OpenAI reports ``prompt_tokens``; Anthropic reports ``input_tokens``
+    (which excludes cache reads/creation, so those are added back).
+    """
+    if not usage:
+        return None
+    prompt = usage.get("prompt_tokens")
+    if isinstance(prompt, int):
+        return prompt
+    input_tokens = usage.get("input_tokens")
+    if isinstance(input_tokens, int):
+        total = input_tokens
+        for key in ("cache_read_input_tokens", "cache_creation_input_tokens"):
+            extra = usage.get(key)
+            if isinstance(extra, int):
+                total += extra
+        return total
+    return None
 
 
 def _extract_cached_tokens(usage: dict[str, Any] | None) -> int | None:
@@ -111,11 +170,29 @@ class Agent:
         self._last_finish_reason: str | None = None
         self._init_system_message()
 
+        # Auto-compaction state (LIM-14). ``_last_prompt_tokens`` is the
+        # real prompt size reported by the last response; ``_usage_watermark``
+        # is len(messages) at that moment, so the next prompt can be
+        # estimated as last + estimate(messages appended since).
+        self._context_window = resolve_model(config.llm.model).context_window
+        self._compaction_config = self._build_compaction_config(config)
+        self._last_prompt_tokens: int | None = None
+        self._usage_watermark: int = 0
+        self._compactions: list[CompactionRecord] = []
+        self._previous_summary: str | None = None
+        self._auto_compaction_failed_this_turn = False
+        self._auto_compact_noop_notified = False
+
         self._session_dir = session_dir or Path.home() / ".limbo" / "sessions"
         if resume is not None:
-            self._meta, history = load_session(resume)
+            self._meta, history, self._compactions = load_session(resume)
             self._session_file = resume
             self.messages.extend(repair_history(history))
+            # Restore the iterative-summary chain across sessions.
+            self._previous_summary = next(
+                (c.summary for c in reversed(self._compactions) if c.summary),
+                None,
+            )
         else:
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
             # Random suffix avoids collisions when sessions are created in
@@ -155,6 +232,40 @@ class Agent:
                 "thinking_effort": config.llm.thinking_effort,
                 "bash_enabled": config.tools.bash_enabled,
             },
+        )
+
+    def _build_compaction_config(self, config: Config) -> CompactionConfig:
+        """Map [compaction] settings, with a cross-check against the window.
+
+        reserve + keep_recent must leave headroom inside the model's context
+        window; otherwise compaction could succeed yet stay over threshold
+        and re-burn a summary call every iteration. Misconfiguration falls
+        back to defaults with a warning; a window too small even for the
+        defaults disables compaction outright.
+        """
+        reserve = config.compaction.reserve_tokens
+        keep_recent = config.compaction.keep_recent_tokens
+        enabled = config.compaction.enabled
+        if enabled and reserve + keep_recent >= self._context_window:
+            warnings.warn(
+                f"compaction reserve_tokens({reserve}) + "
+                f"keep_recent_tokens({keep_recent}) >= context window "
+                f"({self._context_window}); reset to defaults "
+                f"(16384/20000).",
+                stacklevel=2,
+            )
+            reserve, keep_recent = 16_384, 20_000
+            if reserve + keep_recent >= self._context_window:
+                warnings.warn(
+                    f"context window ({self._context_window}) too small for "
+                    "auto-compaction; disabled.",
+                    stacklevel=2,
+                )
+                enabled = False
+        return CompactionConfig(
+            enabled=enabled,
+            reserve_tokens=reserve,
+            keep_recent_tokens=keep_recent,
         )
 
     @property
@@ -254,6 +365,8 @@ class Agent:
     async def run(self, user_input: str) -> AsyncIterator[AgentEvent]:
         # Reset per-user-turn state.
         self._iteration_count = 0
+        self._auto_compaction_failed_this_turn = False
+        self._auto_compact_noop_notified = False
         self._turn_count += 1
         self._turn_start = time.monotonic()
 
@@ -323,6 +436,37 @@ class Agent:
     async def _conversation_loop(self) -> AsyncIterator[AgentEvent]:
         while self._iteration_count < self.config.llm.max_iterations:
             self._iteration_count += 1
+            # Loop-top check: history is consistent here (all tool results
+            # from the previous batch are recorded) and no request has been
+            # sent yet, so this is the safest point to compact.
+            if (
+                not self._auto_compaction_failed_this_turn
+                and should_compact(
+                    self._estimated_next_prompt_tokens(),
+                    self._context_window,
+                    self._compaction_config,
+                )
+            ):
+                # Defensive: a bug in compaction must never kill the turn.
+                try:
+                    async for event in self.compact(trigger="auto"):
+                        yield event
+                except Exception as e:  # noqa: BLE001
+                    self._auto_compaction_failed_this_turn = True
+                    self.trace.log(
+                        "compaction_error",
+                        turn=self._turn_count,
+                        iteration=self._iteration_count,
+                        trigger="auto",
+                        error=str(e),
+                        exception_type=type(e).__name__,
+                        traceback=traceback.format_exc(),
+                    )
+                    yield CompactionEvent(
+                        compacted=False,
+                        trigger="auto",
+                        reason=f"自动压缩异常：{e}",
+                    )
             try:
                 async for event in self._call_llm():
                     yield event
@@ -553,13 +697,175 @@ class Agent:
                 reasoning_signature=assistant_signature,
             )
         )
+        # Record the real prompt size for the compaction trigger, with the
+        # watermark past the assistant message just appended.
+        prompt_tokens = _extract_prompt_tokens(usage)
+        if prompt_tokens is not None:
+            self._last_prompt_tokens = prompt_tokens
+            self._usage_watermark = len(self.messages)
+
+    # -- auto-compaction (LIM-14) --------------------------------------------
+
+    def _estimated_next_prompt_tokens(self) -> int:
+        """Estimate the size of the *next* request's prompt.
+
+        With real usage: last prompt + estimated tokens of everything
+        appended since (new user input, assistant messages, tool results).
+        This catches the classic overflow case — a huge paste between turns
+        — that a stale last-response figure alone would miss. Without usage
+        (first iteration, or a provider that reports none): full estimate.
+        """
+        if self._last_prompt_tokens is None:
+            return estimate_tokens(self.messages)
+        return self._last_prompt_tokens + estimate_tokens(
+            self.messages[self._usage_watermark :]
+        )
+
+    async def _generate_summary(self, prompt: list[Message]) -> str:
+        """One-shot summarization call on the current client (no tools)."""
+
+        def _trace_request(body: dict[str, Any]) -> None:
+            self.trace.log(
+                "llm_request",
+                turn=self._turn_count,
+                iteration=self._iteration_count,
+                kind="compaction",
+                body=body,
+            )
+
+        text = ""
+        meta: CompletionMeta | None = None
+        async for event in self.llm_client.chat(
+            prompt, tools=[], on_request=_trace_request
+        ):
+            if isinstance(event, TextChunk):
+                text += event.text
+            elif isinstance(event, CompletionMeta):
+                meta = event
+        self.trace.log(
+            "llm_response",
+            turn=self._turn_count,
+            iteration=self._iteration_count,
+            kind="compaction",
+            duration=meta.duration if meta else None,
+            finish_reason=meta.finish_reason if meta else None,
+            usage=meta.usage if meta else None,
+            content_chars=len(text),
+        )
+        return text
+
+    async def compact(self, trigger: str = "auto") -> AsyncIterator[AgentEvent]:
+        """Compact history: summarize the old region, keep the recent tail.
+
+        Shared by the loop-top auto trigger (``trigger="auto"``) and the
+        ``/compact`` slash command (``trigger="manual"``). On any failure
+        the history is left untouched; an auto failure suppresses further
+        auto attempts for the rest of the turn (the guard resets in
+        :meth:`run`), while ``/compact`` can always be retried by hand.
+        """
+        cfg = self._compaction_config
+        before = self._estimated_next_prompt_tokens()
+        split = find_split_point(self.messages, cfg.keep_recent_tokens)
+        if split is None:
+            if trigger == "auto":
+                # Retried every iteration on purpose (a later assistant
+                # message may restore a safe cut) but reported at most once
+                # per turn to avoid flooding the chat.
+                if self._auto_compact_noop_notified:
+                    return
+                self._auto_compact_noop_notified = True
+                reason = "最近消息过大或历史太短，无法安全切分保留边界，本次跳过自动压缩"
+            else:
+                reason = "历史太短，无需压缩"
+            yield CompactionEvent(
+                compacted=False,
+                trigger=trigger,
+                before_tokens=before,
+                reason=reason,
+            )
+            return
+        # Freeze the title before the first real user message can be
+        # summarized away (titles are re-derived on every save).
+        if not self._meta.title:
+            self._meta.title = derive_title(self.messages)
+        to_summarize = self.messages[1:split]
+        prompt = build_summary_prompt(to_summarize, self._previous_summary)
+        start = time.monotonic()
+        summary = ""
+        error: str | None = None
+        try:
+            summary = await self._generate_summary(prompt)
+            if not summary.strip():
+                error = "empty response"
+        except Exception as e:  # noqa: BLE001
+            error = str(e)
+        if error is not None:
+            if trigger == "auto":
+                self._auto_compaction_failed_this_turn = True
+            self.trace.log(
+                "compaction_error",
+                turn=self._turn_count,
+                iteration=self._iteration_count,
+                trigger=trigger,
+                error=error,
+            )
+            yield CompactionEvent(
+                compacted=False,
+                trigger=trigger,
+                before_tokens=before,
+                reason=f"摘要生成失败：{error}",
+            )
+            return
+
+        system_msg = self.messages[0]
+        kept = self.messages[split:]
+        self.messages = [system_msg, make_summary_message(summary), *kept]
+        after = estimate_tokens(self.messages)
+        record = CompactionRecord(
+            id=secrets.token_hex(8),
+            created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            first_kept_entry_id=kept[0].id,
+            summary=summary.strip(),
+            tokens_before=before,
+            tokens_after_estimate=after,
+            trigger=trigger,
+        )
+        self._compactions.append(record)
+        self._previous_summary = summary.strip()
+        # Usage figures predate the rewrite; fall back to full estimation
+        # until the next response reports real prompt tokens.
+        self._last_prompt_tokens = None
+        self._usage_watermark = len(self.messages)
+        warning = None
+        if should_compact(after, self._context_window, cfg):
+            # No re-loop: one warning, the turn continues.
+            warning = "压缩后上下文仍接近上限，建议尽快 /new 开新会话"
+        self.trace.log(
+            "compaction",
+            turn=self._turn_count,
+            iteration=self._iteration_count,
+            trigger=trigger,
+            tokens_before=before,
+            tokens_after_estimate=after,
+            split_index=split,
+            summary_chars=len(summary),
+            duration=time.monotonic() - start,
+        )
+        yield CompactionEvent(
+            compacted=True,
+            trigger=trigger,
+            before_tokens=before,
+            after_estimate=after,
+            summary_chars=len(summary),
+            warning=warning,
+        )
 
     def _save_session_sync(self) -> None:
         # Rewrite the whole session on every save. It is cheap for MVP-sized
         # conversations.
         if not self._meta.title:
             self._meta.title = derive_title(self.messages)
-        save_session(self._session_file, self._meta, self.messages)
+        save_session(self._session_file, self._meta, self.messages, self._compactions)
 
     async def _save_session(self) -> None:
         await asyncio.to_thread(self._save_session_sync)

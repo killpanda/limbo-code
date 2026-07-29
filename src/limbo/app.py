@@ -89,7 +89,7 @@ def main() -> int:
     if resume is not None:
         # The session's recorded workdir wins when it still exists — sessions
         # are bound to the project they were created in.
-        meta, _ = load_session(resume)
+        meta, _, _ = load_session(resume)
         if meta.workdir and Path(meta.workdir).is_dir():
             workdir = Path(meta.workdir)
 
