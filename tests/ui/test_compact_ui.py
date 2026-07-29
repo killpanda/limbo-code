@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from limbo.sessions import CompactionRecord, SessionMeta, save_session
 from limbo.ui.app import LimboApp
 from limbo.ui.screens.main import MainScreen
 from limbo.ui.widgets.chat import ChatWidget
+from limbo.ui.widgets.input import InputWidget
 
 
 class FakeLLMClient:
@@ -65,7 +67,7 @@ async def test_compact_rejected_while_turn_is_running(tmp_path):
         screen = pilot.app.screen_stack[-1]
         chat = screen.query_one("#chat", ChatWidget)
 
-        screen._turn_running = True  # simulate an in-flight turn
+        screen._agent_busy = True  # simulate an in-flight turn
         before = list(screen.agent.messages)
         screen._handle_command("/compact")
         await pilot.pause()
@@ -98,6 +100,58 @@ async def test_compact_runs_when_idle_and_reports(tmp_path):
 
         assert "已压缩上下文" in chat.transcript_text()
         assert fake_llm.calls and fake_llm.calls[0][1] == []
+
+
+@pytest.mark.asyncio
+async def test_compact_blocks_input_and_duplicate_compact(tmp_path):
+    """P2-1: while a compaction worker is running, the input is disabled
+    and a second /compact is refused — no concurrent history rewrites."""
+    release = asyncio.Event()
+
+    class SlowSummaryClient:
+        def __init__(self):
+            self.calls = []
+
+        async def chat(self, messages, tools, on_request=None):
+            self.calls.append((messages, tools))
+            await release.wait()  # hold the summary call open
+            yield TextChunk(text="SUMMARY")
+            yield CompletionMeta()
+
+    client = SlowSummaryClient()
+    app = make_app(tmp_path, client)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = pilot.app.screen_stack[-1]
+        chat = screen.query_one("#chat", ChatWidget)
+        input_widget = screen.query_one("#input", InputWidget)
+        agent = screen.agent
+        agent.messages.append(Message(role="user", content="x" * 90_000))
+        agent.messages.append(Message(role="assistant", content="y" * 90_000))
+        agent.messages.append(Message(role="user", content="latest question"))
+
+        screen._handle_command("/compact")
+        await pilot.pause()
+        await pilot.pause()
+
+        # While the summary call is in flight: busy + input disabled.
+        assert screen._agent_busy
+        assert input_widget.disabled
+
+        # A duplicate /compact is refused without touching the history.
+        before = list(agent.messages)
+        screen._handle_command("/compact")
+        await pilot.pause()
+        assert "请等待完成后再压缩" in chat.transcript_text()
+        assert agent.messages == before
+        assert len(client.calls) == 1  # no second summary call
+
+        release.set()
+        for _ in range(4):
+            await pilot.pause()
+        assert not screen._agent_busy
+        assert not input_widget.disabled
+        assert "已压缩上下文" in chat.transcript_text()
 
 
 @pytest.mark.asyncio

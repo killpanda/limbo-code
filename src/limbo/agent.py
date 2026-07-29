@@ -174,17 +174,14 @@ class Agent:
         # real prompt size reported by the last response; ``_usage_watermark``
         # is len(messages) at that moment, so the next prompt can be
         # estimated as last + estimate(messages appended since).
-        self._compaction_config = CompactionConfig(
-            enabled=config.compaction.enabled,
-            reserve_tokens=config.compaction.reserve_tokens,
-            keep_recent_tokens=config.compaction.keep_recent_tokens,
-        )
         self._context_window = resolve_model(config.llm.model).context_window
+        self._compaction_config = self._build_compaction_config(config)
         self._last_prompt_tokens: int | None = None
         self._usage_watermark: int = 0
         self._compactions: list[CompactionRecord] = []
         self._previous_summary: str | None = None
         self._auto_compaction_failed_this_turn = False
+        self._auto_compact_noop_notified = False
 
         self._session_dir = session_dir or Path.home() / ".limbo" / "sessions"
         if resume is not None:
@@ -235,6 +232,40 @@ class Agent:
                 "thinking_effort": config.llm.thinking_effort,
                 "bash_enabled": config.tools.bash_enabled,
             },
+        )
+
+    def _build_compaction_config(self, config: Config) -> CompactionConfig:
+        """Map [compaction] settings, with a cross-check against the window.
+
+        reserve + keep_recent must leave headroom inside the model's context
+        window; otherwise compaction could succeed yet stay over threshold
+        and re-burn a summary call every iteration. Misconfiguration falls
+        back to defaults with a warning; a window too small even for the
+        defaults disables compaction outright.
+        """
+        reserve = config.compaction.reserve_tokens
+        keep_recent = config.compaction.keep_recent_tokens
+        enabled = config.compaction.enabled
+        if enabled and reserve + keep_recent >= self._context_window:
+            warnings.warn(
+                f"compaction reserve_tokens({reserve}) + "
+                f"keep_recent_tokens({keep_recent}) >= context window "
+                f"({self._context_window}); reset to defaults "
+                f"(16384/20000).",
+                stacklevel=2,
+            )
+            reserve, keep_recent = 16_384, 20_000
+            if reserve + keep_recent >= self._context_window:
+                warnings.warn(
+                    f"context window ({self._context_window}) too small for "
+                    "auto-compaction; disabled.",
+                    stacklevel=2,
+                )
+                enabled = False
+        return CompactionConfig(
+            enabled=enabled,
+            reserve_tokens=reserve,
+            keep_recent_tokens=keep_recent,
         )
 
     @property
@@ -335,6 +366,7 @@ class Agent:
         # Reset per-user-turn state.
         self._iteration_count = 0
         self._auto_compaction_failed_this_turn = False
+        self._auto_compact_noop_notified = False
         self._turn_count += 1
         self._turn_start = time.monotonic()
 
@@ -415,8 +447,26 @@ class Agent:
                     self._compaction_config,
                 )
             ):
-                async for event in self.compact(trigger="auto"):
-                    yield event
+                # Defensive: a bug in compaction must never kill the turn.
+                try:
+                    async for event in self.compact(trigger="auto"):
+                        yield event
+                except Exception as e:  # noqa: BLE001
+                    self._auto_compaction_failed_this_turn = True
+                    self.trace.log(
+                        "compaction_error",
+                        turn=self._turn_count,
+                        iteration=self._iteration_count,
+                        trigger="auto",
+                        error=str(e),
+                        exception_type=type(e).__name__,
+                        traceback=traceback.format_exc(),
+                    )
+                    yield CompactionEvent(
+                        compacted=False,
+                        trigger="auto",
+                        reason=f"自动压缩异常：{e}",
+                    )
             try:
                 async for event in self._call_llm():
                     yield event
@@ -717,11 +767,21 @@ class Agent:
         before = self._estimated_next_prompt_tokens()
         split = find_split_point(self.messages, cfg.keep_recent_tokens)
         if split is None:
+            if trigger == "auto":
+                # Retried every iteration on purpose (a later assistant
+                # message may restore a safe cut) but reported at most once
+                # per turn to avoid flooding the chat.
+                if self._auto_compact_noop_notified:
+                    return
+                self._auto_compact_noop_notified = True
+                reason = "最近消息过大或历史太短，无法安全切分保留边界，本次跳过自动压缩"
+            else:
+                reason = "历史太短，无需压缩"
             yield CompactionEvent(
                 compacted=False,
                 trigger=trigger,
                 before_tokens=before,
-                reason="历史太短，无需压缩",
+                reason=reason,
             )
             return
         # Freeze the title before the first real user message can be

@@ -60,7 +60,8 @@ class MainScreen(Screen[None]):
         self.session_dir = session_dir or Path.home() / ".limbo" / "sessions"
         self.agent = self._new_agent(resume=resume)
         self._slash_menu_open = False
-        self._turn_running = False
+        # Busy while a turn OR a /compact worker owns the agent history.
+        self._agent_busy = False
         self._commands = SlashCommandRegistry()
         self._register_builtin_commands()
 
@@ -232,18 +233,27 @@ class MainScreen(Screen[None]):
         worker would race the turn worker on self.messages), otherwise pump
         the agent's compaction events like a mini-turn."""
         chat = self.query_one("#chat", ChatWidget)
-        if self._turn_running:
+        if self._agent_busy:
             chat.add_info("当前任务进行中，请等待完成后再压缩")
             return
         self.run_worker(self._run_compact())
 
     async def _run_compact(self) -> None:
+        input_widget = self.query_one("#input", InputWidget)
         statusbar = self.query_one("#statusbar", StatusBar)
+        # Same busy discipline as _handle_turn: the summary call takes
+        # seconds, and a concurrent turn or second /compact would race
+        # compact()'s wholesale history rewrite and silently drop messages.
+        input_widget.disabled = True
+        self._agent_busy = True
         statusbar.set_state("compacting…", "thinking")
         try:
             async for event in self.agent.compact(trigger="manual"):
                 await self._process_agent_event(event)
         finally:
+            self._agent_busy = False
+            input_widget.disabled = False
+            input_widget.focus()
             statusbar.set_state("idle")
 
     def _show_help(self) -> None:
@@ -365,13 +375,13 @@ class MainScreen(Screen[None]):
         input_widget = self.query_one("#input", InputWidget)
         statusbar = self.query_one("#statusbar", StatusBar)
         input_widget.disabled = True
-        self._turn_running = True
+        self._agent_busy = True
         statusbar.set_state("thinking…", "thinking")
         try:
             async for event in self.agent.run(user_input):
                 await self._process_agent_event(event)
         finally:
-            self._turn_running = False
+            self._agent_busy = False
             input_widget.disabled = False
             # Disabling the input mid-turn moves focus away; give it back so
             # the user can keep typing without clicking.

@@ -1302,3 +1302,116 @@ async def test_resume_restores_iterative_summary_chain(workdir):
     assert "<previous-summary>" in summary_request[0].content
     assert "FIRST SUMMARY" in summary_request[0].content
     assert resumed._previous_summary == "SECOND SUMMARY"
+
+
+@pytest.mark.asyncio
+async def test_auto_compaction_noop_reports_once_per_turn(workdir):
+    """P3-1: tail message too big to split -> auto path retries every
+    iteration but reports the no-op at most once per turn."""
+    cfg = _compact_cfg()
+    (workdir / "big.txt").write_text("q" * 5000)  # tool result > keep_recent
+    fake_llm = FakeLLMClient(
+        [
+            [
+                ToolCallEvent(id="c1", name="read", arguments={"path": "big.txt"}),
+                _big_usage(),
+            ],
+            [
+                ToolCallEvent(id="c2", name="read", arguments={"path": "big.txt"}),
+                _big_usage(),
+            ],
+            [TextChunk(text="final"), CompletionMeta(usage={"prompt_tokens": 100})],
+        ]
+    )
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    events = await _collect(agent.run("hi"))
+
+    compacted = [e for e in events if isinstance(e, CompactionEvent)]
+    # Two over-threshold iterations, each with an unsplittable tail, but
+    # only one no-op report — and the wording is no longer "历史太短".
+    assert len(compacted) == 1
+    assert not compacted[0].compacted
+    assert "无法安全切分" in (compacted[0].reason or "")
+    # No summary call was attempted; the turn completed normally.
+    assert len(fake_llm.calls) == 3
+    assert "final" in "".join(e.text for e in events if isinstance(e, TextDelta))
+
+
+@pytest.mark.asyncio
+async def test_auto_compaction_crash_does_not_kill_turn(workdir, monkeypatch):
+    """P3-3: an unexpected compaction error is contained, reported once,
+    and the turn continues."""
+    import limbo.agent as agent_module
+
+    def boom(messages, keep_recent_tokens):
+        raise RuntimeError("split exploded")
+
+    monkeypatch.setattr(agent_module, "find_split_point", boom)
+    cfg = _compact_cfg()
+    fake_llm = FakeLLMClient(
+        [
+            [
+                TextChunk(text="working"),
+                ToolCallEvent(id="c1", name="ls", arguments={}),
+                _big_usage(),
+            ],
+            [TextChunk(text="final"), CompletionMeta(usage={"prompt_tokens": 100})],
+        ]
+    )
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    events = await _collect(agent.run("hi"))
+
+    compacted = [e for e in events if isinstance(e, CompactionEvent)]
+    assert len(compacted) == 1
+    assert not compacted[0].compacted
+    assert "自动压缩异常" in (compacted[0].reason or "")
+    assert agent._auto_compaction_failed_this_turn  # guard engaged
+    assert "final" in "".join(e.text for e in events if isinstance(e, TextDelta))
+
+
+def test_compaction_config_cross_checked_against_window(workdir, monkeypatch):
+    """P3-2: reserve + keep_recent must fit inside the context window."""
+    import limbo.agent as agent_module
+    from limbo.llm.catalog import GENERIC_OPENAI, ModelSpec
+
+    def tiny_window(model_id: str) -> ModelSpec:
+        return ModelSpec(id=model_id, provider=GENERIC_OPENAI, context_window=30_000)
+
+    monkeypatch.setattr(agent_module, "resolve_model", tiny_window)
+    cfg = Config()  # defaults: 16384 + 20000 = 36384 >= 30000
+    with pytest.warns(UserWarning) as record:
+        agent = Agent(
+            config=cfg,
+            llm_client=FakeLLMClient([]),
+            workdir=workdir,
+            session_dir=workdir / "sessions",
+        )
+    messages = [str(w.message) for w in record]
+    assert any("reset to defaults" in m for m in messages)
+    assert any("too small for auto-compaction" in m for m in messages)
+    assert not agent._compaction_config.enabled
+
+    def roomy_window(model_id: str) -> ModelSpec:
+        return ModelSpec(id=model_id, provider=GENERIC_OPENAI, context_window=40_000)
+
+    monkeypatch.setattr(agent_module, "resolve_model", roomy_window)
+    agent = Agent(
+        config=cfg,
+        llm_client=FakeLLMClient([]),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    assert agent._compaction_config.enabled
+    assert agent._compaction_config.reserve_tokens == 16_384
