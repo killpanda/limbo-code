@@ -1,7 +1,9 @@
 """Tests for the Anthropic Messages client (Kimi For Coding dialect)."""
 
+import asyncio
 import json
 
+import httpx
 import pytest
 import respx
 from httpx import Response
@@ -12,6 +14,7 @@ from limbo.llm.anthropic_client import (
     _messages_to_anthropic,
     _tool_to_anthropic,
 )
+from limbo.llm.retry import LLMHttpError, LLMOverloadedError
 from limbo.models import CompletionMeta, Message, TextChunk, ThinkingChunk, ToolCallEvent
 
 MESSAGES_URL = "https://api.kimi.com/coding/v1/messages"
@@ -124,7 +127,7 @@ async def test_http_error_raises_with_body(client):
                             "type": "invalid_authentication_error"}},
         )
     )
-    with pytest.raises(RuntimeError, match="401.*Invalid Authentication"):
+    with pytest.raises(LLMHttpError, match="401.*Invalid Authentication"):
         await _collect(client.chat([Message(role="user", content="hi")], tools=[]))
 
 
@@ -329,3 +332,202 @@ async def test_on_request_hook_receives_exact_body(client):
     assert body["system"] == "sys"
     assert body["messages"] == [{"role": "user", "content": "hi"}]
     assert body["stream"] is True
+
+
+# -- unified retry integration (limbo.llm.retry) -----------------------------
+
+
+@pytest.fixture
+def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Replace asyncio.sleep with a recorder so retries cost no real time."""
+    calls: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        calls.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    return calls
+
+
+def _text_ok() -> Response:
+    return _sse(
+        {"type": "content_block_delta", "index": 0,
+         "delta": {"type": "text_delta", "text": "ok"}},
+        {"type": "message_stop"},
+    )
+
+
+def test_httpx_timeout_wired_from_config(client):
+    client.config.llm.timeout = 123.0
+    client.config.llm.connect_timeout = 4.0
+
+    timeout = client.client.timeout
+    assert timeout.read == 123.0
+    assert timeout.connect == 4.0
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_retries_on_429_then_succeeds(client, sleeps):
+    route = respx.post(MESSAGES_URL).mock(
+        side_effect=[
+            Response(
+                429,
+                json={"error": {"type": "rate_limit_error",
+                                "message": "slow down"}},
+                headers={"retry-after": "0"},
+            ),
+            _text_ok(),
+        ]
+    )
+
+    events = await _collect(client.chat([Message(role="user", content="hi")], tools=[]))
+
+    assert route.call_count == 2
+    assert "".join(e.text for e in events if isinstance(e, TextChunk)) == "ok"
+    assert len(sleeps) == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_retries_on_500_then_succeeds(client, sleeps):
+    route = respx.post(MESSAGES_URL).mock(
+        side_effect=[
+            Response(500, json={"error": {"type": "api_error",
+                                        "message": "internal"}}),
+            _text_ok(),
+        ]
+    )
+
+    events = await _collect(client.chat([Message(role="user", content="hi")], tools=[]))
+
+    assert route.call_count == 2
+    assert "".join(e.text for e in events if isinstance(e, TextChunk)) == "ok"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_400_is_not_retried(client, sleeps):
+    route = respx.post(MESSAGES_URL).mock(
+        return_value=Response(
+            400,
+            json={"error": {"type": "invalid_request_error",
+                            "message": "bad request"}},
+        )
+    )
+
+    with pytest.raises(LLMHttpError, match="400.*bad request"):
+        await _collect(client.chat([Message(role="user", content="hi")], tools=[]))
+
+    assert route.call_count == 1
+    assert sleeps == []
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_http_error_carries_retry_after(client):
+    client.config.llm.max_retries = 0
+    respx.post(MESSAGES_URL).mock(
+        return_value=Response(
+            429,
+            json={"error": {"type": "rate_limit_error", "message": "slow down"}},
+            headers={"retry-after": "7"},
+        )
+    )
+
+    with pytest.raises(LLMHttpError) as excinfo:
+        await _collect(client.chat([Message(role="user", content="hi")], tools=[]))
+
+    assert excinfo.value.status_code == 429
+    assert excinfo.value.retry_after == 7.0
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_sse_overloaded_error_is_retried(client, sleeps):
+    route = respx.post(MESSAGES_URL).mock(
+        side_effect=[
+            _sse({"type": "error",
+                  "error": {"type": "overloaded_error", "message": "Overloaded"}}),
+            _text_ok(),
+        ]
+    )
+
+    events = await _collect(client.chat([Message(role="user", content="hi")], tools=[]))
+
+    assert route.call_count == 2
+    assert "".join(e.text for e in events if isinstance(e, TextChunk)) == "ok"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_sse_overloaded_exhausts_retries_then_raises(client, sleeps):
+    respx.post(MESSAGES_URL).mock(
+        return_value=_sse(
+            {"type": "error",
+             "error": {"type": "overloaded_error", "message": "Overloaded"}}
+        )
+    )
+
+    with pytest.raises(LLMOverloadedError, match="overloaded_error"):
+        await _collect(client.chat([Message(role="user", content="hi")], tools=[]))
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_sse_invalid_request_error_is_not_retried(client, sleeps):
+    route = respx.post(MESSAGES_URL).mock(
+        return_value=_sse(
+            {"type": "error",
+             "error": {"type": "invalid_request_error", "message": "bad input"}}
+        )
+    )
+
+    with pytest.raises(RuntimeError, match="invalid_request_error"):
+        await _collect(client.chat([Message(role="user", content="hi")], tools=[]))
+
+    assert route.call_count == 1
+    assert sleeps == []
+
+
+class _DroppingStream(httpx.AsyncByteStream):
+    """Yields its chunks, then drops the connection mid-stream."""
+
+    def __init__(self, chunks: list[bytes]) -> None:
+        self._chunks = chunks
+
+    async def __aiter__(self):
+        for chunk in self._chunks:
+            yield chunk
+        raise httpx.ReadError("connection dropped")
+
+    async def aclose(self) -> None:
+        return None
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_mid_stream_drop_after_first_event_is_not_retried(client, sleeps):
+    first_event = (
+        b"event: content_block_delta\n"
+        b'data: {"type": "content_block_delta", "index": 0, '
+        b'"delta": {"type": "text_delta", "text": "partial"}}\n\n'
+    )
+    route = respx.post(MESSAGES_URL).mock(
+        side_effect=[
+            Response(
+                200,
+                headers={"Content-Type": "text/event-stream"},
+                stream=_DroppingStream([first_event]),
+            ),
+            _text_ok(),
+        ]
+    )
+
+    with pytest.raises(httpx.ReadError):
+        await _collect(client.chat([Message(role="user", content="hi")], tools=[]))
+
+    # The first text delta already reached the consumer: retrying would
+    # duplicate output, so the exception passes through with no 2nd request.
+    assert route.call_count == 1
+    assert sleeps == []

@@ -63,8 +63,9 @@ class LLMOverloadedError(Exception):
 def is_retryable(exc: BaseException) -> bool:
     """Classify whether retrying the request could succeed.
 
-    Retryable: 429, 408, 5xx, connection errors, read/connect timeouts,
-    provider overload. Everything else (other 4xx, cancellations) is not.
+    Retryable: 429, 408, 5xx, transport-level failures (connect errors,
+    pool/read timeouts, dropped connections, protocol errors), provider
+    overload. Everything else (other 4xx, cancellations) is not.
     """
     if isinstance(exc, (asyncio.CancelledError, KeyboardInterrupt)):
         return False
@@ -77,7 +78,11 @@ def is_retryable(exc: BaseException) -> bool:
         return _status_retryable(exc.status_code)
     if isinstance(exc, (APIConnectionError, APITimeoutError)):
         return True
-    if isinstance(exc, (httpx.ConnectError, httpx.ReadTimeout, httpx.ConnectTimeout)):
+    if isinstance(exc, httpx.TransportError):
+        # Base class of ConnectError, all timeouts, ReadError,
+        # RemoteProtocolError, etc. Safe to retry broadly: stream_with_retry
+        # only retries before the first event, so no output can be
+        # duplicated. (OpenAI SDK's APIConnectionError above is equivalent.)
         return True
     return False
 
