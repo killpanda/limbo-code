@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from limbo.models import ToolResult
-from limbo.tools.base import BaseTool, resolve_path
+from limbo.tools.base import BaseTool
 
 MAX_ENTRIES = 500
 
@@ -22,17 +22,11 @@ class LsTool(BaseTool):
         "required": [],
     }
 
-    def execute(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
+    def run(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
         path = arguments.get("path", ".")
         limit = arguments.get("limit", MAX_ENTRIES)
 
-        target = resolve_path(path, self.workdir)
-        if isinstance(target, ToolResult):
-            return target
-        if not target.exists():
-            return ToolResult(success=False, error=f"Path not found: {path}")
-        if not target.is_dir():
-            return ToolResult(success=False, error=f"Not a directory: {path}")
+        target = self.resolve_existing(path, kind="dir")
 
         try:
             entries = sorted(target.iterdir(), key=lambda p: (p.is_file(), p.name.lower()))

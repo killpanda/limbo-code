@@ -74,6 +74,15 @@ ToolCard .tool-body {
     border-left: solid $primary-lighten-2;
 }
 
+/* ---- 斜杠命令自动补全菜单 ---- */
+#slash-menu {
+    height: auto;
+    max-height: 8;
+    margin: 0 1;
+    border: round $primary;
+    background: $surface;
+}
+
 /* ---- 输入框（全局唯一的圆角边框，视觉锚点） ---- */
 #input {
     height: 3;

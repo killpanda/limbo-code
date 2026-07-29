@@ -6,7 +6,7 @@ import difflib
 from typing import Any
 
 from limbo.models import ToolResult
-from limbo.tools.base import BaseTool, resolve_path
+from limbo.tools.base import BaseTool
 
 
 class EditTool(BaseTool):
@@ -31,15 +31,11 @@ class EditTool(BaseTool):
         "required": ["path", "old_text", "new_text"],
     }
 
-    def execute(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
+    def run(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
         raw_path = arguments.get("path", "")
         old_text = arguments.get("old_text", "")
         new_text = arguments.get("new_text", "")
-        target = resolve_path(raw_path, self.workdir)
-        if isinstance(target, ToolResult):
-            return target
-        if not target.exists():
-            return ToolResult(success=False, error=f"File not found: {raw_path}")
+        target = self.resolve_existing(raw_path, noun="File")
 
         try:
             content = target.read_text(encoding="utf-8")
@@ -62,11 +58,7 @@ class EditTool(BaseTool):
         diff = self._make_diff(content, new_content)
 
         if dry_run:
-            return ToolResult(
-                success=True,
-                output=f"Proposed edit to {raw_path}:\n{diff}",
-                requires_confirmation=True,
-            )
+            return self.confirm(f"Proposed edit to {raw_path}:\n{diff}")
 
         try:
             target.write_text(new_content, encoding="utf-8")

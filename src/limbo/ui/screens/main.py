@@ -23,18 +23,16 @@ from limbo.config import Config
 from limbo.llm.client import LLMClient
 from limbo.llm.openai_client import OpenAICompatibleClient
 from limbo.sessions import derive_title, export_markdown, list_sessions
+from limbo.skills import Skill, discover_skills
+from limbo.ui.commands import SlashCommand, SlashCommandRegistry
 from limbo.ui.screens.session_picker import SessionPicker
 from limbo.ui.widgets.chat import ChatWidget
+from limbo.ui.widgets.command_menu import SlashCommandMenu
 from limbo.ui.widgets.confirm import ConfirmDialog
 from limbo.ui.widgets.input import InputWidget, UserSubmitted
 from limbo.ui.widgets.status_bar import StatusBar
 
 CONFIRMATION_TIMEOUT = 300.0
-
-SLASH_COMMANDS_HELP = (
-    "可用命令：/sessions 切换会话 · /new 新会话 · "
-    "/export [path] 导出 Markdown · /help 帮助"
-)
 
 
 class MainScreen(Screen[None]):
@@ -62,6 +60,9 @@ class MainScreen(Screen[None]):
         self.agent = self._new_agent(resume=resume)
         self._confirmation_event = asyncio.Event()
         self._confirmation_result: bool | None = None
+        self._slash_menu_open = False
+        self._commands = SlashCommandRegistry()
+        self._register_builtin_commands()
 
     def _new_agent(self, resume: Path | None = None) -> Agent:
         return Agent(
@@ -79,9 +80,10 @@ class MainScreen(Screen[None]):
             id="statusbar",
         )
         yield ChatWidget(id="chat")
+        yield SlashCommandMenu(id="slash-menu")
         yield InputWidget(id="input")
         yield Static(
-            "Enter 发送 · Shift+Enter 换行 · ctrl+o 展开/收起工具输出",
+            "Enter 发送 · Shift+Enter 换行 · / 命令 · ctrl+o 展开/收起工具输出",
             id="hint",
             markup=False,
         )
@@ -98,26 +100,145 @@ class MainScreen(Screen[None]):
             )
         self.query_one("#input", InputWidget).focus()
 
+    # -- slash command menu ---------------------------------------------------
+
+    @property
+    def slash_menu_open(self) -> bool:
+        return self._slash_menu_open
+
+    def on_text_area_changed(self, event) -> None:
+        """Show/filter the command menu while the input starts with '/'."""
+        if getattr(event.text_area, "id", None) != "input":
+            return
+        text = event.text_area.text
+        if text.startswith("/") and not any(ch.isspace() for ch in text):
+            matches = [
+                c for c in self._slash_candidates() if c.name.startswith(text)
+            ]
+            if matches:
+                menu = self.query_one("#slash-menu", SlashCommandMenu)
+                menu.show_commands(matches)
+                self._slash_menu_open = True
+                return
+        self.slash_menu_close()
+
+    def _slash_candidates(self) -> list:
+        """Built-in commands plus discovered skills. Re-scanned on each menu
+        update so skills added while Limbo is running appear immediately."""
+        return self._commands.candidates(discover_skills(self.workdir))
+
+    def slash_menu_move(self, delta: int) -> None:
+        menu = self.query_one("#slash-menu", SlashCommandMenu)
+        if delta > 0:
+            menu.action_cursor_down()
+        else:
+            menu.action_cursor_up()
+
+    def slash_menu_close(self) -> None:
+        self._slash_menu_open = False
+        self.query_one("#slash-menu", SlashCommandMenu).close()
+
+    def slash_menu_complete(self, execute: bool) -> bool:
+        """Complete the highlighted command. Returns False if nothing done.
+
+        With ``execute=True``, commands that take no arguments run
+        immediately; arg-taking commands are completed into the input so the
+        user can type the argument.
+        """
+        if not self._slash_menu_open:
+            return False
+        menu = self.query_one("#slash-menu", SlashCommandMenu)
+        command = menu.highlighted_command()
+        if command is None:
+            return False
+        input_widget = self.query_one("#input", InputWidget)
+        if execute and input_widget.text.strip() == command.name:
+            # Exact match: Enter submits the command as typed (e.g. invoking
+            # a skill without args) instead of completing it.
+            self.slash_menu_close()
+            return False
+        self.slash_menu_close()
+        if execute and not command.takes_args:
+            input_widget.clear()
+            self._handle_command(command.name)
+        else:
+            input_widget.text = command.name + " "
+            input_widget.move_cursor(input_widget.document.end)
+            input_widget.focus()
+        return True
+
+    def on_option_list_option_selected(self, event) -> None:
+        """Mouse click on a menu item completes it like Enter."""
+        if isinstance(getattr(event, "option_list", None), SlashCommandMenu):
+            event.stop()
+            self.slash_menu_complete(execute=True)
+
     # -- slash commands ---------------------------------------------------------
+
+    def _register_builtin_commands(self) -> None:
+        self._commands.register(
+            SlashCommand(
+                "/sessions", "切换历史会话", handler=lambda arg: self._open_session_picker()
+            )
+        )
+        self._commands.register(
+            SlashCommand("/new", "开始新会话", handler=lambda arg: self._start_new_session())
+        )
+        self._commands.register(
+            SlashCommand(
+                "/export",
+                "导出会话为 Markdown [path]",
+                takes_args=True,
+                handler=lambda arg: self._export_session(arg),
+            )
+        )
+        self._commands.register(
+            SlashCommand("/help", "显示帮助", handler=lambda arg: self._show_help())
+        )
 
     def _handle_command(self, text: str) -> None:
         chat = self.query_one("#chat", ChatWidget)
-        command, _, arg = text.partition(" ")
-        command = command.lower()
+        name, _, arg = text.partition(" ")
         arg = arg.strip()
 
-        if command == "/help":
-            chat.add_info(SLASH_COMMANDS_HELP)
-        elif command == "/sessions":
-            self._open_session_picker()
-        elif command == "/new":
-            self.agent = self._new_agent()
-            chat.clear()
-            chat.add_info(f"已开始新会话 {self.agent.session_id}")
-        elif command == "/export":
-            self._export_session(arg)
+        command = self._commands.get(name.lower())
+        if command is not None and command.handler is not None:
+            command.handler(arg)
+            return
+        skill = self._find_skill(name.removeprefix("/"))
+        if skill is not None:
+            self._invoke_skill(skill, arg)
         else:
-            chat.add_info(f"未知命令 {command}，{SLASH_COMMANDS_HELP}")
+            chat.add_info(f"未知命令 {name}，{self._commands.help_text()}")
+
+    def _show_help(self) -> None:
+        self.query_one("#chat", ChatWidget).add_info(self._commands.help_text())
+
+    def _start_new_session(self) -> None:
+        chat = self.query_one("#chat", ChatWidget)
+        self.agent = self._new_agent()
+        chat.clear()
+        chat.add_info(f"已开始新会话 {self.agent.session_id}")
+
+    def _find_skill(self, name: str) -> Skill | None:
+        if self._commands.get(f"/{name}") is not None:
+            return None
+        for skill in discover_skills(self.workdir):
+            if skill.name == name:
+                return skill
+        return None
+
+    def _invoke_skill(self, skill: Skill, arg: str) -> None:
+        """Invoke a skill: its body becomes the turn's instruction."""
+        chat = self.query_one("#chat", ChatWidget)
+        chat.add_user_message(f"/{skill.name}" + (f" {arg}" if arg else ""))
+        prompt = (
+            f"# Skill: {skill.name}\n\n{skill.body.strip()}\n\n"
+            f"(Skill 文件位于 {skill.path}，其中引用的相对路径基于其所在目录解析。)"
+        )
+        if arg:
+            prompt += f"\n\n## 用户输入\n\n{arg}"
+        self.run_worker(self._handle_turn(prompt))
 
     def _open_session_picker(self) -> None:
         chat = self.query_one("#chat", ChatWidget)

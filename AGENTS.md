@@ -23,12 +23,15 @@ src/limbo/
 ├── config.py               # Pydantic models for config (LLM, UI, safety, tools)
 ├── models.py               # Shared data types: Message, ToolCall, ToolResult, LLMEvent
 ├── agent.py                # Conversation loop: orchestrates LLM + tools, handles confirmation
+├── history.py              # ToolHistory: tool_call ↔ tool-result pairing bookkeeping + resume repair
 ├── sessions.py             # Session storage: save/load/list/find/export (meta line + JSONL messages)
+├── skills.py               # Skill discovery: scan SKILL.md dirs (user + project), parse frontmatter
 ├── llm/
 │   ├── client.py           # LLMClient Protocol
 │   └── openai_client.py    # OpenAI-compatible streaming client
 ├── tools/
-│   ├── base.py             # BaseTool abstract class + path helpers
+│   ├── base.py             # BaseTool (execute/run template) + path resolution + confirm stub + truncation
+│   ├── ignore.py           # GitignoreMatcher: shared root .gitignore engine for find/grep
 │   ├── registry.py         # ToolRegistry: collects and dispatches tools
 │   ├── read.py             # Read file contents
 │   ├── bash.py             # Execute bash commands (with safety filter)
@@ -40,6 +43,7 @@ src/limbo/
 └── ui/
     ├── app.py              # Textual App subclass (CSS_PATH = app.tcss)
     ├── app.tcss            # Centralized stylesheet for the whole TUI
+    ├── commands.py         # SlashCommandRegistry: menu metadata + dispatch in one place
     ├── screens/
     │   └── main.py         # Single-column chat screen + event handling + slash commands
     │   └── session_picker.py # Modal session switcher (/sessions)
@@ -166,7 +170,7 @@ Tests use `pytest-asyncio` for async tests, `respx` for HTTP mocking (LLM client
 
 1. Create `src/limbo/tools/<name>.py` with a class extending `BaseTool`
 2. Set `name`, `description`, `parameters` (JSON schema)
-3. Implement `execute()` returning `ToolResult`
+3. Implement `run()` returning `ToolResult`; use `self.resolve_existing()` / `self.resolve_creatable()` for paths (they raise `ToolError`, which `execute()` converts to an error result)
 4. Register in `ToolRegistry.__init__()` (add to the tool-class list or add conditional logic)
 5. Add tests in `tests/tools/test_<name>.py`
 6. If the tool needs config, wire it through `Config` and pass to the tool constructor in the registry
@@ -174,4 +178,4 @@ Tests use `pytest-asyncio` for async tests, `respx` for HTTP mocking (LLM client
 
 ### Confirmation flow for a new tool
 
-Set `requires_confirmation=True` in the returned `ToolResult` when `dry_run=True`. The agent loop and UI handle the rest.
+Return `self.confirm(message)` from `run()` when `dry_run=True`. The agent loop and UI handle the rest.

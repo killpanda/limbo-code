@@ -5,13 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from limbo.config import DEFAULT_SENSITIVE_FILES
 from limbo.models import ToolResult
-from limbo.tools.base import BaseTool, resolve_path
+from limbo.tools.base import MAX_OUTPUT_BYTES, BaseTool, ToolError
 
 MAX_LINES = 2000
-MAX_BYTES = 512 * 1024
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
-DEFAULT_SENSITIVE_FILES = {".env", "id_rsa", "id_ed25519", ".ssh"}
 
 
 class ReadTool(BaseTool):
@@ -39,11 +38,9 @@ class ReadTool(BaseTool):
         super().__init__(workdir)
         self.sensitive_files = set(sensitive_files or DEFAULT_SENSITIVE_FILES)
 
-    def execute(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
+    def run(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
         raw_path = arguments.get("path", "")
-        target = resolve_path(raw_path, self.workdir)
-        if isinstance(target, ToolResult):
-            return target
+        target = self.resolve(raw_path)
 
         if target.name in self.sensitive_files or any(
             part in self.sensitive_files for part in target.parts
@@ -51,10 +48,9 @@ class ReadTool(BaseTool):
             return ToolResult(success=False, error="Refusing to read sensitive file.")
 
         if not target.exists():
-            return ToolResult(success=False, error=f"File not found: {raw_path}")
-
+            raise ToolError(f"File not found: {raw_path}")
         if not target.is_file():
-            return ToolResult(success=False, error=f"Not a file: {raw_path}")
+            raise ToolError(f"Not a file: {raw_path}")
 
         try:
             file_size = target.stat().st_size
@@ -96,8 +92,8 @@ class ReadTool(BaseTool):
         output = "".join(lines)
         truncated = False
         encoded = output.encode("utf-8", errors="replace")
-        if len(encoded) > MAX_BYTES:
-            output = encoded[:MAX_BYTES].decode("utf-8", errors="replace")
+        if len(encoded) > MAX_OUTPUT_BYTES:
+            output = encoded[:MAX_OUTPUT_BYTES].decode("utf-8", errors="replace")
             truncated = True
         elif len(lines) > MAX_LINES:
             output = "".join(lines[:MAX_LINES])

@@ -9,12 +9,12 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from limbo.config import DEFAULT_DANGEROUS_COMMANDS
 from limbo.models import ToolResult
-from limbo.tools.base import BaseTool
+from limbo.tools.base import MAX_OUTPUT_BYTES, BaseTool, truncate_output
 
 DEFAULT_TIMEOUT = 30.0
 MAX_TIMEOUT = 300.0
-MAX_OUTPUT_BYTES = 512 * 1024
 
 
 class BashTool(BaseTool):
@@ -43,9 +43,11 @@ class BashTool(BaseTool):
 
     def __init__(self, workdir: Path, dangerous_patterns: list[str] | None = None):
         super().__init__(workdir)
-        self.dangerous_patterns = dangerous_patterns or ["rm", "git reset --hard"]
+        self.dangerous_patterns = dangerous_patterns or list(
+            DEFAULT_DANGEROUS_COMMANDS
+        )
 
-    def execute(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
+    def run(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
         command = arguments.get("command", "")
         timeout = arguments.get("timeout", DEFAULT_TIMEOUT)
 
@@ -59,11 +61,7 @@ class BashTool(BaseTool):
             )
 
         if dry_run:
-            return ToolResult(
-                success=True,
-                output=f"Will execute on approval:\n$ {command}",
-                requires_confirmation=True,
-            )
+            return self.confirm(f"Will execute on approval:\n$ {command}")
 
         # Cap the effective timeout so a huge value cannot block the worker
         # indefinitely. The cap is documented in the tool schema above.
@@ -96,15 +94,12 @@ class BashTool(BaseTool):
         if proc.stderr:
             output += ("\n" if output else "") + f"[stderr]\n{proc.stderr}"
 
-        encoded = output.encode("utf-8", errors="replace")
-        if len(encoded) > MAX_OUTPUT_BYTES:
-            encoded = (
-                encoded[:MAX_OUTPUT_BYTES]
-                + f"\n\n[output truncated: exceeded {MAX_OUTPUT_BYTES} byte limit]".encode(
-                    "utf-8"
-                )
-            )
-            output = encoded.decode("utf-8", errors="replace")
+        output = truncate_output(
+            output,
+            suffix=(
+                f"\n\n[output truncated: exceeded {MAX_OUTPUT_BYTES} byte limit]"
+            ),
+        )
 
         if proc.returncode != 0:
             exit_msg = f"Command failed with exit code {proc.returncode}."

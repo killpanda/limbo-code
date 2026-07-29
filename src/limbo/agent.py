@@ -13,6 +13,8 @@ from pathlib import Path
 from typing import Any
 
 from limbo.config import Config
+from limbo.history import ToolHistory
+from limbo.history import repair as repair_history
 from limbo.llm.client import LLMClient
 from limbo.models import Message, TextChunk, ToolCallEvent, ToolResult
 from limbo.sessions import SessionMeta, derive_title, load_session, save_session
@@ -62,18 +64,17 @@ class Agent:
         self.llm_client = llm_client
         self.workdir = workdir
         self.registry = ToolRegistry(workdir=workdir, config=config)
-        self.messages: list[Message] = []
+        self._history = ToolHistory([])
         self._pending_tool: dict[str, Any] | None = None
         self._confirmation_applied = False
         self._iteration_count = 0
-        self._pending_placeholders: set[str] = set()
         self._init_system_message()
 
         self._session_dir = session_dir or Path.home() / ".limbo" / "sessions"
         if resume is not None:
             self._meta, history = load_session(resume)
             self._session_file = resume
-            self.messages.extend(_restore_history(history))
+            self.messages.extend(repair_history(history))
         else:
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
             # Random suffix avoids collisions when sessions are created in
@@ -156,103 +157,31 @@ class Agent:
             )
         )
 
+    @property
+    def messages(self) -> list[Message]:
+        """The conversation history (owned by the tool-call bookkeeper)."""
+        return self._history.messages
+
+    @messages.setter
+    def messages(self, value: list[Message]) -> None:
+        self._history.messages = value
+
+    @property
+    def _pending_placeholders(self) -> set[str]:
+        """Backward-compatible view of the ledger's pending placeholder ids."""
+        return self._history.pending_ids
+
     def reject_pending_tool(self, reason: str = "Action rejected.") -> None:
         """Clear any tool awaiting confirmation.
 
-        Updates the placeholder ``role="tool"`` message installed when the
-        pending call was first encountered, or appends one if it is missing,
-        so the assistant message that referenced the tool call remains valid
-        for the OpenAI API. Any later tool calls in the same assistant turn
-        are marked as not executed.
+        Records the rejection in the message history (cancelling any later
+        tool calls from the same assistant turn) so the assistant message
+        that referenced the tool call remains valid for the OpenAI API.
         """
         if self._pending_tool is None:
             return
-        pending_id = self._pending_tool["id"]
-
-        # Find the most recent assistant message that owns this pending call
-        # so we can update its later tool-call placeholders as well.
-        assistant = None
-        for msg in reversed(self.messages):
-            if msg.role == "assistant" and msg.tool_calls:
-                if any(tc["id"] == pending_id for tc in msg.tool_calls):
-                    assistant = msg
-                    break
-
-        if assistant is not None and assistant.tool_calls:
-            pending_idx: int | None = None
-            for idx, tc in enumerate(assistant.tool_calls):
-                if tc["id"] == pending_id:
-                    pending_idx = idx
-                    break
-            if pending_idx is not None:
-                for tc in assistant.tool_calls[pending_idx:]:
-                    content = (
-                        reason
-                        if tc["id"] == pending_id
-                        else "Action not executed: earlier tool was rejected."
-                    )
-                    for idx, existing in enumerate(self.messages):
-                        if existing.role == "tool" and existing.tool_call_id == tc["id"]:
-                            self.messages[idx] = existing.model_copy(
-                                update={"content": content}
-                            )
-                            break
-                    else:
-                        self.messages.append(
-                            Message(
-                                role="tool",
-                                content=content,
-                                tool_call_id=tc["id"],
-                            )
-                        )
-                    self._pending_placeholders.discard(tc["id"])
-                self._pending_tool = None
-                return
-
-        # Fallback when the owning assistant message cannot be located.
-        for idx, msg in enumerate(self.messages):
-            if msg.role == "tool" and msg.tool_call_id == pending_id:
-                self.messages[idx] = msg.model_copy(update={"content": reason})
-                break
-        else:
-            self.messages.append(
-                Message(
-                    role="tool",
-                    content=reason,
-                    tool_call_id=pending_id,
-                )
-            )
-        self._pending_placeholders.discard(pending_id)
+        self._history.record_rejection(self._pending_tool["id"], reason)
         self._pending_tool = None
-
-    def _set_tool_message(self, tool_call_id: str, content: str) -> None:
-        """Replace an existing tool result message or append a new one."""
-        for idx, msg in enumerate(self.messages):
-            if msg.role == "tool" and msg.tool_call_id == tool_call_id:
-                self.messages[idx] = msg.model_copy(update={"content": content})
-                return
-        self.messages.append(
-            Message(role="tool", content=content, tool_call_id=tool_call_id)
-        )
-
-    def _record_tool_error(
-        self,
-        assistant: Message,
-        start_idx: int,
-        crashed_id: str,
-        error_message: str,
-    ) -> None:
-        """Record an error result for a crashed tool and its later siblings."""
-        tool_calls = assistant.tool_calls or []
-        for idx in range(start_idx, len(tool_calls)):
-            tc = tool_calls[idx]
-            content = (
-                error_message
-                if tc["id"] == crashed_id
-                else "Action not executed: earlier tool failed."
-            )
-            self._set_tool_message(tc["id"], content)
-            self._pending_placeholders.discard(tc["id"])
 
     async def run(self, user_input: str) -> AsyncIterator[AgentEvent]:
         # Reset per-user-turn state and discard stale pending confirmations.
@@ -314,16 +243,12 @@ class Agent:
         results. Run those calls, replacing placeholders with real outputs, and
         stop if another call requires confirmation.
         """
-        assistant = None
-        for msg in reversed(self.messages):
-            if msg.role == "assistant" and msg.tool_calls:
-                assistant = msg
-                break
+        assistant = self._history.latest_assistant_with_tools()
         if assistant is None or assistant.tool_calls is None:
             return
 
         for start_idx, tc in enumerate(assistant.tool_calls):
-            if tc["id"] not in self._pending_placeholders:
+            if tc["id"] not in self._history.pending_ids:
                 continue
 
             name = tc["function"]["name"]
@@ -334,7 +259,7 @@ class Agent:
             except Exception as e:  # noqa: BLE001
                 error_message = f"Tool error: {e}"
                 yield ErrorEvent(message=error_message)
-                self._record_tool_error(
+                self._history.record_error(
                     assistant, start_idx, tc["id"], error_message
                 )
                 return
@@ -345,21 +270,9 @@ class Agent:
             )
             if result.requires_confirmation:
                 return
-            for idx, msg in enumerate(self.messages):
-                if msg.role == "tool" and msg.tool_call_id == tc["id"]:
-                    self.messages[idx] = msg.model_copy(
-                        update={"content": result.output or result.error or ""}
-                    )
-                    break
-            else:
-                self.messages.append(
-                    Message(
-                        role="tool",
-                        content=result.output or result.error or "",
-                        tool_call_id=tc["id"],
-                    )
-                )
-            self._pending_placeholders.discard(tc["id"])
+            self._history.record_result(
+                tc["id"], result.output or result.error or ""
+            )
 
     async def _conversation_loop(self) -> AsyncIterator[AgentEvent]:
         while self._iteration_count < self.config.llm.max_iterations:
@@ -402,7 +315,7 @@ class Agent:
                 except Exception as e:  # noqa: BLE001
                     error_message = f"Tool error: {e}"
                     yield ErrorEvent(message=error_message)
-                    self._record_tool_error(
+                    self._history.record_error(
                         last, idx, tc["id"], error_message
                     )
                     return
@@ -416,28 +329,17 @@ class Agent:
                     # when the user confirms it. Placeholders are installed
                     # before yielding the ToolResultEvent so confirmation handlers
                     # can update them immediately.
-                    for pending_or_remaining in last.tool_calls[idx:]:
-                        self.messages.append(
-                            Message(
-                                role="tool",
-                                content="Action pending user confirmation.",
-                                tool_call_id=pending_or_remaining["id"],
-                            )
-                        )
-                        self._pending_placeholders.add(pending_or_remaining["id"])
+                    self._history.install_placeholders(
+                        [t["id"] for t in last.tool_calls[idx:]]
+                    )
                 yield ToolResultEvent(
                     id=tc["id"], name=name, result=result, arguments=arguments
                 )
                 if result.requires_confirmation:
                     return
-                self.messages.append(
-                    Message(
-                        role="tool",
-                        content=result.output or result.error or "",
-                        tool_call_id=tc["id"],
-                    )
+                self._history.record_result(
+                    tc["id"], result.output or result.error or ""
                 )
-                self._pending_placeholders.discard(tc["id"])
 
     async def apply_tool(self, name: str, arguments: dict[str, Any]) -> ToolResult:
         """Apply the tool that is currently pending confirmation.
@@ -470,24 +372,9 @@ class Agent:
         # was first encountered, so the message history stays valid and shows
         # the actual outcome. Only clear the pending state on success so a
         # transient failure can be retried.
-        for idx, msg in enumerate(self.messages):
-            if (
-                msg.role == "tool"
-                and msg.tool_call_id == self._pending_tool["id"]
-            ):
-                self.messages[idx] = msg.model_copy(
-                    update={"content": result.output or result.error or ""}
-                )
-                break
-        else:
-            self.messages.append(
-                Message(
-                    role="tool",
-                    content=result.output or result.error or "",
-                    tool_call_id=self._pending_tool["id"],
-                )
-            )
-        self._pending_placeholders.discard(self._pending_tool["id"])
+        self._history.record_result(
+            self._pending_tool["id"], result.output or result.error or ""
+        )
         if result.success:
             self._pending_tool = None
             self._confirmation_applied = True
@@ -535,45 +422,3 @@ class Agent:
 
     async def _save_session(self) -> None:
         await asyncio.to_thread(self._save_session_sync)
-
-
-def _restore_history(messages: list[Message]) -> list[Message]:
-    """Prepare persisted messages for reuse as LLM history.
-
-    - Drops the leading system message (a fresh one is generated on resume).
-    - Repairs dangling tool_calls: if the previous session crashed between a
-      tool call and its result, placeholder tool messages are inserted
-      immediately after the assistant message so the API history stays valid.
-    """
-    history = list(messages)
-    if history and history[0].role == "system":
-        history = history[1:]
-
-    restored: list[Message] = []
-    pending_tool_ids: list[str] = []
-
-    def flush_pending() -> None:
-        for tool_id in pending_tool_ids:
-            restored.append(
-                Message(
-                    role="tool",
-                    tool_call_id=tool_id,
-                    content="[session restored: tool call interrupted]",
-                )
-            )
-        pending_tool_ids.clear()
-
-    for msg in history:
-        if msg.role == "assistant" and msg.tool_calls:
-            flush_pending()
-            pending_tool_ids.extend(
-                tc["id"] for tc in msg.tool_calls if tc.get("id")
-            )
-        elif msg.role == "tool":
-            if msg.tool_call_id in pending_tool_ids:
-                pending_tool_ids.remove(msg.tool_call_id)
-        else:
-            flush_pending()
-        restored.append(msg)
-    flush_pending()
-    return restored

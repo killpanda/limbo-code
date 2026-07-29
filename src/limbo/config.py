@@ -12,6 +12,11 @@ from toml import TomlDecodeError
 
 DEFAULT_CONFIG_PATH = Path.home() / ".limbo" / "config.toml"
 
+# Single source of truth for safety defaults; tools fall back to these when
+# constructed without explicit values.
+DEFAULT_DANGEROUS_COMMANDS = ["rm", "git reset --hard"]
+DEFAULT_SENSITIVE_FILES = [".env", "id_rsa", "id_ed25519", ".ssh"]
+
 
 class LLMConfig(BaseModel):
     api_key: str | None = None
@@ -35,10 +40,10 @@ class UIConfig(BaseModel):
 
 class SafetyConfig(BaseModel):
     dangerous_commands: list[str] = Field(
-        default_factory=lambda: ["rm", "git reset --hard"]
+        default_factory=lambda: list(DEFAULT_DANGEROUS_COMMANDS)
     )
     sensitive_files: list[str] = Field(
-        default_factory=lambda: [".env", "id_rsa", "id_ed25519", ".ssh"]
+        default_factory=lambda: list(DEFAULT_SENSITIVE_FILES)
     )
 
 

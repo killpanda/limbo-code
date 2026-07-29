@@ -9,11 +9,14 @@ from pathlib import Path
 from typing import Any
 
 from limbo.models import ToolResult
-from limbo.tools.base import BaseTool, is_within_workdir, resolve_path
-from limbo.tools.find import _GitignoreMatcher
+from limbo.tools.base import (
+    BaseTool,
+    is_within_workdir,
+    truncate_output,
+)
+from limbo.tools.ignore import GitignoreMatcher
 
 MAX_MATCHES = 100
-MAX_BYTES = 512 * 1024
 
 
 class GrepTool(BaseTool):
@@ -46,7 +49,7 @@ class GrepTool(BaseTool):
         "required": ["pattern"],
     }
 
-    def execute(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
+    def run(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
         pattern = arguments.get("pattern", "")
         path = arguments.get("path", ".")
         glob = arguments.get("glob")
@@ -55,11 +58,7 @@ class GrepTool(BaseTool):
         context = arguments.get("context", 0)
         limit = arguments.get("limit", MAX_MATCHES)
 
-        target = resolve_path(path, self.workdir)
-        if isinstance(target, ToolResult):
-            return target
-        if not target.exists():
-            return ToolResult(success=False, error=f"Path not found: {path}")
+        target = self.resolve_existing(path)
 
         rg = self._find_rg()
         if rg:
@@ -113,8 +112,7 @@ class GrepTool(BaseTool):
             return ToolResult(success=False, error="ripgrep not found.")
 
         output = proc.stdout
-        if len(output) > MAX_BYTES:
-            output = output[:MAX_BYTES] + "\n[Output truncated.]"
+        output = truncate_output(output)
 
         return ToolResult(success=True, output=output or "No matches.")
 
@@ -145,7 +143,7 @@ class GrepTool(BaseTool):
             return ToolResult(success=False, error=f"Invalid regex: {e}")
 
         matches = []
-        matcher = _GitignoreMatcher(self.workdir)
+        matcher = GitignoreMatcher(self.workdir)
         # ``rglob`` may traverse directory symlinks before we can filter them;
         # we resolve and enforce the workdir boundary for each candidate.
         files = [target] if target.is_file() else target.rglob("*")
@@ -180,6 +178,5 @@ class GrepTool(BaseTool):
                 break
 
         output = "\n".join(matches)
-        if len(output) > MAX_BYTES:
-            output = output[:MAX_BYTES] + "\n[Output truncated.]"
+        output = truncate_output(output)
         return ToolResult(success=True, output=output or "No matches.")

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from limbo.models import ToolResult
-from limbo.tools.base import BaseTool, resolve_path
+from limbo.tools.base import BaseTool
 
 
 class WriteTool(BaseTool):
@@ -20,18 +20,14 @@ class WriteTool(BaseTool):
         "required": ["path", "content"],
     }
 
-    def execute(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
+    def run(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
         raw_path = arguments.get("path", "")
         content = arguments.get("content", "")
-        target = resolve_path(raw_path, self.workdir, strict=False)
-        if isinstance(target, ToolResult):
-            return target
+        target = self.resolve_creatable(raw_path)
 
         if dry_run:
-            return ToolResult(
-                success=True,
-                output=f"Will create/overwrite {raw_path} ({len(content)} chars).",
-                requires_confirmation=True,
+            return self.confirm(
+                f"Will create/overwrite {raw_path} ({len(content)} chars)."
             )
 
         try:
