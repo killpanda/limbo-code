@@ -29,7 +29,8 @@ class LLMConfig(BaseModel):
 
 
 class UIConfig(BaseModel):
-    pass
+    # Textual built-in theme name, e.g. "textual-dark", "dracula", "nord".
+    theme: str | None = None
 
 
 class SafetyConfig(BaseModel):

@@ -37,14 +37,15 @@ src/limbo/
 │   ├── find.py             # Find files by glob
 │   └── ls.py               # List directory contents
 └── ui/
-    ├── app.py              # Textual App subclass
+    ├── app.py              # Textual App subclass (CSS_PATH = app.tcss)
+    ├── app.tcss            # Centralized stylesheet for the whole TUI
     ├── screens/
-    │   └── main.py         # Main 3-column layout + event handling
+    │   └── main.py         # Single-column chat screen + event handling
     └── widgets/
-        ├── chat.py         # Message display area
+        ├── chat.py         # Chat flow: user/assistant(Markdown)/tool cards/errors
         ├── input.py        # Multi-line user input
-        ├── sidebar.py      # Left sidebar: recent files, status
-        ├── file_preview.py # Right preview panel for tool output
+        ├── status_bar.py   # Top status bar: agent state + model/workdir
+        ├── tool_card.py    # Inline tool-call card (one-line summary, expandable)
         └── confirm.py      # Confirmation modal (ConfirmDialog, Confirmed/Rejected events)
 
 tests/
@@ -119,6 +120,9 @@ max_iterations = 10
 [tools]
 bash_enabled = true
 
+[ui]
+theme = "textual-dark"   # optional Textual built-in theme name
+
 [safety]
 dangerous_commands = ["rm", "git reset --hard"]
 sensitive_files = [".env", "id_rsa", "id_ed25519", ".ssh"]
@@ -126,12 +130,15 @@ sensitive_files = [".env", "id_rsa", "id_ed25519", ".ssh"]
 
 ## UI Layout
 
-Three-column layout:
-- **Left (sidebar)**: Session title, recent files list (last 10 read files), current tool status
-- **Center (chat)**: Conversation messages, user input at bottom
-- **Right (preview)**: Tool output display (read contents, bash results, diffs)
+Pi-style single-column layout (top to bottom):
+- **Status bar (1 line)**: Agent state on the left (`● idle / thinking… / running <tool>…`), model + workdir on the right
+- **Chat flow**: The conversation as a single scrolling stream — user messages (`❯` prefix), assistant replies rendered as streaming Markdown, inline tool-call cards (`✓/⏸/✗` one-line summaries, click or `ctrl+o` to expand full output), error lines
+- **Input box**: The only persistent rounded border on screen; Enter submits, Shift+Enter inserts a newline
+- **Hint line (1 line)**: Key hints in muted color
 
-Confirmation modal: `ConfirmDialog` shows tool output and "Apply"/"Reject" buttons.
+Confirmation modal: `ConfirmDialog` shows tool output with `y`/`n`/`Esc` shortcuts and "Apply"/"Reject" buttons.
+
+All styles live in `ui/app.tcss`; widgets do not define `DEFAULT_CSS`. The theme is configurable via `[ui] theme` in `config.toml` (Textual built-in theme names).
 
 ## Key Design Decisions
 

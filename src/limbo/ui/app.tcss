@@ -1,0 +1,125 @@
+/* Limbo TUI — pi 风格单栏布局，集中管理所有样式 */
+
+/* ---- 顶部状态栏 ---- */
+#statusbar {
+    height: 1;
+    padding: 0 1;
+    background: $surface;
+}
+#statusbar-state {
+    width: 1fr;
+    color: $text-muted;
+}
+#statusbar-state.thinking {
+    color: $warning;
+}
+#statusbar-state.tool {
+    color: $accent;
+}
+#statusbar-context {
+    width: auto;
+    color: $text-muted;
+    text-align: right;
+}
+
+/* ---- 聊天流 ---- */
+ChatWidget {
+    width: 1fr;
+    height: 1fr;
+    padding: 0 1;
+}
+.user-message {
+    color: $text-accent;
+    margin-top: 1;
+}
+.assistant-message {
+    margin-top: 1;
+    padding: 0;
+}
+.error-message {
+    color: $error;
+    margin-top: 1;
+}
+.info-message {
+    color: $text-muted;
+}
+
+/* ---- 工具调用卡片 ---- */
+ToolCard {
+    height: auto;
+    padding-left: 1;
+}
+ToolCard .tool-header {
+    height: 1;
+    color: $text-muted;
+}
+ToolCard.running .tool-header {
+    color: $warning;
+}
+ToolCard.success .tool-header,
+ToolCard.applied .tool-header {
+    color: $success;
+}
+ToolCard.error .tool-header,
+ToolCard.rejected .tool-header {
+    color: $error;
+}
+ToolCard.pending .tool-header {
+    color: $warning;
+}
+ToolCard .tool-body {
+    height: auto;
+    max-height: 24;
+    padding-left: 1;
+    border-left: solid $primary-lighten-2;
+}
+
+/* ---- 输入框（全局唯一的圆角边框，视觉锚点） ---- */
+#input {
+    height: 3;
+    border: round $accent;
+    margin: 0 1;
+}
+#input:focus {
+    border: round $accent-lighten-1;
+}
+
+/* ---- 底部快捷键提示 ---- */
+#hint {
+    height: 1;
+    padding: 0 2;
+    color: $text-muted;
+}
+
+/* ---- 确认弹窗 ---- */
+ConfirmDialog {
+    align: center middle;
+}
+ConfirmDialog > Vertical {
+    width: 80%;
+    max-width: 110;
+    height: auto;
+    max-height: 80%;
+    border: round $warning;
+    background: $surface;
+    padding: 1 2;
+}
+ConfirmDialog #dialog-title {
+    text-style: bold;
+    margin-bottom: 1;
+}
+ConfirmDialog #dialog-warning {
+    color: $warning;
+    margin-top: 1;
+}
+ConfirmDialog #diff-body {
+    max-height: 60%;
+}
+ConfirmDialog #dialog-buttons {
+    height: auto;
+    align: center middle;
+    margin-top: 1;
+}
+ConfirmDialog Button {
+    margin: 0 1;
+}

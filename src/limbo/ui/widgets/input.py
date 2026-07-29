@@ -18,12 +18,9 @@ class UserSubmitted(Message):
 
 
 class InputWidget(TextArea):
-    """Multi-line input that submits on Enter (Shift+Enter for newline)."""
+    """Multi-line input that submits on Enter (Shift+Enter for newline).
 
-    DEFAULT_CSS = """
-    InputWidget {
-        height: 3;
-    }
+    Styles live in ``limbo/ui/app.tcss``.
     """
 
     # Use priority bindings so these actions run before TextArea's default

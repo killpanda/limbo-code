@@ -1,4 +1,4 @@
-"""Confirmation modal for file writes."""
+"""Confirmation modal for destructive tool actions."""
 
 from __future__ import annotations
 
@@ -21,33 +21,30 @@ class Rejected(Message):
 
 
 class ConfirmDialog(ModalScreen[None]):
-    """Modal dialog showing a diff and asking for approval."""
-
-    DEFAULT_CSS = """
-    ConfirmDialog {
-        align: center middle;
-    }
-    ConfirmDialog > Vertical {
-        width: 80;
-        height: auto;
-        max-height: 80vh;
-        border: thick $background 80%;
-        background: $surface;
-        padding: 1 2;
-    }
-    ConfirmDialog #diff-body {
-        max-height: 50vh;
-    }
-    """
+    """Modal dialog showing a diff/preview and asking for approval."""
 
     BINDINGS = [
+        Binding("y", "apply", "Apply"),
+        Binding("n", "reject", "Reject"),
         Binding("escape", "reject", "Reject"),
     ]
 
-    def __init__(self, title: str, body: str, *args: Any, **kwargs: Any) -> None:
+    def __init__(
+        self,
+        title: str,
+        body: str,
+        warning: str | None = None,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
         super().__init__(*args, **kwargs)
         self.title_text = title
         self.body_text = body
+        self.warning_text = warning
+
+    def action_apply(self) -> None:
+        self.post_message(Confirmed())
+        self.dismiss()
 
     def action_reject(self) -> None:
         self.post_message(Rejected())
@@ -55,12 +52,16 @@ class ConfirmDialog(ModalScreen[None]):
 
     def compose(self) -> ComposeResult:
         with Vertical():
-            yield Label(self.title_text, markup=False)
+            yield Label(self.title_text, id="dialog-title", markup=False)
             with VerticalScroll(id="diff-body"):
                 yield Label(self.body_text, markup=False)
-            with Horizontal():
-                yield Button("Apply", variant="success", id="apply")
-                yield Button("Reject", variant="error", id="reject")
+            if self.warning_text:
+                yield Label(
+                    f"⚠ {self.warning_text}", id="dialog-warning", markup=False
+                )
+            with Horizontal(id="dialog-buttons"):
+                yield Button("[Y] Apply", variant="success", id="apply")
+                yield Button("[N] Reject", variant="error", id="reject")
 
     def on_button_pressed(self, event: Button.Pressed) -> None:
         if event.button.id == "apply":

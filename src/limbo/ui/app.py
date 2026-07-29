@@ -15,7 +15,8 @@ from limbo.ui.widgets.confirm import Confirmed, Rejected
 class LimboApp(App[None]):
     """Main TUI application."""
 
-    CSS_PATH = None
+    TITLE = "Limbo"
+    CSS_PATH = "app.tcss"
 
     def __init__(
         self,
@@ -31,6 +32,12 @@ class LimboApp(App[None]):
         self.config = config
         self.llm_client = llm_client
         self.session_dir = session_dir
+        theme = (config.ui.theme if config else None) or None
+        if theme:
+            try:
+                self.theme = theme
+            except Exception:  # noqa: BLE001 - unknown theme name, keep default
+                pass
 
     def on_mount(self) -> None:
         self.push_screen(

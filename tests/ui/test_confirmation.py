@@ -10,9 +10,7 @@ from limbo.ui.app import LimboApp
 from limbo.ui.screens.main import MainScreen
 from limbo.ui.widgets.chat import ChatWidget
 from limbo.ui.widgets.confirm import ConfirmDialog
-from limbo.ui.widgets.file_preview import FilePreviewWidget
 from limbo.ui.widgets.input import InputWidget
-from limbo.ui.widgets.sidebar import SidebarWidget
 
 
 class FakeLLMClient:
@@ -106,11 +104,8 @@ async def test_error_event_is_shown(tmp_path):
         main_screen.run_worker(main_screen._handle_turn("hi"))
         await pilot.pause()
 
-        # Re-query with the concrete widget class for type checking.
-        from limbo.ui.widgets.chat import ChatWidget
-
         chat = main_screen.query_one("#chat", ChatWidget)
-        rendered = " ".join(str(m.content) for m in chat.messages)
+        rendered = chat.transcript_text()
         assert "LLM error" in rendered
         assert "boom" in rendered
 
@@ -139,11 +134,8 @@ async def test_tool_error_is_shown(tmp_path):
         await pilot.pause()
 
         chat = main_screen.query_one("#chat", ChatWidget)
-        rendered = " ".join(str(m.content) for m in chat.messages)
-        assert "read failed" in rendered
-
-        preview = main_screen.query_one("#preview", FilePreviewWidget)
-        assert "missing.txt" in preview.content
+        card = chat.tool_cards["c1"]
+        assert card.state == "error"
 
 
 @pytest.mark.asyncio
@@ -266,7 +258,7 @@ async def test_confirm_dialog_resumes_conversation_loop(tmp_path):
 
         assert (tmp_path / "x.txt").read_text() == "hi"
         chat = main_screen.query_one("#chat", ChatWidget)
-        rendered = " ".join(str(m.content) for m in chat.messages)
+        rendered = chat.transcript_text()
         assert "done" in rendered
 
 
@@ -369,36 +361,6 @@ async def test_input_disabled_during_streaming(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_recent_file_path_is_normalized(tmp_path):
-    (tmp_path / "subdir").mkdir()
-    (tmp_path / "x.txt").write_text("hello")
-    cfg = Config()
-    cfg.llm.api_key = "test"
-    fake_llm = FakeLLMClient(
-        [
-            [ToolCallEvent(id="c1", name="read", arguments={"path": "./subdir/../x.txt"})],
-        ]
-    )
-    app = LimboApp(
-        workdir=tmp_path,
-        config=cfg,
-        llm_client=fake_llm,
-        session_dir=tmp_path / "sessions",
-    )
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        main_screen = pilot.app.screen_stack[-1]
-        assert isinstance(main_screen, MainScreen)
-
-        main_screen.run_worker(main_screen._handle_turn("read x.txt"))
-        await pilot.pause()
-
-        sidebar = main_screen.query_one("#sidebar", SidebarWidget)
-        assert "x.txt" in sidebar._recent_files
-        assert "subdir/../x.txt" not in sidebar._recent_files
-
-
-@pytest.mark.asyncio
 async def test_multi_confirmation_resumes_without_extra_user_message(tmp_path):
     """A turn with two confirmation-required tools should continue after both."""
     cfg = Config()
@@ -442,5 +404,5 @@ async def test_multi_confirmation_resumes_without_extra_user_message(tmp_path):
         assert (tmp_path / "a.txt").read_text() == "a"
         assert (tmp_path / "b.txt").read_text() == "b"
         chat = main_screen.query_one("#chat", ChatWidget)
-        rendered = " ".join(str(m.content) for m in chat.messages)
+        rendered = chat.transcript_text()
         assert "done" in rendered

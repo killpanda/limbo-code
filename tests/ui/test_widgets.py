@@ -3,9 +3,7 @@ from textual.app import App
 
 from limbo.ui.widgets.chat import ChatWidget
 from limbo.ui.widgets.confirm import ConfirmDialog, Rejected
-from limbo.ui.widgets.file_preview import FilePreviewWidget
 from limbo.ui.widgets.input import InputWidget, UserSubmitted
-from limbo.ui.widgets.sidebar import SidebarWidget
 
 
 @pytest.mark.asyncio
@@ -18,7 +16,7 @@ async def test_chat_adds_messages():
     async with app.run_test() as pilot:
         widget = pilot.app.query_one(ChatWidget)
         widget.add_user_message("hi")
-        widget.add_assistant_text("hello")
+        await widget.append_assistant_text("hello")
         assert len(widget.messages) == 2
 
 
@@ -86,20 +84,6 @@ async def test_input_shift_enter_inserts_newline():
 
 
 @pytest.mark.asyncio
-async def test_file_preview_escapes_markup():
-    class TestApp(App[None]):
-        def compose(self):
-            yield FilePreviewWidget(id="preview")
-
-    app = TestApp()
-    async with app.run_test() as pilot:
-        widget = pilot.app.query_one(FilePreviewWidget)
-        widget.show("title", "[bold]not bold[/bold]")
-        # The literal brackets should be preserved in the rendered content.
-        assert "[bold]not bold[/bold]" in widget.content.plain
-
-
-@pytest.mark.asyncio
 async def test_confirm_dialog_escape_posts_rejected():
     rejected = []
 
@@ -121,7 +105,7 @@ async def test_confirm_dialog_escape_posts_rejected():
 
 
 @pytest.mark.asyncio
-async def test_chat_append_does_not_interpret_markup():
+async def test_chat_append_streams_into_one_block():
     class TestApp(App[None]):
         def compose(self):
             yield ChatWidget(id="chat")
@@ -129,26 +113,76 @@ async def test_chat_append_does_not_interpret_markup():
     app = TestApp()
     async with app.run_test() as pilot:
         widget = pilot.app.query_one(ChatWidget)
-        widget.add_assistant_text("[bold]chunk1[/bold]")
-        widget.append_assistant_text("[italic]chunk2[/italic]")
+        await widget.append_assistant_text("[bold]chunk1[/bold]")
+        await widget.append_assistant_text("[italic]chunk2[/italic]")
+        await pilot.pause()
 
-        last = widget.messages[-1]
-        combined = str(last.content)
+        # Both chunks accumulate in a single assistant block.
+        assert len(widget.messages) == 1
+        combined = widget.transcript_text()
         assert "[bold]chunk1[/bold]" in combined
         assert "[italic]chunk2[/italic]" in combined
-        # The rendered visual must contain the literal brackets, not styled text.
-        assert "[bold]chunk1[/bold][italic]chunk2[/italic]" == last.visual.plain
 
 
 @pytest.mark.asyncio
-async def test_sidebar_recent_files_does_not_interpret_markup():
+async def test_tool_card_dedupes_by_id():
     class TestApp(App[None]):
         def compose(self):
-            yield SidebarWidget(id="sidebar")
+            yield ChatWidget(id="chat")
 
     app = TestApp()
     async with app.run_test() as pilot:
-        widget = pilot.app.query_one(SidebarWidget)
-        widget.add_recent_file("[bold]x[/bold].py")
-        # The literal brackets should be preserved in the rendered content.
-        assert "[bold]x[/bold].py" in widget.recent_files.render().plain
+        widget = pilot.app.query_one(ChatWidget)
+        card1 = widget.add_tool_card("c1", "read", {"path": "a.py"})
+        card2 = widget.add_tool_card("c1", "read", {"path": "a.py"})
+        assert card1 is card2
+        assert len(widget.tool_cards) == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_card_state_transitions():
+    class TestApp(App[None]):
+        def compose(self):
+            yield ChatWidget(id="chat")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(ChatWidget)
+        card = widget.add_tool_card("c1", "write", {"path": "x.txt", "content": "hi"})
+        assert card.state == "running"
+
+        card.set_pending("preview body")
+        assert card.state == "pending"
+
+        card.set_applied("written")
+        assert card.state == "applied"
+
+        card.set_rejected()
+        assert card.state == "rejected"
+
+        err_card = widget.add_tool_card("c2", "read", {"path": "missing.txt"})
+        err_card.set_error("not found")
+        assert err_card.state == "error"
+
+
+@pytest.mark.asyncio
+async def test_tool_card_toggle_requires_body():
+    class TestApp(App[None]):
+        def compose(self):
+            yield ChatWidget(id="chat")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(ChatWidget)
+        card = widget.add_tool_card("c1", "ls", {})
+        await pilot.pause()
+
+        # No output yet: toggling is a no-op and body stays hidden.
+        card.toggle()
+        assert card.body.display is False
+
+        card.set_success("file1\nfile2")
+        card.toggle()
+        assert card.body.display is True
+        card.toggle()
+        assert card.body.display is False
