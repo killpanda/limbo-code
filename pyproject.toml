@@ -1,5 +1,5 @@
 [project]
-name = "limbo"
+name = "limbo-code"
 version = "0.1.0"
 description = "A minimal terminal AI coding agent"
 requires-python = ">=3.11"
