@@ -42,7 +42,10 @@ LIMBO_DARK = Theme(
         # 错误底块上的文字专用（on error-bg = 4.91:1）
         "error-bright": "#F06661",
         "error-bg": "#342026",
+        # diff 专用前景/底色（Generic.Inserted/Deleted 渲染在此底上）
+        "diff-added": "#7EC88F",
         "diff-added-bg": "#1E2E26",
+        "diff-removed": "#F06661",
         "diff-removed-bg": "#342026",
     },
 )
@@ -68,7 +71,9 @@ LIMBO_LIGHT = Theme(
         "border-default": "#C4CADD",
         "error-bright": "#A93230",
         "error-bg": "#F3D6D6",
+        "diff-added": "#256B41",
         "diff-added-bg": "#D9EBDD",
+        "diff-removed": "#A93230",
         "diff-removed-bg": "#F3D6D6",
     },
 )

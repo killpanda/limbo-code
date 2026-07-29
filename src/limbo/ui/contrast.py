@@ -31,6 +31,8 @@ _FOREGROUNDS = (
     "success",
     "warning",
     "error",
+    "diff-added",
+    "diff-removed",
 )
 
 # §6.3 规范中实际使用的「文字 on 背景」组合（低于 4.5 即 FAIL）。
@@ -49,16 +51,19 @@ USED_PAIRS = frozenset(
         ("accent", "bg-elevated"),  # 菜单/picker 选中态文字
         ("success", "bg-surface"),  # 工具卡 ✓
         ("warning", "bg-base"),  # 未来的"等待确认"
-        ("error", "bg-surface"),  # diff 删除前景 on 卡片底
+        ("error", "bg-surface"),  # diff 删除前景 on 卡片底（历史输出无 diff 底时）
         ("error-bright", "error-bg"),  # 错误块/失败卡片文字
+        # F1：edit diff 的真实渲染路径（pygments Inserted/Deleted on diff 底）
+        ("diff-added", "diff-added-bg"),
+        ("diff-removed", "diff-removed-bg"),
     }
 )
 
 # 额外检查的非三级背景组合（报告 + 按 used 判定）。
 _EXTRA_PAIRS = (
     ("error-bright", "error-bg"),
-    ("success", "diff-added-bg"),
-    ("error", "diff-removed-bg"),
+    ("diff-added", "diff-added-bg"),
+    ("diff-removed", "diff-removed-bg"),
 )
 
 

@@ -50,23 +50,23 @@ async def shoot(app: LimboApp, name: str, setup, out_dir: Path) -> None:
         screen = pilot.app.screen
         chat = screen.query_one("#chat", ChatWidget)
         statusbar = screen.query_one("#statusbar", StatusBar)
-        setup(chat, statusbar)
+        await setup(chat, statusbar, pilot)
         await pilot.pause(0.3)
         pilot.app.save_screenshot(str(out_dir / f"{name}.svg"))
         print(f"  {name}.svg")
 
 
-def _idle(chat, statusbar):
+async def _idle(chat, statusbar, pilot):
     statusbar.set_tokens(0)
 
 
-def _thinking(chat, statusbar):
+async def _thinking(chat, statusbar, pilot):
     statusbar.set_state("thinking…", "thinking")
     chat.add_user_message("帮我看一下 agent.py 里的工具调用是怎么实现的？")
     chat.add_tool_card("c1", "read", {"path": "src/limbo/agent.py"})
 
 
-def _tool_success(chat, statusbar):
+async def _tool_success(chat, statusbar, pilot):
     statusbar.set_state("thinking…", "thinking")
     statusbar.set_tokens(12300)
     chat.add_user_message("运行一下测试")
@@ -74,16 +74,35 @@ def _tool_success(chat, statusbar):
     card.set_success("418 passed in 19.5s")
 
 
-def _tool_error(chat, statusbar):
+async def _tool_error(chat, statusbar, pilot):
     statusbar.set_state("idle")
     chat.add_user_message("删掉 build 目录")
     card = chat.add_tool_card("c1", "bash", {"command": "rm -rf build/"})
     card.set_error("permission denied")
 
 
-def _llm_error(chat, statusbar):
+async def _llm_error(chat, statusbar, pilot):
     statusbar.set_state("idle")
     chat.add_error("LLM 请求失败：HTTP 429 rate limited\n请稍后重试，或检查 API 额度")
+
+
+async def _edit_diff(chat, statusbar, pilot):
+    statusbar.set_state("idle")
+    statusbar.set_tokens(24100)
+    chat.add_user_message("把超时时间改成 30 秒")
+    card = chat.add_tool_card(
+        "c1", "edit", {"path": "src/limbo/config.py", "old_text": "timeout = 10"}
+    )
+    card.set_success(
+        "--- a/src/limbo/config.py\n"
+        "+++ b/src/limbo/config.py\n"
+        "@@ -1,3 +1,3 @@\n"
+        " class LLMConfig:\n"
+        "-    timeout = 10\n"
+        "+    timeout = 30\n"
+    )
+    await pilot.pause()  # 等 card body 组合完成
+    card.toggle()  # 展开显示 diff 高亮
 
 
 STATES = [
@@ -92,6 +111,7 @@ STATES = [
     ("3_tool_success", _tool_success),
     ("4_tool_error", _tool_error),
     ("5_llm_error", _llm_error),
+    ("6_edit_diff", _edit_diff),
 ]
 
 

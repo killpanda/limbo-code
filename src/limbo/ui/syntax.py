@@ -19,6 +19,13 @@ from pygments.token import (
 )
 
 
+# 色值直接取自 theme.py 的变量定义（单一事实来源，防止两处漂移）。
+from limbo.ui.theme import LIMBO_DARK, LIMBO_LIGHT
+
+_D = LIMBO_DARK.variables
+_L = LIMBO_LIGHT.variables
+
+
 class LimboDarkStyle(Style):
     """limbo-dark 语法高亮（on bg-elevated #232637）。"""
 
@@ -42,8 +49,9 @@ class LimboDarkStyle(Style):
         Punctuation: "#9AA0B5",
         Generic.Heading: "bold #E8C85A",
         Generic.Subheading: "bold #6B9BD2",
-        Generic.Inserted: "#7EC88F",
-        Generic.Deleted: "#ED5853",
+        # diff 行：独立前景+底色（F1 修复：原渲染在 syntax 底上对比度 4.36 不达标）
+        Generic.Inserted: f"{_D['diff-added']} bg:{_D['diff-added-bg']}",
+        Generic.Deleted: f"{_D['diff-removed']} bg:{_D['diff-removed-bg']}",
         Generic.Error: "#F06661",
     }
 
@@ -71,7 +79,7 @@ class LimboLightStyle(Style):
         Punctuation: "#4B5265",
         Generic.Heading: "bold #7A5E0C",
         Generic.Subheading: "bold #2F5D8F",
-        Generic.Inserted: "#2E7D4C",
-        Generic.Deleted: "#C33C38",
+        Generic.Inserted: f"{_L['diff-added']} bg:{_L['diff-added-bg']}",
+        Generic.Deleted: f"{_L['diff-removed']} bg:{_L['diff-removed-bg']}",
         Generic.Error: "#A93230",
     }
