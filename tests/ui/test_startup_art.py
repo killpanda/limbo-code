@@ -10,7 +10,7 @@ from limbo.config import Config
 from limbo.models import Message
 from limbo.sessions import SessionMeta, save_session
 from limbo.ui.app import LimboApp
-from limbo.ui.banner import STARTUP_ART
+from limbo.ui.banner import BLUE, DARK, RED, STARTUP_ART, YELLOW, startup_art_text
 from limbo.ui.widgets.chat import ChatWidget
 
 
@@ -66,3 +66,29 @@ async def test_startup_art_hidden_when_resuming(tmp_path):
 def test_startup_art_is_pure_ascii():
     assert STARTUP_ART.isascii()
     assert set(STARTUP_ART) <= {"@", "o", ".", " ", "\n"}
+
+
+def test_startup_art_text_uses_original_colors():
+    text = startup_art_text()
+    # Plain text is the art itself, padded to a uniform rectangle.
+    lines = text.plain.splitlines()
+    assert len(lines) == len(STARTUP_ART.splitlines())
+    assert len({len(line) for line in lines}) == 1
+    for raw, padded in zip(STARTUP_ART.splitlines(), lines, strict=True):
+        assert padded.startswith(raw)
+
+    # Every character carries the palette color of its fill on the blue bg.
+    def rgb(c: tuple[int, int, int]) -> str:
+        return f"rgb({c[0]},{c[1]},{c[2]})"
+
+    expected_fg = {"@": rgb(DARK), "o": rgb(RED), ".": rgb(YELLOW), " ": rgb(BLUE)}
+    bg = rgb(BLUE)
+    spans = list(text.spans)
+    assert spans, "expected styled spans"
+    covered = text.plain
+    for span in spans:
+        segment = covered[span.start : span.end]
+        style = str(span.style)
+        for ch in set(segment) - {"\n"}:
+            assert expected_fg[ch] in style
+            assert f"on {bg}" in style
