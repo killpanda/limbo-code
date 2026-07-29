@@ -43,6 +43,10 @@ ChatWidget {
 .info-message {
     color: $text-muted;
 }
+.ascii-art {
+    color: $text-muted;
+    margin-top: 1;
+}
 
 /* ---- 工具调用卡片 ---- */
 ToolCard {

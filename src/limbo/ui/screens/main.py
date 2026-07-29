@@ -25,6 +25,7 @@ from limbo.llm.client import LLMClient
 from limbo.llm.factory import create_llm_client
 from limbo.sessions import derive_title, export_jsonl, export_markdown, list_sessions
 from limbo.skills import Skill, discover_skills
+from limbo.ui.banner import STARTUP_ART
 from limbo.ui.commands import SlashCommand, SlashCommandRegistry
 from limbo.ui.screens.game2048 import Game2048Screen
 from limbo.ui.screens.session_picker import SessionPicker
@@ -93,8 +94,10 @@ class MainScreen(Screen[None]):
 
     def on_mount(self) -> None:
         chat = self.query_one("#chat", ChatWidget)
-        chat.add_info(f"Limbo ready · {self.config.llm.model} · {self.workdir}")
         resumed = len(self.agent.messages) > 1
+        if not resumed:
+            chat.add_art(STARTUP_ART)
+        chat.add_info(f"Limbo ready · {self.config.llm.model} · {self.workdir}")
         if resumed:
             self._render_history()
             meta = self.agent.session_meta
