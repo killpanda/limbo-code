@@ -3,24 +3,44 @@
 from __future__ import annotations
 
 import re
+import secrets
 import shlex
 import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from limbo.config import DEFAULT_DANGEROUS_COMMANDS
 from limbo.models import ToolResult
-from limbo.tools.base import MAX_OUTPUT_BYTES, BaseTool, truncate_output
+from limbo.tools.base import (
+    DEFAULT_MAX_BYTES,
+    DEFAULT_MAX_LINES,
+    BaseTool,
+    truncate_tail,
+)
 
 DEFAULT_TIMEOUT = 30.0
 MAX_TIMEOUT = 300.0
+
+
+def _write_full_output(output: str) -> Path | None:
+    """Persist the full command output to a temp file; None on failure."""
+    try:
+        path = Path(tempfile.gettempdir()) / f"limbo-output-{secrets.token_hex(8)}.log"
+        path.write_text(output, encoding="utf-8")
+        return path
+    except OSError:
+        return None
 
 
 class BashTool(BaseTool):
     name = "bash"
     description = (
         "Execute a bash command in the current working directory. Returns stdout and stderr. "
+        f"Output is truncated to the last {DEFAULT_MAX_LINES} lines or "
+        f"{DEFAULT_MAX_BYTES // 1024}KB (whichever is hit first). If truncated, "
+        "the full output is saved to a temp file and its path is shown. "
         "WARNING: bash is not sandboxed and can access files outside the workdir. "
         "Commands matching dangerous patterns (e.g. rm, git reset --hard) are "
         "rejected outright. The filter is heuristic only: "
@@ -91,12 +111,24 @@ class BashTool(BaseTool):
         if proc.stderr:
             output += ("\n" if output else "") + f"[stderr]\n{proc.stderr}"
 
-        output = truncate_output(
-            output,
-            suffix=(
-                f"\n\n[output truncated: exceeded {MAX_OUTPUT_BYTES} byte limit]"
-            ),
-        )
+        # Truncate to the tail (errors and final results live at the end).
+        # When truncated, offload the full output to a temp file so the
+        # model can retrieve it with read. Note: bash runs via
+        # subprocess.run (non-streaming), so the full output is already in
+        # memory and offloading is a post-hoc file write — unlike pi, which
+        # spills to disk incrementally while streaming.
+        truncation = truncate_tail(output)
+        if truncation.truncated:
+            full_path = _write_full_output(output)
+            hint = (
+                f"[Showing lines {truncation.start_line}-"
+                f"{truncation.total_lines} of {truncation.total_lines}"
+            )
+            if full_path is not None:
+                hint += f". Full output: {full_path}]"
+            else:
+                hint += "; full output could not be saved to a temp file]"
+            output = f"{truncation.content}\n\n{hint}"
 
         if proc.returncode != 0:
             exit_msg = f"Command failed with exit code {proc.returncode}."

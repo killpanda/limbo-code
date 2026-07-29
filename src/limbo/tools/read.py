@@ -2,20 +2,31 @@
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from typing import Any
 
 from limbo.config import DEFAULT_SENSITIVE_FILES
 from limbo.models import ToolResult
-from limbo.tools.base import MAX_OUTPUT_BYTES, BaseTool, ToolError
+from limbo.tools.base import (
+    DEFAULT_MAX_BYTES,
+    DEFAULT_MAX_LINES,
+    BaseTool,
+    ToolError,
+    truncate_head,
+)
 
-MAX_LINES = 2000
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 
 class ReadTool(BaseTool):
     name = "read"
-    description = "Read the contents of a file. Use offset/limit for large files."
+    description = (
+        "Read the contents of a file. Output is truncated to the first "
+        f"{DEFAULT_MAX_LINES} lines or {DEFAULT_MAX_BYTES // 1024}KB "
+        "(whichever is hit first). Use offset/limit for large files. "
+        "When you need the full file, continue with offset until complete."
+    )
     parameters = {
         "type": "object",
         "properties": {
@@ -38,9 +49,31 @@ class ReadTool(BaseTool):
         super().__init__(workdir)
         self.sensitive_files = set(sensitive_files or DEFAULT_SENSITIVE_FILES)
 
+    @staticmethod
+    def _resolve_offload_path(raw_path: str) -> Path | None:
+        """Whitelist limbo's own offloaded bash output outside the workdir.
+
+        Bash offloading writes full command output to
+        ``$TMPDIR/limbo-output-<id>.log`` and tells the model to retrieve it
+        with read — but the workdir boundary would reject those paths.
+        Only files directly inside ``tempfile.gettempdir()`` whose name
+        matches what ``BashTool`` writes are allowed; everything else still
+        goes through the normal workdir check.
+        """
+        try:
+            target = Path(raw_path).expanduser().resolve(strict=False)
+            tmpdir = Path(tempfile.gettempdir()).resolve()
+        except (OSError, RuntimeError):
+            return None
+        if target.parent != tmpdir:
+            return None
+        if not (target.name.startswith("limbo-output-") and target.name.endswith(".log")):
+            return None
+        return target
+
     def run(self, arguments: dict[str, Any]) -> ToolResult:
         raw_path = arguments.get("path", "")
-        target = self.resolve(raw_path)
+        target = self._resolve_offload_path(raw_path) or self.resolve(raw_path)
 
         if target.name in self.sensitive_files or any(
             part in self.sensitive_files for part in target.parts
@@ -71,6 +104,7 @@ class ReadTool(BaseTool):
             return ToolResult(success=False, error=f"Could not read file: {e}")
 
         lines = text.splitlines(keepends=True)
+        total_file_lines = len(lines)
         offset = arguments.get("offset")
         limit = arguments.get("limit")
 
@@ -89,17 +123,18 @@ class ReadTool(BaseTool):
         if limit is not None:
             lines = lines[:limit]
 
-        output = "".join(lines)
-        truncated = False
-        encoded = output.encode("utf-8", errors="replace")
-        if len(encoded) > MAX_OUTPUT_BYTES:
-            output = encoded[:MAX_OUTPUT_BYTES].decode("utf-8", errors="replace")
-            truncated = True
-        elif len(lines) > MAX_LINES:
-            output = "".join(lines[:MAX_LINES])
-            truncated = True
-
-        if truncated:
-            output += "\n[Output truncated. Use offset/limit to read more.]"
+        selected = "".join(lines)
+        truncation = truncate_head(selected)
+        output = truncation.content
+        if truncation.truncated:
+            # Report absolute file line numbers: the truncation window is a
+            # slice of the file starting at `offset` (default 1).
+            first_line = offset or 1
+            last_line = first_line + truncation.output_lines - 1
+            output += (
+                f"\n[Output truncated: showing lines {first_line}-"
+                f"{last_line} of {total_file_lines}. "
+                f"Use offset/limit to read more.]"
+            )
 
         return ToolResult(success=True, output=output)

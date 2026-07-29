@@ -1,3 +1,4 @@
+import re
 import tempfile
 from pathlib import Path
 
@@ -201,23 +202,82 @@ def test_bash_handles_non_utf8_output(workdir):
     assert "\ufffd" in result.output
 
 
+def _extract_full_output_path(output: str) -> Path:
+    match = re.search(r"Full output: (\S+)\]", output)
+    assert match is not None, f"no Full output path in: {output[-200:]}"
+    return Path(match.group(1))
+
+
 def test_bash_truncates_excessive_output(workdir):
     tool = BashTool(workdir=workdir)
     result = tool.execute(
         {"command": "python -c \"print('x' * (600 * 1024), end='')\""}
     )
     assert result.success is True
-    assert len(result.output.encode("utf-8")) <= 512 * 1024 + 100
-    assert "truncated" in result.output.lower()
+    assert len(result.output.encode("utf-8")) <= 50 * 1024 + 200
+    assert "Showing lines" in result.output
+    full_path = _extract_full_output_path(result.output)
+    try:
+        assert full_path.name.startswith("limbo-output-")
+        assert len(full_path.read_text(encoding="utf-8").encode("utf-8")) >= 600 * 1024
+    finally:
+        full_path.unlink(missing_ok=True)
 
 
 def test_bash_truncates_output_by_byte_budget(workdir):
     """Multi-byte characters count against the byte budget, not character count."""
     tool = BashTool(workdir=workdir)
-    # Each 'é' is two UTF-8 bytes; 300 KiB of characters is 600 KiB of bytes.
+    # Each 'é' is two UTF-8 bytes; 30 KiB of characters is 60 KiB of bytes.
     result = tool.execute(
-        {"command": "python -c \"import sys; sys.stdout.write('é' * (300 * 1024))\""}
+        {"command": "python -c \"import sys; sys.stdout.write('é' * (30 * 1024))\""}
     )
     assert result.success is True
-    assert len(result.output.encode("utf-8")) <= 512 * 1024 + 100
-    assert "truncated" in result.output.lower()
+    assert len(result.output.encode("utf-8")) <= 50 * 1024 + 200
+    assert "Showing lines" in result.output
+    full_path = _extract_full_output_path(result.output)
+    try:
+        assert len(full_path.read_text(encoding="utf-8").encode("utf-8")) == 60 * 1024
+    finally:
+        full_path.unlink(missing_ok=True)
+
+
+def test_bash_truncates_by_line_budget_and_keeps_tail(workdir):
+    """Excess lines: keep the tail (errors/results live at the end)."""
+    tool = BashTool(workdir=workdir)
+    result = tool.execute({"command": "seq 1 3000"})
+    assert result.success is True
+    kept = result.output.split("\n")
+    # Tail lines are kept; head lines are dropped.
+    assert "3000" in kept
+    assert "2999" in kept
+    assert "1" not in kept[:50]
+    assert "[Showing lines 1001-3000 of 3000. Full output:" in result.output
+    full_path = _extract_full_output_path(result.output)
+    try:
+        full_lines = full_path.read_text(encoding="utf-8").splitlines()
+        assert full_lines[0] == "1"
+        assert full_lines[-1] == "3000"
+        assert len(full_lines) == 3000
+    finally:
+        full_path.unlink(missing_ok=True)
+
+
+def test_bash_small_output_is_not_offloaded(workdir):
+    tool = BashTool(workdir=workdir)
+    result = tool.execute({"command": "echo hello"})
+    assert result.success is True
+    assert "Full output:" not in result.output
+    assert "Showing lines" not in result.output
+
+
+def test_bash_failed_command_still_offloads_full_output(workdir):
+    tool = BashTool(workdir=workdir)
+    result = tool.execute({"command": "seq 1 3000 && exit 3"})
+    assert result.success is False
+    assert "exit code 3" in result.error.lower()
+    assert "[Showing lines 1001-3000 of 3000. Full output:" in result.output
+    full_path = _extract_full_output_path(result.output)
+    try:
+        assert len(full_path.read_text(encoding="utf-8").splitlines()) == 3000
+    finally:
+        full_path.unlink(missing_ok=True)
