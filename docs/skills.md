@@ -1,7 +1,19 @@
 # Skill 支持
 
-Limbo 支持 Claude Code / pi 风格的 skill：一个包含 `SKILL.md` 的目录，
-通过斜杠命令调用。
+Limbo 支持 Claude Code / pi 风格的 skill：一个包含 `SKILL.md` 的目录。
+Skill 通过两条路径生效（双轨）：
+
+- **模型自主触发（渐进式披露）**：system prompt 末尾注入 `<available_skills>`
+  目录（仅 name/description/location），任务匹配 description 时模型用
+  read 工具按需加载 SKILL.md 正文。frontmatter 设
+  `disable-model-invocation: true` 的 skill 不进目录。
+- **斜杠命令显式触发**：`/<name> [args]` 把 skill 正文 + 参数注入为当轮
+  prompt。
+
+frontmatter 校验遵循 Agent Skills 规范：name ≤64 字符、仅小写字母/数字/
+连字符（不得以连字符开头/结尾、不含连续连字符），description 必填
+（≤1024 字符）。不合规的 skill 告警跳过；命名冲突（项目覆盖用户）打
+warning 日志。
 
 ## Skill 格式
 

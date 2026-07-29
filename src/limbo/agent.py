@@ -30,6 +30,7 @@ from limbo.models import (
     ToolResult,
 )
 from limbo.sessions import SessionMeta, derive_title, load_session, save_session
+from limbo.skills import discover_skills, format_skills_for_prompt
 from limbo.tools.registry import ToolRegistry
 from limbo.trace import TraceLogger, trace_path_for
 
@@ -190,26 +191,37 @@ class Agent:
                 "- Show file paths clearly when working with files"
             ),
         ]
-        # Load optional project-level AGENTS.md for extra context.
+        # Load optional context files (project AGENTS.md, global
+        # ~/.limbo/AGENTS.md) wrapped in XML boundary tags.
+        context_files: list[tuple[str, str]] = []
         project_md = self.workdir / "AGENTS.md"
         if project_md.is_file():
             try:
-                text = project_md.read_text(encoding="utf-8")
-                content_parts.append(
-                    f"\n\n## Project context from AGENTS.md\n\n{text}"
-                )
+                context_files.append((str(project_md), project_md.read_text(encoding="utf-8")))
             except OSError:
                 pass
-        # Load optional global AGENTS.md for personal preferences.
         global_md = Path.home() / ".limbo" / "AGENTS.md"
         if global_md.is_file():
             try:
-                text = global_md.read_text(encoding="utf-8")
-                content_parts.append(
-                    f"\n\n## User preferences from ~/.limbo/AGENTS.md\n\n{text}"
-                )
+                context_files.append((str(global_md), global_md.read_text(encoding="utf-8")))
             except OSError:
                 pass
+        if context_files:
+            block = "\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n"
+            for file_path, content in context_files:
+                block += (
+                    f'<project_instructions path="{file_path}">\n\n'
+                    f"{content}\n\n</project_instructions>\n\n"
+                )
+            block += "</project_context>\n"
+            content_parts.append(block)
+        # Skills catalog (progressive disclosure): name/description/location
+        # only; the model loads full SKILL.md files with read on demand.
+        # Only injected when the read tool is available.
+        if self.registry.get("read") is not None:
+            skills_block = format_skills_for_prompt(discover_skills(self.workdir))
+            if skills_block:
+                content_parts.append(skills_block)
         self.messages.append(
             Message(
                 role="system",
