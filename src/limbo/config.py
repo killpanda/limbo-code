@@ -113,8 +113,11 @@ class LLMConfig(BaseModel):
 
 
 class UIConfig(BaseModel):
-    # Textual built-in theme name, e.g. "textual-dark", "dracula", "nord".
+    # Theme name: built-in "limbo-dark" (default) / "limbo-light", or any
+    # Textual built-in theme (e.g. "textual-dark", "dracula", "nord").
     theme: str | None = None
+    # Show the startup ASCII-art banner on fresh sessions.
+    show_banner: bool = True
 
 
 class SafetyConfig(BaseModel):

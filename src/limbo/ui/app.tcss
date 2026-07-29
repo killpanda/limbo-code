@@ -1,4 +1,9 @@
-/* Limbo TUI — pi 风格单栏布局，集中管理所有样式 */
+/* Limbo TUI — pi 风格单栏布局，集中管理所有样式。
+ *
+ * 用色规范见 RFC LIM-16 v1.1 §6.3：本文件只允许引用主题语义变量
+ * （limbo-dark / limbo-light 由 src/limbo/ui/theme.py 注册），禁止裸 hex。
+ * 例外：Game2048 tile 色为游戏语义色，豁免。
+ */
 
 /* ---- 顶部状态栏 ---- */
 #statusbar {
@@ -8,17 +13,17 @@
 }
 #statusbar-state {
     width: 1fr;
-    color: $text-muted;
+    color: $text-secondary;
 }
 #statusbar-state.thinking {
-    color: $warning;
+    color: $primary;
 }
 #statusbar-state.tool {
-    color: $accent;
+    color: $primary;
 }
 #statusbar-context {
     width: auto;
-    color: $text-muted;
+    color: $text-secondary;
     text-align: right;
 }
 
@@ -29,48 +34,104 @@ ChatWidget {
     padding: 0 1;
 }
 .user-message {
-    color: $text-accent;
+    width: 1fr;
+    background: $surface;
+    border-left: thick $primary;
+    padding: 0 1;
     margin-top: 1;
 }
 .assistant-message {
     margin-top: 1;
     padding: 0;
 }
+.thinking-message {
+    color: $text-tertiary;
+    text-style: italic;
+    margin-top: 1;
+}
 .error-message {
-    color: $error;
+    width: 1fr;
+    background: $error-bg;
+    color: $error-bright;
+    padding: 0 1;
     margin-top: 1;
 }
 .info-message {
-    color: $text-muted;
+    color: $text-secondary;
 }
 .ascii-art {
-    color: $text-muted;
+    color: $text-secondary;
     margin-top: 1;
+}
+#back-to-bottom {
+    dock: bottom;
+    height: 1;
+    background: $accent;
+    color: $background;
+    text-style: bold;
+    text-align: center;
+}
+
+/* ---- Markdown 元素（RFC §6.3：heading=accent，code fence=bg-elevated+primary 左边框） ---- */
+MarkdownH1, MarkdownH2, MarkdownH3, MarkdownH4, MarkdownH5, MarkdownH6 {
+    color: $accent;
+}
+MarkdownH1 {
+    border-bottom: solid $border-subtle;
+}
+MarkdownFence {
+    background: $panel;
+    border-left: thick $primary;
+    padding: 0 1;
+}
+MarkdownBlockQuote {
+    color: $text-tertiary;
+    border-left: outer $text-tertiary;
+}
+MarkdownHorizontalRule {
+    color: $text-tertiary;
+}
+MarkdownBlock > .code_inline {
+    background: $panel;
+    color: $accent;
 }
 
 /* ---- 工具调用卡片 ---- */
 ToolCard {
     height: auto;
     padding-left: 1;
+    background: $surface;
+    border-left: thick $primary;
+}
+ToolCard.success {
+    border-left: thick $success;
+}
+ToolCard.error {
+    border-left: thick $error;
+    background: $error-bg;
 }
 ToolCard .tool-header {
     height: 1;
-    color: $text-muted;
+    color: $text-secondary;
 }
 ToolCard.running .tool-header {
-    color: $warning;
+    color: $primary;
 }
 ToolCard.success .tool-header {
     color: $success;
 }
 ToolCard.error .tool-header {
-    color: $error;
+    color: $error-bright;
 }
 ToolCard .tool-body {
     height: auto;
     max-height: 24;
     padding-left: 1;
-    border-left: solid $primary-lighten-2;
+    border-left: solid $border-default;
+    background: $surface;
+}
+ToolCard.error .tool-body {
+    background: $error-bg;
 }
 
 /* ---- 斜杠命令自动补全菜单 ---- */
@@ -80,6 +141,10 @@ ToolCard .tool-body {
     margin: 0 1;
     border: round $primary;
     background: $surface;
+}
+#slash-menu .option-list--option-highlighted {
+    background: $panel;
+    color: $accent;
 }
 
 /* ---- 输入框（全局唯一的圆角边框，视觉锚点） ---- */
@@ -96,7 +161,7 @@ ToolCard .tool-body {
 #hint {
     height: 1;
     padding: 0 2;
-    color: $text-muted;
+    color: $text-secondary;
 }
 
 /* ---- 会话选择弹窗 ---- */
@@ -119,6 +184,10 @@ SessionPicker #picker-title {
 SessionPicker ListView {
     height: auto;
     max-height: 20;
+}
+SessionPicker ListView:focus > ListItem.-highlight {
+    background: $panel;
+    color: $accent;
 }
 
 /* ---- 2048 游戏弹窗 ---- */
@@ -148,17 +217,18 @@ Game2048Screen #game-grid {
 }
 Game2048Screen #game-footer {
     margin-top: 1;
-    color: $text-muted;
+    color: $text-secondary;
     content-align: center middle;
     width: 100%;
 }
+/* tile 色为 2048 游戏语义色（数值越大越暖），豁免统一色板 */
 Game2048Screen .tile {
     content-align: center middle;
     text-style: bold;
     width: 100%;
     height: 3;
     background: $surface-lighten-1;
-    color: $text-muted;
+    color: $text-secondary;
 }
 Game2048Screen .tile-2     { background: #eee4da; color: #776e65; }
 Game2048Screen .tile-4     { background: #ede0c8; color: #776e65; }

@@ -44,16 +44,23 @@ src/limbo/
 └── ui/
     ├── app.py              # Textual App subclass (CSS_PATH = app.tcss)
     ├── app.tcss            # Centralized stylesheet for the whole TUI
+    ├── theme.py            # limbo-dark / limbo-light Theme definitions (RFC LIM-16 palette)
+    ├── syntax.py           # Pygments styles matching the theme palette (tool-card highlighting)
+    ├── contrast.py         # WCAG contrast checker over the theme palettes
     ├── commands.py         # SlashCommandRegistry: menu metadata + dispatch in one place
     ├── screens/
     │   └── main.py         # Single-column chat screen + event handling + slash commands
     │   └── session_picker.py # Modal session switcher (/sessions)
     └── widgets/
-        ├── chat.py         # Chat flow: user/assistant(Markdown)/tool cards/errors
+        ├── chat.py         # Chat flow: user/assistant(Markdown)/tool cards/errors + scroll-follow
         ├── input.py        # Multi-line user input
-        ├── status_bar.py   # Top status bar: agent state + model/workdir
+        ├── status_bar.py   # Top status bar: spinner state + elapsed + tokens + model/workdir
         ├── tool_card.py    # Inline tool-call card (one-line summary, expandable)
         └── confirm.py      # Confirmation modal (ConfirmDialog, Confirmed/Rejected events)
+
+scripts/
+├── check_contrast.py       # Palette contrast report/CI gate (P2-3)
+└── ui_walkthrough.py       # Render 5 key UI states to SVG for visual review (§7.4)
 
 tests/
 ├── test_models.py
@@ -85,7 +92,7 @@ tests/
 
 ## AgentLoop Details
 
-- `Agent.run()` yields `AgentEvent` types: `TextDelta`, `ToolCallRequest`, `ToolResultEvent`, `ErrorEvent`
+- `Agent.run()` yields `AgentEvent` types: `TextDelta`, `ThinkingDelta`, `ToolCallRequest`, `ToolResultEvent`, `ErrorEvent`, `UsageUpdate` (cumulative session token count, emitted after each LLM call)
 - The loop respects `config.llm.max_iterations` (default 50)
 - Multi-tool calls in a single assistant turn are executed sequentially
 - When a tool requires confirmation, placeholder `role="tool"` messages are inserted for all remaining calls in that turn so the message history stays valid for the OpenAI API
@@ -129,7 +136,8 @@ max_iterations = 50
 bash_enabled = true
 
 [ui]
-theme = "textual-dark"   # optional Textual built-in theme name
+theme = "limbo-dark"     # optional: limbo-dark (default) / limbo-light / any Textual built-in
+show_banner = true       # startup ASCII art on fresh sessions
 
 [safety]
 dangerous_commands = ["rm", "git reset --hard"]
@@ -139,14 +147,21 @@ sensitive_files = [".env", "id_rsa", "id_ed25519", ".ssh"]
 ## UI Layout
 
 Pi-style single-column layout (top to bottom):
-- **Status bar (1 line)**: Agent state on the left (`● idle / thinking… / running <tool>…`), model + workdir on the right
+- **Status bar (1 line)**: Agent state on the left (`● idle`, or animated `⠋ thinking… / running <tool>…` with elapsed seconds), model + cumulative tokens + workdir on the right
 - **Chat flow**: The conversation as a single scrolling stream — user messages (`❯` prefix), assistant replies rendered as streaming Markdown, inline tool-call cards (`✓/⏸/✗` one-line summaries, click or `ctrl+o` to expand full output), error lines
 - **Input box**: The only persistent rounded border on screen; Enter submits, Shift+Enter inserts a newline
 - **Hint line (1 line)**: Key hints in muted color
 
 Confirmation modal: `ConfirmDialog` shows tool output with `y`/`n`/`Esc` shortcuts and "Apply"/"Reject" buttons.
 
-All styles live in `ui/app.tcss`; widgets do not define `DEFAULT_CSS`. The theme is configurable via `[ui] theme` in `config.toml` (Textual built-in theme names).
+All styles live in `ui/app.tcss`; widgets do not define `DEFAULT_CSS`. Colors must
+reference theme semantic variables only (no bare hex; 2048 tiles and the mascot
+banner art are exempt). The palette and per-state color rules are defined in
+`ui/theme.py` (RFC LIM-16): `limbo-dark` is the default, `limbo-light` is also
+built in, and `[ui] theme` can select any Textual built-in theme — custom CSS
+variables fall back to the limbo-dark values via `App.get_theme_variable_defaults()`.
+Run `python scripts/check_contrast.py` after touching the palette: all *used*
+text/background pairs must stay ≥ 4.5:1.
 
 ## Key Design Decisions
 
@@ -162,9 +177,13 @@ All styles live in `ui/app.tcss`; widgets do not define `DEFAULT_CSS`. The theme
 pytest tests/ -v                     # all tests
 ruff check src tests                 # lint
 mypy src                             # type check (strict=false)
+python scripts/check_contrast.py     # palette WCAG contrast gate
+python scripts/ui_walkthrough.py     # export key UI states as SVGs to docs/assets/walkthrough/
 ```
 
-Tests use `pytest-asyncio` for async tests, `respx` for HTTP mocking (LLM client), and temp directories for tool tests.
+Tests use `pytest-asyncio` for async tests, `respx` for HTTP mocking (LLM client),
+temp directories for tool tests, and `pytest-textual-snapshot` for UI snapshots
+(`pytest --snapshot-update` after intentional visual changes; review the SVG diff).
 
 ## Common Patterns
 

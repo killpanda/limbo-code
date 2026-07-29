@@ -18,6 +18,7 @@ from limbo.agent import (
     ThinkingDelta,
     ToolCallRequest,
     ToolResultEvent,
+    UsageUpdate,
 )
 from limbo.compaction import is_summary_message
 from limbo.config import Config
@@ -92,7 +93,7 @@ class MainScreen(Screen[None]):
     def on_mount(self) -> None:
         chat = self.query_one("#chat", ChatWidget)
         resumed = len(self.agent.messages) > 1
-        if not resumed:
+        if not resumed and self.config.ui.show_banner:
             chat.add_art(startup_art_text())
         chat.add_info(f"Limbo ready · {self.config.llm.model} · {self.workdir}")
         if resumed:
@@ -409,6 +410,8 @@ class MainScreen(Screen[None]):
                 chat.add_info(event.reason)
             if event.warning:
                 chat.add_info(event.warning)
+        elif isinstance(event, UsageUpdate):
+            statusbar.set_tokens(event.total_tokens)
         elif isinstance(event, ToolCallRequest):
             chat.add_tool_card(event.id, event.name, event.arguments)
             statusbar.set_state(f"running {event.name}…", "tool")
