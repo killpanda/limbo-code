@@ -67,7 +67,7 @@ wins over the catalog).
 ```toml
 [llm]
 temperature = 0.2        # 0.0 - 2.0, default 0.2
-max_iterations = 10      # safety limit on tool-turn loops, default 10
+max_iterations = 50      # safety limit on tool-turn loops, default 50
 max_tokens = 8192        # output cap; default = the model's catalog value
 thinking_effort = "high" # reasoning control; default = provider behavior
 ```

@@ -29,7 +29,7 @@ class LLMConfig(BaseModel):
     base_url: str = "https://api.deepseek.com/v1"
     model: str = "deepseek-chat"
     temperature: float = 0.2
-    max_iterations: int = 10
+    max_iterations: int = 50
     # Thinking control for reasoning models (e.g. kimi-k3: low|high|max,
     # deepseek-format Kimi models: on value or "off"). None = provider default.
     thinking_effort: str | None = None
