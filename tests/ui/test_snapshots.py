@@ -34,10 +34,13 @@ SNAPSHOT_WORKDIR = Path("/tmp/limbo-snapshot-workdir")
 
 @pytest.fixture(autouse=True)
 def _deterministic_ui(monkeypatch):
-    """Freeze widget clocks and disable the spinner timer for stable snapshots.
+    """Freeze widget clocks, spinner timer, and workdir display for stable snapshots.
 
-    Replaces the ``time`` *name inside the widget modules'* namespaces (not
-    the global time module — freezing that would stall Textual's own clock).
+    - Replaces the ``time`` *name inside the widget modules'* namespaces (not
+      the global time module — freezing that would stall Textual's own clock).
+    - ``limbo.ui.app.Path`` is swapped for a Path whose ``resolve()`` is the
+      identity: ``LimboApp`` resolves the workdir, which reads /private/tmp/...
+      on macOS but /tmp/... on Linux CI and breaks cross-platform snapshots.
     """
     SNAPSHOT_WORKDIR.mkdir(parents=True, exist_ok=True)
     frozen = SimpleNamespace(monotonic=lambda: 100.0)
@@ -46,6 +49,12 @@ def _deterministic_ui(monkeypatch):
     from limbo.ui.widgets.status_bar import StatusBar
 
     monkeypatch.setattr(StatusBar, "_tick", lambda self: None)
+
+    class _NoResolvePath(type(Path())):
+        def resolve(self, strict: bool = False):  # type: ignore[override]
+            return self
+
+    monkeypatch.setattr("limbo.ui.app.Path", _NoResolvePath)
 
 
 def make_app(tmp_path: Path) -> LimboApp:
