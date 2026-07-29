@@ -2,15 +2,22 @@
 
 from __future__ import annotations
 
+import secrets
 from dataclasses import dataclass
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class Message(BaseModel):
-    """A chat message in the conversation."""
+    """A chat message in the conversation.
 
+    ``id`` makes each message an addressable entry (pi-style entry model):
+    compaction records reference the first kept entry by id. Older session
+    files without ids load fine — the default factory mints one on parse.
+    """
+
+    id: str = Field(default_factory=lambda: secrets.token_hex(8))
     role: str  # system | user | assistant | tool
     content: str | None = None
     tool_calls: list[dict[str, Any]] | None = None

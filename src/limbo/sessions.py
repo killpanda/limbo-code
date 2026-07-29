@@ -12,17 +12,21 @@ from __future__ import annotations
 
 import json
 import os
+import warnings
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel
 
+from limbo.compaction import is_summary_message, make_summary_message
 from limbo.models import Message
 from limbo.trace import read_trace
 
 META_TYPE = "meta"
 SNAPSHOT_TYPE = "messages_snapshot"
+COMPACTION_TYPE = "compaction"
 
 
 class SessionNotFoundError(Exception):
@@ -54,6 +58,25 @@ class SessionMeta(BaseModel):
     path: Path | None = None
 
 
+class CompactionRecord(BaseModel):
+    """One compaction event, stored as a JSONL line in the session file.
+
+    ``first_kept_entry_id`` marks the keep boundary (pi's entry model):
+    on load, messages before that entry are dropped and the stored
+    ``summary`` is re-inserted as the conversation summary. Because the
+    session file is fully rewritten after each compaction, the boundary is
+    normally a no-op — it is a defensive fallback and an audit trail.
+    """
+
+    id: str
+    created_at: str = ""
+    first_kept_entry_id: str = ""
+    summary: str = ""
+    tokens_before: int | None = None
+    tokens_after_estimate: int | None = None
+    trigger: str = "auto"  # "auto" | "manual"
+
+
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -69,8 +92,13 @@ def derive_title(messages: list[Message], max_length: int = 50) -> str:
     return ""
 
 
-def save_session(path: Path, meta: SessionMeta, messages: list[Message]) -> None:
-    """Atomically write the whole session (meta line + message lines)."""
+def save_session(
+    path: Path,
+    meta: SessionMeta,
+    messages: list[Message],
+    compactions: Sequence[CompactionRecord] = (),
+) -> None:
+    """Atomically write the whole session (meta + compactions + messages)."""
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     meta.updated_at = _utc_now_iso()
     meta_line = json.dumps(
@@ -81,6 +109,14 @@ def save_session(path: Path, meta: SessionMeta, messages: list[Message]) -> None
     file_existed = path.exists()
     with tmp_file.open("w", encoding="utf-8") as f:
         f.write(meta_line + "\n")
+        for record in compactions:
+            f.write(
+                json.dumps(
+                    {"type": COMPACTION_TYPE, **record.model_dump()},
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
         for msg in messages:
             f.write(msg.model_dump_json() + "\n")
     os.replace(tmp_file, path)
@@ -94,10 +130,54 @@ def _parse_meta(raw: dict[str, Any], fallback_id: str, path: Path) -> SessionMet
     return SessionMeta(path=path, **data)
 
 
-def load_session(path: Path) -> tuple[SessionMeta, list[Message]]:
-    """Load a session file, tolerating legacy files and malformed lines."""
+def _apply_compactions(
+    messages: list[Message], compactions: list[CompactionRecord]
+) -> list[Message]:
+    """Reconstruct the post-compaction history from the latest record.
+
+    Only the most recent record participates in reconstruction (older ones
+    stay on disk for audit). Since the session file is rewritten after each
+    compaction, the drop is normally a no-op; if the boundary id is missing
+    (hand-edited file, partial write), the record is ignored with a warning
+    — better uncompacted than data loss.
+    """
+    if not compactions:
+        return messages
+    latest = compactions[-1]
+    boundary = next(
+        (i for i, m in enumerate(messages) if m.id == latest.first_kept_entry_id),
+        None,
+    )
+    if boundary is None:
+        warnings.warn(
+            f"Compaction boundary {latest.first_kept_entry_id!r} not found; "
+            "loading full history.",
+            stacklevel=2,
+        )
+        return messages
+    head = messages[:1] if messages and messages[0].role == "system" else []
+    kept = messages[boundary:]
+    # The summary normally already sits in the file right after the system
+    # message (saved post-compaction); re-insert it only if missing.
+    dropped = messages[len(head) : boundary]
+    summary_msg = next((m for m in dropped if is_summary_message(m)), None)
+    if summary_msg is None:
+        summary_msg = make_summary_message(latest.summary)
+    return [*head, summary_msg, *kept]
+
+
+def load_session(
+    path: Path,
+) -> tuple[SessionMeta, list[Message], list[CompactionRecord]]:
+    """Load a session file, tolerating legacy files and malformed lines.
+
+    Returns the meta, the reconstructed message history (with compaction
+    applied), and the raw compaction records (the agent uses the latest one
+    to restore its iterative-summary chain).
+    """
     meta: SessionMeta | None = None
     messages: list[Message] = []
+    compactions: list[CompactionRecord] = []
     with path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -110,6 +190,13 @@ def load_session(path: Path) -> tuple[SessionMeta, list[Message]]:
             if record.get("type") == META_TYPE:
                 meta = _parse_meta(record, path.stem, path)
                 continue
+            if record.get("type") == COMPACTION_TYPE:
+                data = {k: v for k, v in record.items() if k != "type"}
+                try:
+                    compactions.append(CompactionRecord(**data))
+                except ValueError:
+                    continue
+                continue
             try:
                 messages.append(Message(**record))
             except ValueError:
@@ -117,7 +204,7 @@ def load_session(path: Path) -> tuple[SessionMeta, list[Message]]:
     if meta is None:
         # Legacy file without a meta line.
         meta = SessionMeta(id=path.stem, path=path)
-    return meta, messages
+    return meta, _apply_compactions(messages, compactions), compactions
 
 
 def _read_meta_line(path: Path) -> SessionMeta:

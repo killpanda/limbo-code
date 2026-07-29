@@ -12,12 +12,14 @@ from textual.widgets import Static
 from limbo.agent import (
     Agent,
     AgentEvent,
+    CompactionEvent,
     ErrorEvent,
     TextDelta,
     ThinkingDelta,
     ToolCallRequest,
     ToolResultEvent,
 )
+from limbo.compaction import is_summary_message
 from limbo.config import Config
 from limbo.llm.client import LLMClient
 from limbo.llm.factory import create_llm_client
@@ -58,6 +60,7 @@ class MainScreen(Screen[None]):
         self.session_dir = session_dir or Path.home() / ".limbo" / "sessions"
         self.agent = self._new_agent(resume=resume)
         self._slash_menu_open = False
+        self._turn_running = False
         self._commands = SlashCommandRegistry()
         self._register_builtin_commands()
 
@@ -192,6 +195,13 @@ class MainScreen(Screen[None]):
             )
         )
         self._commands.register(
+            SlashCommand(
+                "/compact",
+                "立即压缩对话历史（释放上下文）",
+                handler=lambda arg: self._compact_now(),
+            )
+        )
+        self._commands.register(
             SlashCommand("/help", "显示帮助", handler=lambda arg: self._show_help())
         )
         self._commands.register(
@@ -216,6 +226,25 @@ class MainScreen(Screen[None]):
             self._invoke_skill(skill, arg)
         else:
             chat.add_info(f"未知命令 {name}，{self._commands.help_text()}")
+
+    def _compact_now(self) -> None:
+        """Run /compact: refuse while a turn is streaming (the compaction
+        worker would race the turn worker on self.messages), otherwise pump
+        the agent's compaction events like a mini-turn."""
+        chat = self.query_one("#chat", ChatWidget)
+        if self._turn_running:
+            chat.add_info("当前任务进行中，请等待完成后再压缩")
+            return
+        self.run_worker(self._run_compact())
+
+    async def _run_compact(self) -> None:
+        statusbar = self.query_one("#statusbar", StatusBar)
+        statusbar.set_state("compacting…", "thinking")
+        try:
+            async for event in self.agent.compact(trigger="manual"):
+                await self._process_agent_event(event)
+        finally:
+            statusbar.set_state("idle")
 
     def _show_help(self) -> None:
         self.query_one("#chat", ChatWidget).add_info(self._commands.help_text())
@@ -273,7 +302,9 @@ class MainScreen(Screen[None]):
         chat = self.query_one("#chat", ChatWidget)
         skipped_tools = 0
         for msg in self.agent.messages[1:]:  # skip the system message
-            if msg.role == "user" and msg.content:
+            if is_summary_message(msg):
+                chat.add_info("（此前对话已压缩为摘要）")
+            elif msg.role == "user" and msg.content:
                 chat.add_user_message(msg.content)
             elif msg.role == "assistant" and msg.content:
                 chat.add_assistant_message(msg.content)
@@ -334,11 +365,13 @@ class MainScreen(Screen[None]):
         input_widget = self.query_one("#input", InputWidget)
         statusbar = self.query_one("#statusbar", StatusBar)
         input_widget.disabled = True
+        self._turn_running = True
         statusbar.set_state("thinking…", "thinking")
         try:
             async for event in self.agent.run(user_input):
                 await self._process_agent_event(event)
         finally:
+            self._turn_running = False
             input_widget.disabled = False
             # Disabling the input mid-turn moves focus away; give it back so
             # the user can keep typing without clicking.
@@ -355,6 +388,17 @@ class MainScreen(Screen[None]):
             await chat.append_thinking_text(event.text)
         elif isinstance(event, ErrorEvent):
             chat.add_error(event.message)
+        elif isinstance(event, CompactionEvent):
+            if event.compacted:
+                chat.add_info(
+                    f"已压缩上下文：约 {event.before_tokens} → "
+                    f"{event.after_estimate} tokens"
+                    + ("（手动）" if event.trigger == "manual" else "（自动）")
+                )
+            elif event.reason:
+                chat.add_info(event.reason)
+            if event.warning:
+                chat.add_info(event.warning)
         elif isinstance(event, ToolCallRequest):
             chat.add_tool_card(event.id, event.name, event.arguments)
             statusbar.set_state(f"running {event.name}…", "tool")
