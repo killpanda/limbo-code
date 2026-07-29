@@ -12,7 +12,7 @@ from limbo.llm.anthropic_client import (
     _messages_to_anthropic,
     _tool_to_anthropic,
 )
-from limbo.models import Message, TextChunk, ThinkingChunk, ToolCallEvent
+from limbo.models import CompletionMeta, Message, TextChunk, ThinkingChunk, ToolCallEvent
 
 MESSAGES_URL = "https://api.kimi.com/coding/v1/messages"
 
@@ -269,3 +269,63 @@ def test_system_messages_join_into_system_param():
     system, converted = _messages_to_anthropic(messages)
     assert system == "part 1\n\npart 2"
     assert converted == [{"role": "user", "content": "hi"}]
+
+
+# -- response metadata -------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_completion_meta_captures_usage_and_stop_reason(client):
+    respx.post(MESSAGES_URL).mock(
+        return_value=_sse(
+            {
+                "type": "message_start",
+                "message": {
+                    "usage": {"input_tokens": 50, "cache_read_input_tokens": 30}
+                },
+            },
+            {"type": "content_block_delta", "index": 0,
+             "delta": {"type": "text_delta", "text": "ok"}},
+            {
+                "type": "message_delta",
+                "delta": {"stop_reason": "end_turn"},
+                "usage": {"output_tokens": 7},
+            },
+            {"type": "message_stop"},
+        )
+    )
+
+    events = await _collect(client.chat([Message(role="user", content="hi")], tools=[]))
+
+    meta = next(e for e in events if isinstance(e, CompletionMeta))
+    assert meta.usage == {
+        "input_tokens": 50,
+        "cache_read_input_tokens": 30,
+        "output_tokens": 7,
+    }
+    assert meta.finish_reason == "end_turn"
+    assert meta.ttft is not None
+    assert meta.duration is not None
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_on_request_hook_receives_exact_body(client):
+    respx.post(MESSAGES_URL).mock(return_value=_sse({"type": "message_stop"}))
+    bodies = []
+
+    await _collect(
+        client.chat(
+            [Message(role="system", content="sys"), Message(role="user", content="hi")],
+            tools=[],
+            on_request=bodies.append,
+        )
+    )
+
+    assert len(bodies) == 1
+    body = bodies[0]
+    assert body["model"] == "k3"
+    assert body["system"] == "sys"
+    assert body["messages"] == [{"role": "user", "content": "hi"}]
+    assert body["stream"] is True

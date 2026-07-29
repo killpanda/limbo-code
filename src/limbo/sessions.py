@@ -19,8 +19,10 @@ from typing import Any
 from pydantic import BaseModel
 
 from limbo.models import Message
+from limbo.trace import read_trace
 
 META_TYPE = "meta"
+SNAPSHOT_TYPE = "messages_snapshot"
 
 
 class SessionNotFoundError(Exception):
@@ -205,3 +207,52 @@ def export_markdown(
             lines += ["## Assistant", "", msg.content, ""]
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("\n".join(lines), encoding="utf-8")
+
+
+def export_jsonl(
+    meta: SessionMeta,
+    messages: list[Message],
+    path: Path,
+    trace_path: Path | None = None,
+) -> None:
+    """Export the full-fidelity session log as a single JSONL file.
+
+    Layout:
+
+    1. a ``meta`` record (session metadata + export timestamp),
+    2. every trace record in chronological order (LLM request bodies,
+       usage, tool calls/results, confirmations, errors) when the trace
+       file exists — otherwise the raw conversation messages,
+    3. a final ``messages_snapshot`` record with the exact message history
+       as persisted (placeholders, rejections and all).
+    """
+    meta_line = json.dumps(
+        {
+            "type": META_TYPE,
+            **meta.model_dump(exclude={"path"}),
+            "exported_at": _utc_now_iso(),
+        },
+        ensure_ascii=False,
+    )
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        f.write(meta_line + "\n")
+        trace_records = read_trace(trace_path) if trace_path is not None else []
+        if trace_records:
+            for record in trace_records:
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+        else:
+            # Sessions from before tracing existed still export their messages.
+            for msg in messages:
+                f.write(msg.model_dump_json() + "\n")
+        snapshot = json.dumps(
+            {
+                "type": SNAPSHOT_TYPE,
+                "count": len(messages),
+                "messages": [
+                    json.loads(msg.model_dump_json()) for msg in messages
+                ],
+            },
+            ensure_ascii=False,
+        )
+        f.write(snapshot + "\n")

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import platform
 import secrets
+import time
+import traceback
 import warnings
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
@@ -12,13 +15,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from limbo import __version__
 from limbo.config import Config
 from limbo.history import ToolHistory
 from limbo.history import repair as repair_history
 from limbo.llm.client import LLMClient
-from limbo.models import Message, TextChunk, ThinkingChunk, ToolCallEvent, ToolResult
+from limbo.models import (
+    CompletionMeta,
+    Message,
+    TextChunk,
+    ThinkingChunk,
+    ToolCallEvent,
+    ToolResult,
+)
 from limbo.sessions import SessionMeta, derive_title, load_session, save_session
 from limbo.tools.registry import ToolRegistry
+from limbo.trace import TraceLogger, trace_path_for
 
 
 @dataclass(frozen=True)
@@ -54,6 +66,27 @@ class ErrorEvent:
 
 
 AgentEvent = TextDelta | ThinkingDelta | ToolCallRequest | ToolResultEvent | ErrorEvent
+
+
+def _extract_cached_tokens(usage: dict[str, Any] | None) -> int | None:
+    """Normalize provider-specific prompt cache-hit counters.
+
+    DeepSeek reports ``prompt_cache_hit_tokens``, OpenAI nests
+    ``prompt_tokens_details.cached_tokens``, Anthropic reports
+    ``cache_read_input_tokens``.
+    """
+    if not usage:
+        return None
+    hit = usage.get("prompt_cache_hit_tokens")
+    if isinstance(hit, int):
+        return hit
+    details = usage.get("prompt_tokens_details")
+    if isinstance(details, dict):
+        cached = details.get("cached_tokens")
+        if isinstance(cached, int):
+            return cached
+    read = usage.get("cache_read_input_tokens")
+    return read if isinstance(read, int) else None
 
 
 class Agent:
@@ -96,6 +129,33 @@ class Agent:
                 model=config.llm.model,
                 created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
             )
+
+        # Trace log: full-fidelity JSONL record of the run, kept separate from
+        # the resumable session file. Created lazily-tolerant: tracing must
+        # never break the agent.
+        self.trace = TraceLogger(trace_path_for(self._session_file))
+        self._turn_count = 0
+        self._turn_start: float | None = None
+        self._pending_since: float | None = None
+        self.trace.log(
+            "session_start",
+            session_id=self._meta.id,
+            workdir=str(workdir.resolve()),
+            resumed=resume is not None,
+            restored_messages=(len(self.messages) - 1) if resume is not None else 0,
+            limbo_version=__version__,
+            python=platform.python_version(),
+            platform=platform.platform(),
+            config={
+                "model": config.llm.model,
+                "base_url": config.llm.base_url,
+                "temperature": config.llm.temperature,
+                "max_tokens": config.llm.max_tokens,
+                "max_iterations": config.llm.max_iterations,
+                "thinking_effort": config.llm.thinking_effort,
+                "bash_enabled": config.tools.bash_enabled,
+            },
+        )
 
     @property
     def session_id(self) -> str:
@@ -178,7 +238,9 @@ class Agent:
         """Backward-compatible view of the ledger's pending placeholder ids."""
         return self._history.pending_ids
 
-    def reject_pending_tool(self, reason: str = "Action rejected.") -> None:
+    def reject_pending_tool(
+        self, reason: str = "Action rejected.", decision: str = "rejected"
+    ) -> None:
         """Clear any tool awaiting confirmation.
 
         Records the rejection in the message history (cancelling any later
@@ -188,26 +250,64 @@ class Agent:
         if self._pending_tool is None:
             return
         self._history.record_rejection(self._pending_tool["id"], reason)
+        self.trace.log(
+            "confirmation",
+            turn=self._turn_count,
+            decision=decision,
+            reason=reason,
+            tool_call_id=self._pending_tool["id"],
+            name=self._pending_tool["function"]["name"],
+            wait=self._pending_wait(),
+        )
         self._pending_tool = None
+        self._pending_since = None
+
+    def _pending_wait(self) -> float | None:
+        """Seconds the current confirmation has been waiting, if known."""
+        if self._pending_since is None:
+            return None
+        return time.monotonic() - self._pending_since
+
+    def _log_turn_end(self) -> None:
+        if self._turn_start is None:
+            return
+        self.trace.log(
+            "turn_end",
+            turn=self._turn_count,
+            duration=time.monotonic() - self._turn_start,
+            iterations=self._iteration_count,
+            status="awaiting_confirmation" if self._pending_tool else "completed",
+        )
+        self._turn_start = None
 
     async def run(self, user_input: str) -> AsyncIterator[AgentEvent]:
         # Reset per-user-turn state and discard stale pending confirmations.
         self._iteration_count = 0
         self._confirmation_applied = False
+        self._turn_count += 1
+        self._turn_start = time.monotonic()
         if self._pending_tool is not None:
             self.reject_pending_tool(
-                reason="Action timed out or was superseded by a new turn."
+                reason="Action timed out or was superseded by a new turn.",
+                decision="superseded",
             )
 
         self.messages.append(Message(role="user", content=user_input))
+        self.trace.log(
+            "user_message", turn=self._turn_count, content=user_input
+        )
 
         try:
             async for event in self._conversation_loop():
                 yield event
         finally:
+            self._log_turn_end()
             try:
                 await self._save_session()
             except Exception as e:  # noqa: BLE001
+                self.trace.log(
+                    "session_save_error", turn=self._turn_count, error=str(e)
+                )
                 warnings.warn(f"Failed to save session: {e}", stacklevel=2)
 
     async def continue_after_confirmation(self) -> AsyncIterator[AgentEvent]:
@@ -222,14 +322,27 @@ class Agent:
         until the assistant produces a final response without pending tool calls.
         """
         if self._pending_tool is not None:
+            self.trace.log(
+                "error",
+                turn=self._turn_count,
+                kind="invalid_continuation",
+                message="Cannot continue: a tool is still pending confirmation.",
+            )
             yield ErrorEvent(
                 message="Cannot continue: a tool is still pending confirmation."
             )
             return
         if not self._confirmation_applied:
+            self.trace.log(
+                "error",
+                turn=self._turn_count,
+                kind="invalid_continuation",
+                message="Cannot continue: no confirmed tool to resume from.",
+            )
             yield ErrorEvent(message="Cannot continue: no confirmed tool to resume from.")
             return
         self._confirmation_applied = False
+        self._turn_start = time.monotonic()
 
         try:
             async for event in self._execute_remaining_tools():
@@ -237,10 +350,64 @@ class Agent:
             async for event in self._conversation_loop():
                 yield event
         finally:
+            self._log_turn_end()
             try:
                 await self._save_session()
             except Exception as e:  # noqa: BLE001
+                self.trace.log(
+                    "session_save_error", turn=self._turn_count, error=str(e)
+                )
                 warnings.warn(f"Failed to save session: {e}", stacklevel=2)
+
+    async def _execute_tool(
+        self,
+        call_id: str,
+        name: str,
+        arguments: dict[str, Any],
+        dry_run: bool,
+    ) -> ToolResult:
+        """Execute a tool with full trace logging. Re-raises on crash."""
+        self.trace.log(
+            "tool_call",
+            turn=self._turn_count,
+            iteration=self._iteration_count,
+            id=call_id,
+            name=name,
+            arguments=arguments,
+            dry_run=dry_run,
+        )
+        start = time.monotonic()
+        try:
+            result = await self.registry.execute(name, arguments, dry_run=dry_run)
+        except Exception as e:  # noqa: BLE001
+            self.trace.log(
+                "tool_result",
+                turn=self._turn_count,
+                iteration=self._iteration_count,
+                id=call_id,
+                name=name,
+                dry_run=dry_run,
+                success=False,
+                error=f"Tool error: {e}",
+                exception_type=type(e).__name__,
+                traceback=traceback.format_exc(),
+                duration=time.monotonic() - start,
+            )
+            raise
+        self.trace.log(
+            "tool_result",
+            turn=self._turn_count,
+            iteration=self._iteration_count,
+            id=call_id,
+            name=name,
+            dry_run=dry_run,
+            success=result.success,
+            output=result.output,
+            error=result.error,
+            requires_confirmation=result.requires_confirmation,
+            duration=time.monotonic() - start,
+        )
+        return result
 
     async def _execute_remaining_tools(self) -> AsyncIterator[AgentEvent]:
         """Execute remaining placeholder tool calls from the last assistant turn.
@@ -262,7 +429,9 @@ class Agent:
             arguments = tc["function"]["arguments"]
             yield ToolCallRequest(id=tc["id"], name=name, arguments=arguments)
             try:
-                result = await self.registry.execute(name, arguments, dry_run=True)
+                result = await self._execute_tool(
+                    tc["id"], name, arguments, dry_run=True
+                )
             except Exception as e:  # noqa: BLE001
                 error_message = f"Tool error: {e}"
                 yield ErrorEvent(message=error_message)
@@ -272,6 +441,7 @@ class Agent:
                 return
             if result.requires_confirmation:
                 self._pending_tool = tc
+                self._pending_since = time.monotonic()
             yield ToolResultEvent(
                 id=tc["id"], name=name, result=result, arguments=arguments
             )
@@ -288,6 +458,14 @@ class Agent:
                 async for event in self._call_llm():
                     yield event
             except Exception as e:  # noqa: BLE001
+                self.trace.log(
+                    "llm_error",
+                    turn=self._turn_count,
+                    iteration=self._iteration_count,
+                    error=str(e),
+                    exception_type=type(e).__name__,
+                    traceback=traceback.format_exc(),
+                )
                 yield ErrorEvent(message=f"LLM error: {e}")
                 return
 
@@ -308,6 +486,13 @@ class Agent:
                             tool_call_id=tc["id"],
                         )
                     )
+                self.trace.log(
+                    "error",
+                    turn=self._turn_count,
+                    kind="max_iterations",
+                    message="Maximum iteration count reached; remaining tool calls were cancelled.",
+                    cancelled_tool_call_ids=[tc["id"] for tc in last.tool_calls],
+                )
                 yield ErrorEvent(
                     message="Maximum iteration count reached; remaining tool calls were cancelled."
                 )
@@ -318,7 +503,9 @@ class Agent:
                 arguments = tc["function"]["arguments"]
                 yield ToolCallRequest(id=tc["id"], name=name, arguments=arguments)
                 try:
-                    result = await self.registry.execute(name, arguments, dry_run=True)
+                    result = await self._execute_tool(
+                        tc["id"], name, arguments, dry_run=True
+                    )
                 except Exception as e:  # noqa: BLE001
                     error_message = f"Tool error: {e}"
                     yield ErrorEvent(message=error_message)
@@ -328,6 +515,7 @@ class Agent:
                     return
                 if result.requires_confirmation:
                     self._pending_tool = tc
+                    self._pending_since = time.monotonic()
                     # The assistant message already references every tool call in
                     # this turn, but only the calls before this one have results.
                     # Append placeholders for this pending call and the remaining
@@ -369,8 +557,18 @@ class Agent:
                 ),
             )
 
+        self.trace.log(
+            "confirmation",
+            turn=self._turn_count,
+            decision="approved",
+            tool_call_id=self._pending_tool["id"],
+            name=pending_name,
+            wait=self._pending_wait(),
+        )
         try:
-            result = await self.registry.execute(name, arguments, dry_run=False)
+            result = await self._execute_tool(
+                self._pending_tool["id"], name, arguments, dry_run=False
+            )
         except Exception as e:  # noqa: BLE001
             error_message = f"Tool error: {e}"
             result = ToolResult(success=False, error=error_message)
@@ -384,6 +582,7 @@ class Agent:
         )
         if result.success:
             self._pending_tool = None
+            self._pending_since = None
             self._confirmation_applied = True
         return result
 
@@ -393,8 +592,19 @@ class Agent:
         assistant_reasoning = ""
         assistant_signature: str | None = None
         tool_calls: list[dict[str, Any]] = []
+        meta: CompletionMeta | None = None
 
-        async for event in self.llm_client.chat(self.messages, tools=tool_definitions):
+        def _trace_request(body: dict[str, Any]) -> None:
+            self.trace.log(
+                "llm_request",
+                turn=self._turn_count,
+                iteration=self._iteration_count,
+                body=body,
+            )
+
+        async for event in self.llm_client.chat(
+            self.messages, tools=tool_definitions, on_request=_trace_request
+        ):
             if isinstance(event, TextChunk):
                 assistant_content += event.text
                 yield TextDelta(text=event.text)
@@ -417,6 +627,26 @@ class Agent:
                 yield ToolCallRequest(
                     id=event.id, name=event.name, arguments=event.arguments
                 )
+            elif isinstance(event, CompletionMeta):
+                meta = event
+
+        usage = meta.usage if meta else None
+        self.trace.log(
+            "llm_response",
+            turn=self._turn_count,
+            iteration=self._iteration_count,
+            duration=meta.duration if meta else None,
+            ttft=meta.ttft if meta else None,
+            finish_reason=meta.finish_reason if meta else None,
+            usage=usage,
+            cached_tokens=_extract_cached_tokens(usage),
+            content_chars=len(assistant_content),
+            reasoning_chars=len(assistant_reasoning),
+            tool_calls=[
+                {"id": tc["id"], "name": tc["function"]["name"]}
+                for tc in tool_calls
+            ],
+        )
 
         self.messages.append(
             Message(

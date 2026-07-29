@@ -12,6 +12,7 @@ from limbo.sessions import (
     AmbiguousSessionError,
     SessionMeta,
     SessionNotFoundError,
+    export_jsonl,
     export_markdown,
     find_session,
     latest_session,
@@ -19,6 +20,7 @@ from limbo.sessions import (
     load_session,
     save_session,
 )
+from limbo.trace import TraceLogger
 
 
 def make_meta(**overrides) -> SessionMeta:
@@ -210,3 +212,65 @@ def test_export_markdown(tmp_path: Path):
     # system prompt and raw tool outputs are not exported
     assert "sys" not in text
     assert "tool output" not in text
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    return [
+        json.loads(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
+def test_export_jsonl_merges_trace_and_snapshot(tmp_path: Path):
+    meta = make_meta(title="Fix the bug")
+    messages = make_messages()
+    trace_path = tmp_path / "s.trace.jsonl"
+    logger = TraceLogger(trace_path)
+    logger.log("session_start", session_id=meta.id)
+    logger.log("llm_request", turn=1, iteration=1, body={"model": "m"})
+    logger.log("tool_result", turn=1, name="read", success=True)
+    logger.close()
+    out = tmp_path / "export.jsonl"
+
+    export_jsonl(meta, messages, out, trace_path=trace_path)
+
+    records = _read_jsonl(out)
+    assert records[0]["type"] == "meta"
+    assert records[0]["id"] == meta.id
+    assert "exported_at" in records[0]
+    # Trace records follow in chronological order.
+    assert [r["type"] for r in records[1:4]] == [
+        "session_start",
+        "llm_request",
+        "tool_result",
+    ]
+    assert records[2]["body"] == {"model": "m"}
+    # Final record is the message snapshot.
+    snapshot = records[-1]
+    assert snapshot["type"] == "messages_snapshot"
+    assert snapshot["count"] == len(messages)
+    assert snapshot["messages"][1]["content"] == "hello world"
+
+
+def test_export_jsonl_without_trace_falls_back_to_messages(tmp_path: Path):
+    meta = make_meta()
+    messages = make_messages()
+    out = tmp_path / "export.jsonl"
+
+    export_jsonl(meta, messages, out, trace_path=tmp_path / "missing.jsonl")
+
+    records = _read_jsonl(out)
+    assert records[0]["type"] == "meta"
+    # Raw messages stand in for the missing trace.
+    assert records[1]["role"] == "system"
+    assert records[-1]["type"] == "messages_snapshot"
+
+
+def test_export_jsonl_every_line_is_valid_json(tmp_path: Path):
+    meta = make_meta()
+    out = tmp_path / "export.jsonl"
+    export_jsonl(meta, make_messages(), out, trace_path=None)
+
+    # _read_jsonl raises on any malformed line.
+    assert len(_read_jsonl(out)) >= 2

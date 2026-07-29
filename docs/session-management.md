@@ -16,7 +16,7 @@
 | P0 | 会话元数据（meta 行） | ✅ |
 | P1 | `/sessions` 选择器（TUI） | ✅ |
 | P1 | 自动标题（首条用户消息截断） | ✅ |
-| P1 | `/export` 导出 Markdown | ✅ |
+| P1 | `/export` 导出 Markdown / JSONL 全量日志 | ✅ |
 | P1 | `/new` 开始新会话 | ✅ |
 | P2 | `/fork` 会话分叉 | ⬜ 未实现 |
 | P2 | prune 清理旧会话 | ⬜ 未实现 |
@@ -49,7 +49,9 @@ src/limbo/
 │     ├── list_sessions(dir, workdir=None) -> list[SessionMeta]   # updated_at 倒序
 │     ├── latest_session(dir, workdir=None) -> Path | None
 │     ├── find_session(dir, id_prefix) -> Path                    # 前缀匹配，歧义报错
-│     └── export_markdown(meta, messages, path)
+│     ├── export_markdown(meta, messages, path)
+│     └── export_jsonl(meta, messages, path, trace_path=None)     # 合并 trace 的全量导出
+├── trace.py                     # TraceLogger：追加式 JSONL 全链路日志（traces/ 子目录）
 ├── agent.py                     # Agent(config, llm_client, workdir, session_dir, resume=path)
 ├── app.py                       # --continue / --resume [ID]
 └── ui/
@@ -82,11 +84,36 @@ Esc 关闭），不发往 LLM，走命令路由：
 |------|------|
 | `/sessions` | 弹出会话选择器，Enter 切换，Esc 取消 |
 | `/new` | 清空当前对话，开始新会话（新文件） |
-| `/export [path]` | 导出当前会话为 Markdown（默认 `~/.limbo/exports/<id>.md`） |
+| `/export [path]` | 导出会话日志：默认 JSONL 全量日志（`~/.limbo/exports/<id>.jsonl`，含完整 LLM 请求体、token 用量、工具执行、确认决策、报错）；路径以 `.md` 结尾时导出 Markdown |
 | `/help` | 显示命令列表 |
 
 切换会话时聊天区重绘：user / assistant 文本原样渲染，历史 tool 消息
 以 info 行省略提示（不重建工具卡片）。
+
+## Trace 全链路日志
+
+每次运行期间，Agent 会把完整执行过程追加写入
+`~/.limbo/sessions/traces/<session_id>.trace.jsonl`（独立于会话文件，
+append-only，崩溃/打断最多丢失写入中的一条）。`/export` 默认把 meta +
+全部 trace 记录 + 最终消息快照合并导出为单个 JSONL。
+
+每行一个 JSON 记录，公共字段：`ts`（ISO 毫秒）、`type`。记录类型：
+
+| type | 关键字段 |
+|------|---------|
+| `session_start` | config 快照（不含 api_key）、limbo/python 版本、是否 resume |
+| `user_message` | `turn`、`content` |
+| `llm_request` | `turn`、`iteration`、`body`（完整请求体：messages 含 system prompt、tools、所有参数） |
+| `llm_response` | `duration`、`ttft`、`finish_reason`、`usage`（原始用量，含 provider 缓存字段）、`cached_tokens`（归一化缓存命中）、content/reasoning 长度、tool_calls 摘要 |
+| `llm_error` | `exception_type`、`error`、`traceback` |
+| `tool_call` / `tool_result` | `id`、`name`、`arguments`、`dry_run`、`success`、`output`/`error`、耗时；崩溃时带 `exception_type` + `traceback` |
+| `confirmation` | `decision`（approved / rejected / timeout / superseded）、`wait`（等待秒数） |
+| `error` | `kind`（如 max_iterations、invalid_continuation）、`message` |
+| `turn_end` | `iterations`、`duration`、`status`（completed / awaiting_confirmation） |
+| `session_save_error` | `error` |
+
+导出文件布局：`meta` 行 → trace 记录（按时间序；trace 缺失时退化为原始
+消息）→ `messages_snapshot`（持久化后的完整消息历史，含占位/拒绝记录）。
 
 ## 测试接缝（seams）
 

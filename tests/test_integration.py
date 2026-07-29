@@ -9,7 +9,7 @@ class FakeLLM:
     def __init__(self, responses):
         self.responses = responses
 
-    async def chat(self, messages, tools):
+    async def chat(self, messages, tools, on_request=None):
         for event in self.responses.pop(0):
             yield event
 

@@ -19,7 +19,7 @@ class FakeLLMClient:
         self.responses = list(responses or [])
         self.calls = []
 
-    async def chat(self, messages, tools):
+    async def chat(self, messages, tools, on_request=None):
         self.calls.append(list(messages))  # snapshot; the agent mutates its list
         if self.responses:
             for event in self.responses.pop(0):

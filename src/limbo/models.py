@@ -61,4 +61,22 @@ class ToolCallEvent:
     arguments: dict[str, Any]
 
 
-LLMEvent = TextChunk | ThinkingChunk | ToolCallEvent
+@dataclass(frozen=True)
+class CompletionMeta:
+    """Response-level metadata emitted once per LLM call, after all chunks.
+
+    Carries whatever the provider returned: token usage (including cache-hit
+    counters where the provider exposes them), the finish/stop reason, and
+    client-measured timing. All fields may be None — providers differ widely
+    in what they report.
+    """
+
+    usage: dict[str, Any] | None = None
+    finish_reason: str | None = None
+    # Seconds from request start to the first streamed chunk.
+    ttft: float | None = None
+    # Seconds from request start to the end of the stream.
+    duration: float | None = None
+
+
+LLMEvent = TextChunk | ThinkingChunk | ToolCallEvent | CompletionMeta

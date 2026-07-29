@@ -16,7 +16,8 @@ from limbo.agent import (
     ToolResultEvent,
 )
 from limbo.config import Config
-from limbo.models import Message, TextChunk, ToolCallEvent
+from limbo.models import CompletionMeta, Message, TextChunk, ToolCallEvent
+from limbo.trace import read_trace
 
 
 @pytest.fixture
@@ -29,8 +30,16 @@ class FakeLLMClient:
         self.responses = responses
         self.calls = []
 
-    async def chat(self, messages, tools):
+    async def chat(self, messages, tools, on_request=None):
         self.calls.append((messages, tools))
+        if on_request is not None:
+            on_request(
+                {
+                    "model": "fake-model",
+                    "messages": [m.model_dump() for m in messages],
+                    "tools": tools,
+                }
+            )
         for event in self.responses.pop(0):
             yield event
 
@@ -240,7 +249,7 @@ async def test_agent_saves_session(workdir):
     await _collect(agent.run("hi"))
 
     assert session_dir.exists()
-    files = list(session_dir.iterdir())
+    files = list(session_dir.glob("*.jsonl"))
     assert len(files) == 1
     lines = files[0].read_text().strip().splitlines()
     assert len(lines) >= 2
@@ -271,7 +280,7 @@ async def test_agent_save_session_failure_is_ignored(workdir):
 @pytest.mark.asyncio
 async def test_agent_error_event_on_llm_failure(workdir):
     class FailingLLMClient:
-        async def chat(self, messages, tools):
+        async def chat(self, messages, tools, on_request=None):
             raise RuntimeError("network down")
             if False:
                 yield TextChunk(text="")
@@ -738,7 +747,7 @@ async def test_agent_rewrites_session_on_subsequent_turns(workdir):
     await _collect(agent.run("turn one"))
     await _collect(agent.run("turn two"))
 
-    files = list(session_dir.iterdir())
+    files = list(session_dir.glob("*.jsonl"))
     assert len(files) == 1
     lines = files[0].read_text().strip().splitlines()
     roles = [
@@ -765,7 +774,7 @@ async def test_agent_session_rewrite_replaces_placeholder(workdir):
     )
 
     await _collect(agent.run("write x.txt"))
-    session_file = next(iter(session_dir.iterdir()))
+    session_file = next(session_dir.glob("*.jsonl"))
     lines_before = session_file.read_text().strip().splitlines()
     placeholder_line = next(
         line for line in lines_before if json.loads(line).get("tool_call_id") == "c1"
@@ -1012,3 +1021,205 @@ async def test_agent_stores_reasoning_on_assistant_message(workdir):
     assert last.role == "assistant"
     assert last.reasoning == "hmm thinking"
     assert last.content == "answer"
+
+
+# --- trace logging -------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_agent_trace_records_full_turn(workdir):
+    (workdir / "main.py").write_text("x = 1\n")
+    usage = {
+        "prompt_tokens": 100,
+        "completion_tokens": 10,
+        "total_tokens": 110,
+        "prompt_cache_hit_tokens": 80,
+        "prompt_cache_miss_tokens": 20,
+    }
+    fake_llm = FakeLLMClient([
+        [
+            CompletionMeta(
+                usage=usage, finish_reason="tool_calls", ttft=0.01, duration=0.5
+            ),
+            ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"}),
+        ],
+        [TextChunk(text="done")],
+    ])
+    agent = Agent(
+        config=Config(),
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    await _collect(agent.run("read main.py"))
+
+    records = read_trace(agent.trace.path)
+    types = [r["type"] for r in records]
+    assert types == [
+        "session_start",
+        "user_message",
+        "llm_request",
+        "llm_response",
+        "tool_call",
+        "tool_result",
+        "llm_request",
+        "llm_response",
+        "turn_end",
+    ]
+
+    start = records[0]
+    assert start["config"]["model"] == "deepseek-chat"
+    assert start["resumed"] is False
+    # The API key must never appear in the trace.
+    assert "api_key" not in json.dumps(records)
+
+    assert records[1]["content"] == "read main.py"
+
+    request = records[2]
+    assert request["turn"] == 1 and request["iteration"] == 1
+    assert request["body"]["model"] == "fake-model"
+    assert request["body"]["messages"][0]["role"] == "system"
+    assert request["body"]["tools"]  # full tool definitions included
+
+    response = records[3]
+    assert response["usage"] == usage
+    assert response["cached_tokens"] == 80
+    assert response["finish_reason"] == "tool_calls"
+    assert response["tool_calls"] == [{"id": "c1", "name": "read"}]
+
+    tool_call, tool_result = records[4], records[5]
+    assert tool_call["name"] == "read"
+    assert tool_call["arguments"] == {"path": "main.py"}
+    assert tool_call["dry_run"] is True
+    assert tool_result["success"] is True
+    assert tool_result["duration"] >= 0
+    assert "x = 1" in tool_result["output"]
+
+    turn_end = records[-1]
+    assert turn_end["status"] == "completed"
+    assert turn_end["iterations"] == 2
+
+
+@pytest.mark.asyncio
+async def test_agent_trace_records_confirmation_decisions(workdir):
+    fake_llm = FakeLLMClient([
+        [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
+    ])
+    agent = Agent(
+        config=Config(),
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    await _collect(agent.run("write x.txt"))
+
+    result = await agent.apply_tool("write", {"path": "x.txt", "content": "hi"})
+    assert result.success is True
+
+    records = read_trace(agent.trace.path)
+    confirmation = next(r for r in records if r["type"] == "confirmation")
+    assert confirmation["decision"] == "approved"
+    assert confirmation["tool_call_id"] == "c1"
+    assert confirmation["wait"] is not None
+    # The real (non-dry-run) execution is logged too.
+    wet_run = next(
+        r
+        for r in records
+        if r["type"] == "tool_result" and r["dry_run"] is False
+    )
+    assert wet_run["success"] is True
+
+
+@pytest.mark.asyncio
+async def test_agent_trace_records_rejection_and_supersede(workdir):
+    fake_llm = FakeLLMClient([
+        [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
+        [ToolCallEvent(id="c2", name="write", arguments={"path": "y.txt", "content": "hi"})],
+        [TextChunk(text="ok")],
+    ])
+    agent = Agent(
+        config=Config(),
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    await _collect(agent.run("write x.txt"))
+    agent.reject_pending_tool()
+
+    await _collect(agent.run("write y.txt"))
+    # Starting a new turn with a pending tool supersedes it.
+    await _collect(agent.run("third"))
+
+    records = read_trace(agent.trace.path)
+    decisions = [r["decision"] for r in records if r["type"] == "confirmation"]
+    assert decisions == ["rejected", "superseded"]
+
+
+@pytest.mark.asyncio
+async def test_agent_trace_records_llm_error(workdir):
+    class FailingLLMClient:
+        async def chat(self, messages, tools, on_request=None):
+            raise RuntimeError("network down")
+            if False:
+                yield TextChunk(text="")
+
+    agent = Agent(
+        config=Config(),
+        llm_client=FailingLLMClient(),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    await _collect(agent.run("hi"))
+
+    records = read_trace(agent.trace.path)
+    error = next(r for r in records if r["type"] == "llm_error")
+    assert error["exception_type"] == "RuntimeError"
+    assert "network down" in error["error"]
+    assert "network down" in error["traceback"]
+
+
+@pytest.mark.asyncio
+async def test_agent_trace_records_tool_crash(workdir):
+    fake_llm = FakeLLMClient([
+        [ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"})],
+    ])
+    agent = Agent(
+        config=Config(),
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    async def crashing_execute(name, arguments, dry_run=False):
+        raise RuntimeError("tool exploded")
+
+    agent.registry.execute = crashing_execute
+    await _collect(agent.run("read main.py"))
+
+    records = read_trace(agent.trace.path)
+    result = next(r for r in records if r["type"] == "tool_result")
+    assert result["success"] is False
+    assert result["exception_type"] == "RuntimeError"
+    assert "tool exploded" in result["traceback"]
+
+
+@pytest.mark.asyncio
+async def test_agent_trace_file_does_not_pollute_session_listing(workdir):
+    from limbo.sessions import find_session, list_sessions
+
+    session_dir = workdir / "sessions"
+    agent = Agent(
+        config=Config(),
+        llm_client=FakeLLMClient([[TextChunk(text="hi")]]),
+        workdir=workdir,
+        session_dir=session_dir,
+    )
+    await _collect(agent.run("hello"))
+
+    assert agent.trace.path.parent.name == "traces"
+    assert agent.trace.path.exists()
+    sessions = list_sessions(session_dir)
+    assert len(sessions) == 1
+    # find_session must not see the trace file as an ambiguous match.
+    assert find_session(session_dir, agent.session_id) == agent._session_file

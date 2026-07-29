@@ -7,7 +7,7 @@ from httpx import Response
 
 from limbo.config import Config
 from limbo.llm.openai_client import OpenAICompatibleClient, _message_to_openai
-from limbo.models import Message, TextChunk, ThinkingChunk, ToolCallEvent
+from limbo.models import CompletionMeta, Message, TextChunk, ThinkingChunk, ToolCallEvent
 
 
 @pytest.fixture
@@ -286,3 +286,98 @@ def test_message_to_openai_omits_reasoning_by_default():
 def test_config_max_tokens_overrides_catalog(kimi_client):
     kimi_client.config.llm.max_tokens = 4096
     assert (kimi_client.config.llm.max_tokens or kimi_client.spec.max_tokens) == 4096
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_client_captures_usage_and_completion_meta(client):
+    stream = (
+        'data: {"id":"1","object":"chat.completion.chunk",'
+        '"choices":[{"delta":{"content":"hi"}}]}\n\n'
+        'data: {"id":"2","object":"chat.completion.chunk",'
+        '"choices":[{"delta":{},"finish_reason":"stop"}]}\n\n'
+        'data: {"id":"3","object":"chat.completion.chunk","choices":[],'
+        '"usage":{"prompt_tokens":10,"completion_tokens":2,"total_tokens":12,'
+        '"prompt_cache_hit_tokens":8,"prompt_cache_miss_tokens":2}}\n\n'
+        "data: [DONE]\n\n"
+    )
+    route = respx.post("https://api.test.com/v1/chat/completions").mock(
+        return_value=_sse_response(stream)
+    )
+
+    events = await _collect(client.chat([Message(role="user", content="hi")], tools=[]))
+
+    meta = next(e for e in events if isinstance(e, CompletionMeta))
+    assert meta.usage is not None
+    assert meta.usage["prompt_tokens"] == 10
+    # Provider extras (DeepSeek cache counters) survive the round trip.
+    assert meta.usage["prompt_cache_hit_tokens"] == 8
+    assert meta.finish_reason == "stop"
+    assert meta.ttft is not None
+    assert meta.duration is not None
+    # Usage was requested via stream_options.
+    body = json.loads(route.calls.last.request.content)
+    assert body["stream_options"] == {"include_usage": True}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_client_reports_request_body_via_hook(client):
+    respx.post("https://api.test.com/v1/chat/completions").mock(
+        return_value=_sse_response(
+            'data: {"choices":[{"delta":{"content":"hi"}}]}\n\ndata: [DONE]\n\n'
+        )
+    )
+    bodies = []
+    tools = [
+        {
+            "type": "function",
+            "function": {"name": "read", "description": "Read", "parameters": {}},
+        }
+    ]
+
+    await _collect(
+        client.chat(
+            [Message(role="user", content="hi")], tools=tools, on_request=bodies.append
+        )
+    )
+
+    assert len(bodies) == 1
+    body = bodies[0]
+    assert body["model"] == "deepseek-chat"
+    assert body["messages"] == [{"role": "user", "content": "hi"}]
+    assert body["tools"] == tools
+    assert body["stream"] is True
+    assert "temperature" in body and "max_tokens" in body
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_client_retries_without_stream_options_when_rejected(client):
+    ok_stream = (
+        'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+    route = respx.post("https://api.test.com/v1/chat/completions").mock(
+        side_effect=[
+            Response(
+                400,
+                json={
+                    "error": {
+                        "message": "Unknown parameter: stream_options",
+                        "type": "invalid_request_error",
+                    }
+                },
+            ),
+            _sse_response(ok_stream),
+        ]
+    )
+
+    events = await _collect(client.chat([Message(role="user", content="hi")], tools=[]))
+
+    assert route.call_count == 2
+    assert "".join(e.text for e in events if isinstance(e, TextChunk)) == "hi"
+    second_body = json.loads(route.calls[1].request.content)
+    assert "stream_options" not in second_body
+    # The client stops asking for usage on subsequent requests.
+    assert client._include_usage is False

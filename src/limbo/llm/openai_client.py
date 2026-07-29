@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import time
 import warnings
 from collections.abc import AsyncIterator
 from typing import Any
 
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, BadRequestError
 
 from limbo.config import Config
 from limbo.llm.catalog import (
@@ -16,7 +17,15 @@ from limbo.llm.catalog import (
     resolve_base_url,
     resolve_model,
 )
-from limbo.models import LLMEvent, Message, TextChunk, ThinkingChunk, ToolCallEvent
+from limbo.llm.client import RequestHook
+from limbo.models import (
+    CompletionMeta,
+    LLMEvent,
+    Message,
+    TextChunk,
+    ThinkingChunk,
+    ToolCallEvent,
+)
 
 
 class OpenAICompatibleClient:
@@ -32,6 +41,9 @@ class OpenAICompatibleClient:
         self.config = config
         self.spec: ModelSpec = resolve_model(config.llm.model)
         self._client: AsyncOpenAI | None = None
+        # Whether to ask for streamed token usage. Disabled permanently after
+        # a provider rejects the stream_options parameter.
+        self._include_usage = True
 
     @property
     def client(self) -> AsyncOpenAI:
@@ -90,6 +102,7 @@ class OpenAICompatibleClient:
         self,
         messages: list[Message],
         tools: list[dict[str, Any]],
+        on_request: RequestHook | None = None,
     ) -> AsyncIterator[LLMEvent]:
         include_reasoning = self.spec.requires_reasoning_content
         request_messages = [
@@ -112,13 +125,40 @@ class OpenAICompatibleClient:
             kwargs.update(thinking)
         if tools:
             kwargs["tools"] = tools
+        if self._include_usage:
+            kwargs["stream_options"] = {"include_usage": True}
 
-        stream = await self.client.chat.completions.create(**kwargs)
+        start = time.monotonic()
+        try:
+            stream = await self._create(kwargs, on_request)
+        except BadRequestError as e:
+            # Some providers reject stream_options; retry once without it and
+            # stop asking for usage on later requests.
+            if not self._include_usage or not _is_stream_options_error(e):
+                raise
+            self._include_usage = False
+            kwargs.pop("stream_options", None)
+            stream = await self._create(kwargs, on_request)
 
+        usage: dict[str, Any] | None = None
+        finish_reason: str | None = None
+        ttft: float | None = None
         active_calls: dict[int, dict[str, Any]] = {}
         async for chunk in stream:
+            if ttft is None:
+                ttft = time.monotonic() - start
+            if chunk.usage is not None:
+                # The final chunk carries usage when include_usage is on.
+                # model_dump keeps provider extras such as DeepSeek's
+                # prompt_cache_hit_tokens / prompt_cache_miss_tokens.
+                try:
+                    usage = chunk.usage.model_dump()
+                except Exception:  # noqa: BLE001
+                    usage = {"raw": str(chunk.usage)}
             if not chunk.choices:
                 continue
+            if chunk.choices[0].finish_reason:
+                finish_reason = chunk.choices[0].finish_reason
             delta = chunk.choices[0].delta
             # Reasoning models stream thinking in a separate field; the name
             # varies by provider (Moonshot/DeepSeek: reasoning_content).
@@ -166,6 +206,26 @@ class OpenAICompatibleClient:
                 name=call["name"],
                 arguments=args,
             )
+
+        yield CompletionMeta(
+            usage=usage,
+            finish_reason=finish_reason,
+            ttft=ttft,
+            duration=time.monotonic() - start,
+        )
+
+    async def _create(
+        self, kwargs: dict[str, Any], on_request: RequestHook | None
+    ):
+        """Fire one HTTP attempt, reporting the exact body via the hook."""
+        if on_request is not None:
+            on_request(kwargs)
+        return await self.client.chat.completions.create(**kwargs)
+
+
+def _is_stream_options_error(error: BadRequestError) -> bool:
+    message = str(error).lower()
+    return "stream_options" in message or "include_usage" in message
 
 
 def _message_to_openai(

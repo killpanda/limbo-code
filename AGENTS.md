@@ -25,6 +25,7 @@ src/limbo/
 ├── agent.py                # Conversation loop: orchestrates LLM + tools, handles confirmation
 ├── history.py              # ToolHistory: tool_call ↔ tool-result pairing bookkeeping + resume repair
 ├── sessions.py             # Session storage: save/load/list/find/export (meta line + JSONL messages)
+├── trace.py                # TraceLogger: append-only JSONL run log (traces/ subdir) for full-fidelity analysis
 ├── skills.py               # Skill discovery: scan SKILL.md dirs (user + project), parse frontmatter
 ├── llm/
 │   ├── client.py           # LLMClient Protocol
@@ -80,6 +81,7 @@ tests/
 8. **User rejects** → `Agent.reject_pending_tool()` replaces placeholder with rejection message
 9. **Loop continues** until LLM produces final text or `max_iterations` is hit
 10. **Session saved** as JSONL (meta line + messages) to `~/.limbo/sessions/`
+11. **Trace appended** throughout the run to `~/.limbo/sessions/traces/<id>.trace.jsonl` — full LLM request bodies, token usage (incl. cache hits), tool timing, confirmation decisions, errors. `/export` merges meta + trace + message snapshot into one JSONL
 
 ## AgentLoop Details
 

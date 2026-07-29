@@ -17,7 +17,7 @@ class FakeLLMClient:
     def __init__(self, responses):
         self.responses = responses
 
-    async def chat(self, messages, tools):
+    async def chat(self, messages, tools, on_request=None):
         for event in self.responses.pop(0):
             yield event
 
@@ -83,7 +83,7 @@ async def test_confirm_dialog_rejects_tool(tmp_path):
 @pytest.mark.asyncio
 async def test_error_event_is_shown(tmp_path):
     class ErrorLLMClient:
-        async def chat(self, messages, tools):
+        async def chat(self, messages, tools, on_request=None):
             raise RuntimeError("boom")
             if False:
                 yield TextChunk(text="")
@@ -149,7 +149,7 @@ async def test_confirm_dialog_disables_input(tmp_path):
         def __init__(self):
             self.first = True
 
-        async def chat(self, messages, tools):
+        async def chat(self, messages, tools, on_request=None):
             if self.first:
                 self.first = False
                 yield ToolCallEvent(
@@ -331,7 +331,7 @@ async def test_input_disabled_during_streaming(tmp_path):
     hold = asyncio.Event()
 
     class HoldingLLMClient:
-        async def chat(self, messages, tools):
+        async def chat(self, messages, tools, on_request=None):
             yield TextChunk(text="hello")
             await hold.wait()
             yield TextChunk(text=" world")

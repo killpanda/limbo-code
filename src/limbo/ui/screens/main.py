@@ -23,7 +23,7 @@ from limbo.agent import (
 from limbo.config import Config
 from limbo.llm.client import LLMClient
 from limbo.llm.factory import create_llm_client
-from limbo.sessions import derive_title, export_markdown, list_sessions
+from limbo.sessions import derive_title, export_jsonl, export_markdown, list_sessions
 from limbo.skills import Skill, discover_skills
 from limbo.ui.commands import SlashCommand, SlashCommandRegistry
 from limbo.ui.screens.game2048 import Game2048Screen
@@ -190,7 +190,7 @@ class MainScreen(Screen[None]):
         self._commands.register(
             SlashCommand(
                 "/export",
-                "导出会话为 Markdown [path]",
+                "导出会话日志（默认 JSONL，路径以 .md 结尾则导出 Markdown）[path]",
                 takes_args=True,
                 handler=lambda arg: self._export_session(arg),
             )
@@ -295,10 +295,15 @@ class MainScreen(Screen[None]):
             out = Path(arg).expanduser()
         else:
             out = (
-                Path.home() / ".limbo" / "exports" / f"{self.agent.session_id}.md"
+                Path.home() / ".limbo" / "exports" / f"{self.agent.session_id}.jsonl"
             )
         try:
-            export_markdown(meta, self.agent.messages, out)
+            if out.suffix == ".md":
+                export_markdown(meta, self.agent.messages, out)
+            else:
+                export_jsonl(
+                    meta, self.agent.messages, out, trace_path=self.agent.trace.path
+                )
         except OSError as e:
             chat.add_error(f"导出失败：{e}")
             return
@@ -419,7 +424,7 @@ class MainScreen(Screen[None]):
                 card.set_rejected()
                 dialog.dismiss()
                 input_widget.disabled = False
-                self.agent.reject_pending_tool()
+                self.agent.reject_pending_tool(decision="timeout")
                 return
 
             if self._confirmation_result:

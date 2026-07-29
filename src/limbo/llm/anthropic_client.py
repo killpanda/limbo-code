@@ -17,6 +17,7 @@ Conventions follow pi's anthropic-messages provider:
 from __future__ import annotations
 
 import json
+import time
 import warnings
 from collections.abc import AsyncIterator
 from typing import Any
@@ -30,7 +31,15 @@ from limbo.llm.catalog import (
     resolve_base_url,
     resolve_model,
 )
-from limbo.models import LLMEvent, Message, TextChunk, ThinkingChunk, ToolCallEvent
+from limbo.llm.client import RequestHook
+from limbo.models import (
+    CompletionMeta,
+    LLMEvent,
+    Message,
+    TextChunk,
+    ThinkingChunk,
+    ToolCallEvent,
+)
 
 ANTHROPIC_VERSION = "2023-06-01"
 
@@ -121,8 +130,15 @@ class AnthropicMessagesClient:
         self,
         messages: list[Message],
         tools: list[dict[str, Any]],
+        on_request: RequestHook | None = None,
     ) -> AsyncIterator[LLMEvent]:
         body = self._build_body(messages, tools)
+        if on_request is not None:
+            on_request(body)
+        start = time.monotonic()
+        ttft: float | None = None
+        usage: dict[str, Any] = {}
+        finish_reason: str | None = None
         async with self.client.stream("POST", "/v1/messages", json=body) as resp:
             if resp.status_code != 200:
                 error_body = (await resp.aread()).decode("utf-8", "replace")
@@ -131,8 +147,23 @@ class AnthropicMessagesClient:
             # Tool-use blocks accumulate streamed partial JSON by index.
             tool_blocks: dict[int, dict[str, Any]] = {}
             async for event in _iter_sse(resp):
+                if ttft is None:
+                    ttft = time.monotonic() - start
                 event_type = event.get("type")
-                if event_type == "content_block_start":
+                if event_type == "message_start":
+                    # usage here carries input tokens, incl. Anthropic cache
+                    # counters (cache_read_input_tokens = cache hits).
+                    message_usage = event.get("message", {}).get("usage")
+                    if isinstance(message_usage, dict):
+                        usage.update(message_usage)
+                elif event_type == "message_delta":
+                    delta_usage = event.get("usage")
+                    if isinstance(delta_usage, dict):
+                        usage.update(delta_usage)
+                    stop = event.get("delta", {}).get("stop_reason")
+                    if stop:
+                        finish_reason = stop
+                elif event_type == "content_block_start":
                     block = event.get("content_block", {})
                     if block.get("type") == "tool_use":
                         tool_blocks[event["index"]] = {
@@ -170,6 +201,13 @@ class AnthropicMessagesClient:
             # agent loop can surface the (possibly partial) call.
             for index in sorted(tool_blocks):
                 yield _tool_call_event(tool_blocks[index])
+
+        yield CompletionMeta(
+            usage=usage or None,
+            finish_reason=finish_reason,
+            ttft=ttft,
+            duration=time.monotonic() - start,
+        )
 
 
 def _tool_call_event(block: dict[str, Any]) -> ToolCallEvent:

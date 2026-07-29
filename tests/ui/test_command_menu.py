@@ -18,7 +18,7 @@ class FakeLLMClient:
         self.responses = list(responses or [])
         self.calls = 0
 
-    async def chat(self, messages, tools):
+    async def chat(self, messages, tools, on_request=None):
         self.calls += 1
         if self.responses:
             for event in self.responses.pop(0):

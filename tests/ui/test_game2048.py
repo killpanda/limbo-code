@@ -162,7 +162,7 @@ class FakeLLMClient:
         self.gate = gate
         self.calls = 0
 
-    async def chat(self, messages, tools):
+    async def chat(self, messages, tools, on_request=None):
         self.calls += 1
         if self.gate is not None:
             await self.gate.wait()
