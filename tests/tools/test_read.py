@@ -138,12 +138,25 @@ def test_read_symlink_loop_returns_invalid_path(workdir):
 
 def test_read_truncates_output_by_byte_budget(workdir):
     """Multi-byte characters count against the byte budget, not character count."""
-    (workdir / "big.txt").write_text("é" * (600 * 1024))
+    (workdir / "big.txt").write_text("é" * (60 * 1024))  # 120 KB of UTF-8 bytes
     tool = ReadTool(workdir=workdir)
     result = tool.execute({"path": "big.txt"})
     assert result.success is True
-    assert len(result.output.encode("utf-8")) <= 512 * 1024 + 100
+    assert len(result.output.encode("utf-8")) <= 50 * 1024 + 200
     assert "truncated" in result.output.lower()
+    assert "Use offset/limit to read more" in result.output
+
+
+def test_read_truncates_output_by_line_budget(workdir):
+    """Head truncation keeps the first 2000 lines and reports the total."""
+    (workdir / "lines.txt").write_text("\n".join(f"line-{i}" for i in range(1, 3001)))
+    tool = ReadTool(workdir=workdir)
+    result = tool.execute({"path": "lines.txt"})
+    assert result.success is True
+    assert "line-2000" in result.output
+    assert "line-2001" not in result.output
+    assert "showing lines 1-2000 of 3000" in result.output
+    assert "Use offset/limit to read more" in result.output
 
 
 def test_read_rejects_files_above_max_size(workdir):

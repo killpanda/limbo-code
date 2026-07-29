@@ -8,12 +8,18 @@ and the output truncation policy.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from limbo.models import ToolResult
 
 MAX_OUTPUT_BYTES = 512 * 1024
+
+# Dual-threshold truncation limits (whichever is hit first wins), aligned
+# with pi's DEFAULT_MAX_LINES / DEFAULT_MAX_BYTES.
+DEFAULT_MAX_LINES = 2000
+DEFAULT_MAX_BYTES = 50 * 1024  # 50 KB
 
 
 class ToolError(Exception):
@@ -100,3 +106,162 @@ def truncate_output(
     if len(encoded) <= limit:
         return output
     return encoded[:limit].decode("utf-8", errors="replace") + suffix
+
+
+@dataclass(frozen=True)
+class TruncationResult:
+    """Structured result of ``truncate_head`` / ``truncate_tail``."""
+
+    content: str
+    truncated: bool
+    truncated_by: str | None  # "lines" | "bytes" | None
+    total_lines: int
+    total_bytes: int
+    output_lines: int
+    start_line: int  # 1-indexed first kept line (>1 only for tail truncation)
+    edge_line_partial: bool  # the single kept edge line was byte-truncated
+
+
+def _byte_len(text: str) -> int:
+    return len(text.encode("utf-8", errors="replace"))
+
+
+def _split_lines(content: str) -> list[str]:
+    """Split into lines without keeping separators; trailing newline ignored."""
+    lines = content.split("\n")
+    if content.endswith("\n"):
+        lines.pop()
+    return lines
+
+
+def _head_bytes(text: str, max_bytes: int) -> str:
+    """UTF-8-safe byte-prefix of ``text`` fitting ``max_bytes``."""
+    return text.encode("utf-8", errors="replace")[:max_bytes].decode(
+        "utf-8", errors="replace"
+    )
+
+
+def _tail_bytes(text: str, max_bytes: int) -> str:
+    """UTF-8-safe byte-suffix of ``text`` fitting ``max_bytes``."""
+    encoded = text.encode("utf-8", errors="replace")
+    if len(encoded) <= max_bytes:
+        return text
+    start = len(encoded) - max_bytes
+    while start < len(encoded) and (encoded[start] & 0xC0) == 0x80:
+        start += 1
+    return encoded[start:].decode("utf-8", errors="replace")
+
+
+def truncate_head(
+    content: str,
+    *,
+    max_lines: int = DEFAULT_MAX_LINES,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+) -> TruncationResult:
+    """Keep the first ``max_lines``/``max_bytes`` of ``content`` (file reads).
+
+    Never returns partial lines, except when the very first line alone
+    exceeds ``max_bytes`` — then a byte-prefix of that line is kept and
+    ``edge_line_partial`` is set.
+    """
+    total_bytes = _byte_len(content)
+    lines = _split_lines(content)
+    total_lines = len(lines)
+    if total_lines <= max_lines and total_bytes <= max_bytes:
+        return TruncationResult(
+            content=content,
+            truncated=False,
+            truncated_by=None,
+            total_lines=total_lines,
+            total_bytes=total_bytes,
+            output_lines=total_lines,
+            start_line=1,
+            edge_line_partial=False,
+        )
+
+    kept: list[str] = []
+    kept_bytes = 0
+    truncated_by = "lines"
+    partial = False
+    for line in lines:
+        if len(kept) >= max_lines:
+            break
+        # +1 for the newline joining this line to the previous kept one.
+        line_bytes = _byte_len(line) + (1 if kept else 0)
+        if kept_bytes + line_bytes > max_bytes:
+            truncated_by = "bytes"
+            if not kept:
+                kept.append(_head_bytes(line, max_bytes))
+                partial = True
+            break
+        kept.append(line)
+        kept_bytes += line_bytes
+
+    return TruncationResult(
+        content="\n".join(kept),
+        truncated=True,
+        truncated_by=truncated_by,
+        total_lines=total_lines,
+        total_bytes=total_bytes,
+        output_lines=len(kept),
+        start_line=1,
+        edge_line_partial=partial,
+    )
+
+
+def truncate_tail(
+    content: str,
+    *,
+    max_lines: int = DEFAULT_MAX_LINES,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+) -> TruncationResult:
+    """Keep the last ``max_lines``/``max_bytes`` of ``content`` (bash output).
+
+    Errors and final results live at the end of command output, so the tail
+    is what the model needs. Never returns partial lines, except when the
+    very last line alone exceeds ``max_bytes`` — then a byte-suffix of that
+    line is kept and ``edge_line_partial`` is set.
+    """
+    total_bytes = _byte_len(content)
+    lines = _split_lines(content)
+    total_lines = len(lines)
+    if total_lines <= max_lines and total_bytes <= max_bytes:
+        return TruncationResult(
+            content=content,
+            truncated=False,
+            truncated_by=None,
+            total_lines=total_lines,
+            total_bytes=total_bytes,
+            output_lines=total_lines,
+            start_line=1,
+            edge_line_partial=False,
+        )
+
+    kept: list[str] = []
+    kept_bytes = 0
+    truncated_by = "lines"
+    partial = False
+    for line in reversed(lines):
+        if len(kept) >= max_lines:
+            break
+        # +1 for the newline joining this line to the next kept one.
+        line_bytes = _byte_len(line) + (1 if kept else 0)
+        if kept_bytes + line_bytes > max_bytes:
+            truncated_by = "bytes"
+            if not kept:
+                kept.insert(0, _tail_bytes(line, max_bytes))
+                partial = True
+            break
+        kept.insert(0, line)
+        kept_bytes += line_bytes
+
+    return TruncationResult(
+        content="\n".join(kept),
+        truncated=True,
+        truncated_by=truncated_by,
+        total_lines=total_lines,
+        total_bytes=total_bytes,
+        output_lines=len(kept),
+        start_line=total_lines - len(kept) + 1,
+        edge_line_partial=partial,
+    )

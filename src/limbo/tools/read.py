@@ -7,15 +7,25 @@ from typing import Any
 
 from limbo.config import DEFAULT_SENSITIVE_FILES
 from limbo.models import ToolResult
-from limbo.tools.base import MAX_OUTPUT_BYTES, BaseTool, ToolError
+from limbo.tools.base import (
+    DEFAULT_MAX_BYTES,
+    DEFAULT_MAX_LINES,
+    BaseTool,
+    ToolError,
+    truncate_head,
+)
 
-MAX_LINES = 2000
 MAX_FILE_SIZE = 10 * 1024 * 1024  # 10 MB
 
 
 class ReadTool(BaseTool):
     name = "read"
-    description = "Read the contents of a file. Use offset/limit for large files."
+    description = (
+        "Read the contents of a file. Output is truncated to the first "
+        f"{DEFAULT_MAX_LINES} lines or {DEFAULT_MAX_BYTES // 1024}KB "
+        "(whichever is hit first). Use offset/limit for large files. "
+        "When you need the full file, continue with offset until complete."
+    )
     parameters = {
         "type": "object",
         "properties": {
@@ -89,17 +99,14 @@ class ReadTool(BaseTool):
         if limit is not None:
             lines = lines[:limit]
 
-        output = "".join(lines)
-        truncated = False
-        encoded = output.encode("utf-8", errors="replace")
-        if len(encoded) > MAX_OUTPUT_BYTES:
-            output = encoded[:MAX_OUTPUT_BYTES].decode("utf-8", errors="replace")
-            truncated = True
-        elif len(lines) > MAX_LINES:
-            output = "".join(lines[:MAX_LINES])
-            truncated = True
-
-        if truncated:
-            output += "\n[Output truncated. Use offset/limit to read more.]"
+        selected = "".join(lines)
+        truncation = truncate_head(selected)
+        output = truncation.content
+        if truncation.truncated:
+            output += (
+                f"\n[Output truncated: showing lines 1-"
+                f"{truncation.output_lines} of {truncation.total_lines}. "
+                f"Use offset/limit to read more.]"
+            )
 
         return ToolResult(success=True, output=output)
