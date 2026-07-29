@@ -24,12 +24,24 @@ class LLMConfig(BaseModel):
     model: str = "deepseek-chat"
     temperature: float = 0.2
     max_iterations: int = 10
+    # Thinking control for reasoning models (e.g. kimi-k3: low|high|max,
+    # deepseek-format Kimi models: on value or "off"). None = provider default.
+    thinking_effort: str | None = None
+    # Per-request output token cap; None = use the model catalog default.
+    max_tokens: int | None = None
 
     @field_validator("max_iterations")
     @classmethod
     def _max_iterations_must_be_positive(cls, value: int) -> int:
         if value < 1:
             raise ValueError("max_iterations must be at least 1")
+        return value
+
+    @field_validator("max_tokens")
+    @classmethod
+    def _max_tokens_must_be_positive(cls, value: int | None) -> int | None:
+        if value is not None and value < 1:
+            raise ValueError("max_tokens must be at least 1")
         return value
 
 

@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from limbo.config import load_config
+from limbo.llm.catalog import resolve_api_key, resolve_model
 from limbo.sessions import (
     AmbiguousSessionError,
     SessionNotFoundError,
@@ -49,10 +50,16 @@ def main() -> int:
     args = parser.parse_args()
 
     config = load_config()
-    if not config.llm.api_key:
+    spec = resolve_model(config.llm.model)
+    if not resolve_api_key(spec, config.llm.api_key):
+        env_hint = (
+            f" or ${spec.provider.api_key_env}"
+            if spec.provider.api_key_env
+            else ""
+        )
         print(
             "Error: No API key configured. Set it in ~/.limbo/config.toml\n"
-            "  [llm]\n  api_key = 'your-key'",
+            f"  [llm]\n  api_key = 'your-key'{env_hint}",
             file=sys.stderr,
         )
         return 1

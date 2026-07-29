@@ -15,6 +15,11 @@ class Message(BaseModel):
     content: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
     tool_call_id: str | None = None
+    # Reasoning/thinking text produced by reasoning models. Stored so it can
+    # be replayed to APIs that require it (e.g. Kimi K3) on later turns.
+    reasoning: str | None = None
+    # Signature authenticating a replayed thinking block (Anthropic dialect).
+    reasoning_signature: str | None = None
 
 
 class ToolCall(BaseModel):
@@ -40,10 +45,20 @@ class TextChunk:
 
 
 @dataclass(frozen=True)
+class ThinkingChunk:
+    """A streamed reasoning/thinking delta from a reasoning model."""
+
+    text: str
+    # Thinking-block signature (Anthropic dialect); carried on an empty-text
+    # chunk at the end of a thinking block.
+    signature: str | None = None
+
+
+@dataclass(frozen=True)
 class ToolCallEvent:
     id: str
     name: str
     arguments: dict[str, Any]
 
 
-LLMEvent = TextChunk | ToolCallEvent
+LLMEvent = TextChunk | ThinkingChunk | ToolCallEvent

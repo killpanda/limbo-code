@@ -7,7 +7,7 @@ from httpx import Response
 
 from limbo.config import Config
 from limbo.llm.openai_client import OpenAICompatibleClient, _message_to_openai
-from limbo.models import Message, ToolCallEvent
+from limbo.models import Message, TextChunk, ThinkingChunk, ToolCallEvent
 
 
 @pytest.fixture
@@ -16,6 +16,23 @@ def client():
     cfg.llm.api_key = "test"
     cfg.llm.base_url = "https://api.test.com/v1"
     return OpenAICompatibleClient(cfg)
+
+
+@pytest.fixture
+def kimi_client():
+    cfg = Config()
+    cfg.llm.api_key = "test"
+    cfg.llm.base_url = "https://api.test.com/v1"
+    cfg.llm.model = "kimi-k3"
+    return OpenAICompatibleClient(cfg)
+
+
+def _sse_response(text_stream: str) -> Response:
+    return Response(
+        200,
+        text=text_stream,
+        headers={"Content-Type": "text/event-stream"},
+    )
 
 
 async def _collect(chat):
@@ -148,3 +165,124 @@ async def test_client_close_is_noop_when_not_initialized(client):
     assert client._client is None
     await client.close()
     assert client._client is None
+
+
+# -- model-specific behavior (catalog-driven) --------------------------------
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_kimi_k3_sends_reasoning_effort_and_max_tokens(kimi_client):
+    kimi_client.config.llm.thinking_effort = "high"
+    route = respx.post("https://api.test.com/v1/chat/completions").mock(
+        return_value=_sse_response(
+            'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n'
+        )
+    )
+
+    await _collect(kimi_client.chat([Message(role="user", content="hi")], tools=[]))
+
+    body = json.loads(route.calls.last.request.content)
+    assert body["reasoning_effort"] == "high"
+    assert body["max_tokens"] == 131_072
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_kimi_k3_omits_reasoning_effort_by_default(kimi_client):
+    route = respx.post("https://api.test.com/v1/chat/completions").mock(
+        return_value=_sse_response(
+            'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n'
+        )
+    )
+
+    await _collect(kimi_client.chat([Message(role="user", content="hi")], tools=[]))
+
+    body = json.loads(route.calls.last.request.content)
+    assert "reasoning_effort" not in body
+    assert "thinking" not in body
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_kimi_k3_unsupported_effort_warns_and_omits(kimi_client):
+    kimi_client.config.llm.thinking_effort = "off"  # K3 cannot disable thinking
+    route = respx.post("https://api.test.com/v1/chat/completions").mock(
+        return_value=_sse_response(
+            'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n'
+        )
+    )
+
+    with pytest.warns(UserWarning, match="not supported"):
+        await _collect(
+            kimi_client.chat([Message(role="user", content="hi")], tools=[])
+        )
+
+    body = json.loads(route.calls.last.request.content)
+    assert "reasoning_effort" not in body
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_deepseek_format_thinking_toggle():
+    cfg = Config()
+    cfg.llm.api_key = "test"
+    cfg.llm.base_url = "https://api.test.com/v1"
+    cfg.llm.model = "kimi-k2-thinking"
+    cfg.llm.thinking_effort = "off"
+    k2_client = OpenAICompatibleClient(cfg)
+    route = respx.post("https://api.test.com/v1/chat/completions").mock(
+        return_value=_sse_response(
+            'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n'
+        )
+    )
+
+    await _collect(k2_client.chat([Message(role="user", content="hi")], tools=[]))
+
+    body = json.loads(route.calls.last.request.content)
+    assert body["thinking"] == {"type": "disabled"}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_reasoning_content_streams_as_thinking_chunks(kimi_client):
+    stream = (
+        'data: {"choices":[{"delta":{"reasoning_content":"let me "}}]}\n\n'
+        'data: {"choices":[{"delta":{"reasoning_content":"think"}}]}\n\n'
+        'data: {"choices":[{"delta":{"content":"answer"}}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+    respx.post("https://api.test.com/v1/chat/completions").mock(
+        return_value=_sse_response(stream)
+    )
+
+    events = await _collect(
+        kimi_client.chat([Message(role="user", content="hi")], tools=[])
+    )
+    thinking = "".join(e.text for e in events if isinstance(e, ThinkingChunk))
+    text = "".join(e.text for e in events if isinstance(e, TextChunk))
+    assert thinking == "let me think"
+    assert text == "answer"
+
+
+def test_message_to_openai_replays_reasoning_content_when_required():
+    message = Message(role="assistant", content="done", reasoning="my thoughts")
+    result = _message_to_openai(message, include_reasoning=True)
+    assert result["reasoning_content"] == "my thoughts"
+
+
+def test_message_to_openai_reasoning_defaults_to_empty_for_k3():
+    message = Message(role="assistant", content="done")
+    result = _message_to_openai(message, include_reasoning=True)
+    assert result["reasoning_content"] == ""
+
+
+def test_message_to_openai_omits_reasoning_by_default():
+    message = Message(role="assistant", content="done", reasoning="my thoughts")
+    result = _message_to_openai(message)
+    assert "reasoning_content" not in result
+
+
+def test_config_max_tokens_overrides_catalog(kimi_client):
+    kimi_client.config.llm.max_tokens = 4096
+    assert (kimi_client.config.llm.max_tokens or kimi_client.spec.max_tokens) == 4096

@@ -16,13 +16,20 @@ from limbo.config import Config
 from limbo.history import ToolHistory
 from limbo.history import repair as repair_history
 from limbo.llm.client import LLMClient
-from limbo.models import Message, TextChunk, ToolCallEvent, ToolResult
+from limbo.models import Message, TextChunk, ThinkingChunk, ToolCallEvent, ToolResult
 from limbo.sessions import SessionMeta, derive_title, load_session, save_session
 from limbo.tools.registry import ToolRegistry
 
 
 @dataclass(frozen=True)
 class TextDelta:
+    text: str
+
+
+@dataclass(frozen=True)
+class ThinkingDelta:
+    """A streamed reasoning/thinking delta (reasoning models only)."""
+
     text: str
 
 
@@ -46,7 +53,7 @@ class ErrorEvent:
     message: str
 
 
-AgentEvent = TextDelta | ToolCallRequest | ToolResultEvent | ErrorEvent
+AgentEvent = TextDelta | ThinkingDelta | ToolCallRequest | ToolResultEvent | ErrorEvent
 
 
 class Agent:
@@ -383,12 +390,19 @@ class Agent:
     async def _call_llm(self) -> AsyncIterator[AgentEvent]:
         tool_definitions = self.registry.definitions()
         assistant_content = ""
+        assistant_reasoning = ""
+        assistant_signature: str | None = None
         tool_calls: list[dict[str, Any]] = []
 
         async for event in self.llm_client.chat(self.messages, tools=tool_definitions):
             if isinstance(event, TextChunk):
                 assistant_content += event.text
                 yield TextDelta(text=event.text)
+            elif isinstance(event, ThinkingChunk):
+                assistant_reasoning += event.text
+                if event.signature is not None:
+                    assistant_signature = event.signature
+                yield ThinkingDelta(text=event.text)
             elif isinstance(event, ToolCallEvent):
                 tool_calls.append(
                     {
@@ -409,6 +423,8 @@ class Agent:
                 role="assistant",
                 content=assistant_content or None,
                 tool_calls=tool_calls if tool_calls else None,
+                reasoning=assistant_reasoning or None,
+                reasoning_signature=assistant_signature,
             )
         )
 

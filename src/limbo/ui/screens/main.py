@@ -25,6 +25,7 @@ from limbo.llm.openai_client import OpenAICompatibleClient
 from limbo.sessions import derive_title, export_markdown, list_sessions
 from limbo.skills import Skill, discover_skills
 from limbo.ui.commands import SlashCommand, SlashCommandRegistry
+from limbo.ui.screens.game2048 import Game2048Screen
 from limbo.ui.screens.session_picker import SessionPicker
 from limbo.ui.widgets.chat import ChatWidget
 from limbo.ui.widgets.command_menu import SlashCommandMenu
@@ -40,6 +41,7 @@ class MainScreen(Screen[None]):
 
     BINDINGS = [
         Binding("ctrl+o", "toggle_tools", "展开/收起工具输出"),
+        Binding("ctrl+g", "game2048", "2048 小游戏"),
     ]
 
     def __init__(
@@ -83,7 +85,7 @@ class MainScreen(Screen[None]):
         yield SlashCommandMenu(id="slash-menu")
         yield InputWidget(id="input")
         yield Static(
-            "Enter 发送 · Shift+Enter 换行 · / 命令 · ctrl+o 展开/收起工具输出",
+            "Enter 发送 · Shift+Enter 换行 · / 命令 · ctrl+o 工具输出 · ctrl+g 2048",
             id="hint",
             markup=False,
         )
@@ -195,6 +197,13 @@ class MainScreen(Screen[None]):
         self._commands.register(
             SlashCommand("/help", "显示帮助", handler=lambda arg: self._show_help())
         )
+        self._commands.register(
+            SlashCommand(
+                "/2048",
+                "玩一局 2048（不打断当前任务）",
+                handler=lambda arg: self._open_game2048(),
+            )
+        )
 
     def _handle_command(self, text: str) -> None:
         chat = self.query_one("#chat", ChatWidget)
@@ -296,6 +305,13 @@ class MainScreen(Screen[None]):
 
     def action_toggle_tools(self) -> None:
         self.query_one("#chat", ChatWidget).toggle_tool_bodies()
+
+    def _open_game2048(self) -> None:
+        """Open the 2048 modal. The agent turn (if any) keeps running."""
+        self.app.push_screen(Game2048Screen())
+
+    def action_game2048(self) -> None:
+        self._open_game2048()
 
     def handle_confirmation(self) -> None:
         """Handle an approval from the confirmation dialog."""

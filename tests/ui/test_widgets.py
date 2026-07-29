@@ -186,3 +186,41 @@ async def test_tool_card_toggle_requires_body():
         assert card.body.display is True
         card.toggle()
         assert card.body.display is False
+
+
+@pytest.mark.asyncio
+async def test_chat_streaming_burst_does_not_duplicate_blocks():
+    """Regression: fast chunk bursts must not duplicate rendered blocks.
+
+    Markdown.append() defers its re-render; firing many appends without
+    awaiting each one queues stale renders that re-mount existing blocks.
+    """
+
+    class TestApp(App[None]):
+        def compose(self):
+            yield ChatWidget(id="chat")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(ChatWidget)
+        text = (
+            "First paragraph.\n\n"
+            "Second paragraph.\n\n"
+            "•  bullet one\n"
+            "•  bullet two\n\n"
+            "Final paragraph."
+        )
+        # Token-sized chunks with no pause between calls simulates a fast
+        # streaming burst (e.g. several SSE events per network read).
+        chunks = [text[i : i + 4] for i in range(0, len(text), 4)]
+        for chunk in chunks:
+            await widget.append_assistant_text(chunk)
+        await pilot.pause()
+
+        md = widget.messages[-1]
+        rendered = "\n".join(
+            str(getattr(child, "content", "")) for child in md.children
+        )
+        assert rendered.count("Second paragraph.") == 1
+        assert rendered.count("bullet one") == 1
+        assert rendered.count("Final paragraph.") == 1

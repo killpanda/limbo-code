@@ -25,11 +25,13 @@ class ChatWidget(VerticalScroll):
         # twice for the same call (once streamed, once before execution).
         self.tool_cards: dict[str, ToolCard] = {}
         self._current_assistant: Markdown | None = None
+        self._current_thinking: Static | None = None
 
     # -- messages -----------------------------------------------------------
 
     def add_user_message(self, text: str) -> None:
         self._current_assistant = None
+        self._current_thinking = None
         msg = Static(f"❯ {text}", classes="user-message", markup=False)
         self.messages.append(msg)
         self._mount_and_scroll(msg)
@@ -41,12 +43,31 @@ class ChatWidget(VerticalScroll):
 
     def add_error(self, text: str) -> None:
         self._current_assistant = None
+        self._current_thinking = None
         msg = Static(text, classes="error-message", markup=False)
         self.messages.append(msg)
         self._mount_and_scroll(msg)
 
+    async def append_thinking_text(self, text: str) -> None:
+        """Append a streamed reasoning chunk to the current thinking block.
+
+        Rendered as muted plain text (not Markdown) to keep thinking visually
+        secondary to the assistant's reply.
+        """
+        if self._current_thinking is None:
+            # Thinking after assistant text starts a new block.
+            self._current_assistant = None
+            block = Static("", classes="thinking-message", markup=False)
+            self.messages.append(block)
+            self._current_thinking = block
+            await self.mount(block)
+        self._current_thinking.update(str(self._current_thinking.content) + text)
+        self.scroll_end(animate=False)
+
     async def append_assistant_text(self, text: str) -> None:
         """Append a streamed chunk to the current assistant Markdown block."""
+        # Assistant text after thinking starts a new block.
+        self._current_thinking = None
         if self._current_assistant is None:
             # markdown=None: on_mount applies the initial markdown and would
             # wipe any chunks appended before mounting finished, so the mount
@@ -55,7 +76,11 @@ class ChatWidget(VerticalScroll):
             self.messages.append(md)
             self._current_assistant = md
             await self.mount(md)
-        self._current_assistant.append(text)
+        # Markdown.append() mutates its source synchronously but defers the
+        # re-render via AwaitComplete. Not awaiting it lets fast chunk bursts
+        # queue multiple stale renders that re-mount existing blocks
+        # (visually duplicated content), so each append is awaited.
+        await self._current_assistant.append(text)
         self.scroll_end(animate=False)
 
     def add_assistant_message(self, text: str) -> None:
@@ -72,6 +97,7 @@ class ChatWidget(VerticalScroll):
         self.messages.clear()
         self.tool_cards.clear()
         self._current_assistant = None
+        self._current_thinking = None
 
     # -- tool cards -----------------------------------------------------------
 
@@ -84,6 +110,7 @@ class ChatWidget(VerticalScroll):
             return existing
         # Text after a tool card must start a new assistant block.
         self._current_assistant = None
+        self._current_thinking = None
         card = ToolCard(tool_id, name, arguments)
         self.tool_cards[tool_id] = card
         self._mount_and_scroll(card)

@@ -986,3 +986,29 @@ async def test_agent_resume_repairs_dangling_tool_calls(workdir):
         i for i, m in enumerate(sent_messages) if m.tool_calls
     )
     assert sent_messages[assistant_idx + 1].role == "tool"
+
+
+@pytest.mark.asyncio
+async def test_agent_stores_reasoning_on_assistant_message(workdir):
+    from limbo.agent import ThinkingDelta
+    from limbo.models import ThinkingChunk
+
+    cfg = Config()
+    fake_llm = FakeLLMClient(
+        [[ThinkingChunk(text="hmm "), ThinkingChunk(text="thinking"), TextChunk(text="answer")]]
+    )
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    events = await _collect(agent.run("hi"))
+    thinking = "".join(e.text for e in events if isinstance(e, ThinkingDelta))
+    assert thinking == "hmm thinking"
+
+    last = agent.messages[-1]
+    assert last.role == "assistant"
+    assert last.reasoning == "hmm thinking"
+    assert last.content == "answer"
