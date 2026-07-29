@@ -86,7 +86,7 @@ class MainScreen(Screen[None]):
         yield SlashCommandMenu(id="slash-menu")
         yield InputWidget(id="input")
         yield Static(
-            "Enter 发送 · Shift+Enter 换行 · / 命令 · ctrl+o 工具输出 · ctrl+g 2048",
+            "Enter 发送 · Shift+Enter 换行 · ↑↓ 历史输入 · / 命令 · ctrl+o 工具输出 · ctrl+g 2048",
             id="hint",
             markup=False,
         )
