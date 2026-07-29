@@ -1,7 +1,8 @@
 [project]
 name = "limbo-code"
-version = "0.1.0"
+version = "0.1.1"
 description = "A minimal terminal AI coding agent"
+readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "textual>=0.58",
