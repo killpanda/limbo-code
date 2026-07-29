@@ -32,6 +32,13 @@ from limbo.llm.catalog import (
     resolve_model,
 )
 from limbo.llm.client import RequestHook
+from limbo.llm.retry import (
+    LLMHttpError,
+    LLMOverloadedError,
+    RetryPolicy,
+    parse_retry_after,
+    stream_with_retry,
+)
 from limbo.models import (
     CompletionMeta,
     LLMEvent,
@@ -71,7 +78,10 @@ class AnthropicMessagesClient:
                     "accept": "application/json",
                     **self.spec.provider.headers,
                 },
-                timeout=httpx.Timeout(600.0, connect=30.0),
+                timeout=httpx.Timeout(
+                    self.config.llm.timeout,
+                    connect=self.config.llm.connect_timeout,
+                ),
             )
         return self._client
 
@@ -126,12 +136,25 @@ class AnthropicMessagesClient:
 
     # -- streaming -----------------------------------------------------------
 
-    async def chat(
+    def chat(
         self,
         messages: list[Message],
         tools: list[dict[str, Any]],
         on_request: RequestHook | None = None,
     ) -> AsyncIterator[LLMEvent]:
+        """Stream events, retrying pre-first-event failures (see llm.retry)."""
+        policy = RetryPolicy.from_config(self.config.llm)
+        return stream_with_retry(
+            lambda: self._chat_inner(messages, tools, on_request), policy
+        )
+
+    async def _chat_inner(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]],
+        on_request: RequestHook | None = None,
+    ) -> AsyncIterator[LLMEvent]:
+        """One streaming attempt: build the request and yield its events."""
         body = self._build_body(messages, tools)
         if on_request is not None:
             on_request(body)
@@ -142,7 +165,11 @@ class AnthropicMessagesClient:
         async with self.client.stream("POST", "/v1/messages", json=body) as resp:
             if resp.status_code != 200:
                 error_body = (await resp.aread()).decode("utf-8", "replace")
-                raise RuntimeError(f"Error code: {resp.status_code} - {error_body}")
+                raise LLMHttpError(
+                    status_code=resp.status_code,
+                    message=f"Error code: {resp.status_code} - {error_body}",
+                    retry_after=parse_retry_after(resp.headers.get("retry-after")),
+                )
 
             # Tool-use blocks accumulate streamed partial JSON by index.
             tool_blocks: dict[int, dict[str, Any]] = {}
@@ -192,10 +219,15 @@ class AnthropicMessagesClient:
                         yield _tool_call_event(block)
                 elif event_type == "error":
                     error = event.get("error", {})
-                    raise RuntimeError(
-                        f"{error.get('type', 'error')}: "
-                        f"{error.get('message', 'unknown stream error')}"
-                    )
+                    error_type = error.get("type", "error")
+                    error_message = error.get("message", "unknown stream error")
+                    if error_type == "overloaded_error":
+                        # Provider overload is transient; retryable while no
+                        # event has been yielded yet.
+                        raise LLMOverloadedError(
+                            f"{error_type}: {error_message}"
+                        )
+                    raise RuntimeError(f"{error_type}: {error_message}")
 
             # A truncated stream may leave tool blocks open; flush them so the
             # agent loop can surface the (possibly partial) call.

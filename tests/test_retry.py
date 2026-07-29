@@ -72,6 +72,10 @@ def _rate_limit(headers: dict[str, str] | None = None) -> RateLimitError:
         (httpx.ConnectError("boom", request=_request()), True),
         (httpx.ReadTimeout("boom", request=_request()), True),
         (httpx.ConnectTimeout("boom", request=_request()), True),
+        (httpx.PoolTimeout("boom", request=_request()), True),
+        (httpx.ReadError("boom", request=_request()), True),
+        # Server drops the connection before the first byte (TransportError).
+        (httpx.RemoteProtocolError("boom", request=_request()), True),
         (asyncio.CancelledError(), False),
         (KeyboardInterrupt(), False),
         (ValueError("nope"), False),

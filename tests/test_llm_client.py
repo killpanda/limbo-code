@@ -1,9 +1,11 @@
+import asyncio
 import json
 from unittest.mock import AsyncMock
 
 import pytest
 import respx
 from httpx import Response
+from openai import BadRequestError, RateLimitError
 
 from limbo.config import Config
 from limbo.llm.openai_client import OpenAICompatibleClient, _message_to_openai
@@ -381,3 +383,103 @@ async def test_client_retries_without_stream_options_when_rejected(client):
     assert "stream_options" not in second_body
     # The client stops asking for usage on subsequent requests.
     assert client._include_usage is False
+
+
+# -- unified retry integration (limbo.llm.retry) -----------------------------
+
+
+@pytest.fixture
+def sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    """Replace asyncio.sleep with a recorder so retries cost no real time."""
+    calls: list[float] = []
+
+    async def fake_sleep(delay: float) -> None:
+        calls.append(delay)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+    return calls
+
+
+def test_sdk_client_disables_builtin_retries_and_wires_timeout(client):
+    client.config.llm.timeout = 123.0
+    client.config.llm.connect_timeout = 4.0
+
+    sdk = client.client
+
+    # SDK built-in retries are off; stream_with_retry owns retrying so every
+    # attempt is trace-visible via the on_request hook.
+    assert sdk.max_retries == 0
+    assert sdk.timeout.read == 123.0
+    assert sdk.timeout.connect == 4.0
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_retries_on_429_then_succeeds(client, sleeps):
+    ok_stream = (
+        'data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'
+        "data: [DONE]\n\n"
+    )
+    route = respx.post("https://api.test.com/v1/chat/completions").mock(
+        side_effect=[
+            Response(
+                429,
+                json={"error": {"message": "rate limited"}},
+                headers={"retry-after": "0"},
+            ),
+            _sse_response(ok_stream),
+        ]
+    )
+
+    events = await _collect(client.chat([Message(role="user", content="hi")], tools=[]))
+
+    assert route.call_count == 2
+    assert "".join(e.text for e in events if isinstance(e, TextChunk)) == "hi"
+    assert len(sleeps) == 1
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_429_exhausts_retries_then_raises(client, sleeps):
+    route = respx.post("https://api.test.com/v1/chat/completions").mock(
+        side_effect=[
+            Response(429, json={"error": {"message": "rate limited"}})
+            for _ in range(4)
+        ]
+    )
+
+    with pytest.raises(RateLimitError):
+        await _collect(client.chat([Message(role="user", content="hi")], tools=[]))
+
+    # max_retries=3 -> 4 attempts total, with a backoff before each retry.
+    assert route.call_count == 4
+    assert len(sleeps) == 3
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_400_is_not_retried(client, sleeps):
+    route = respx.post("https://api.test.com/v1/chat/completions").mock(
+        return_value=Response(400, json={"error": {"message": "bad request"}})
+    )
+
+    with pytest.raises(BadRequestError):
+        await _collect(client.chat([Message(role="user", content="hi")], tools=[]))
+
+    assert route.call_count == 1
+    assert sleeps == []
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_max_retries_zero_disables_retry(client, sleeps):
+    client.config.llm.max_retries = 0
+    route = respx.post("https://api.test.com/v1/chat/completions").mock(
+        return_value=Response(429, json={"error": {"message": "rate limited"}})
+    )
+
+    with pytest.raises(RateLimitError):
+        await _collect(client.chat([Message(role="user", content="hi")], tools=[]))
+
+    assert route.call_count == 1
+    assert sleeps == []

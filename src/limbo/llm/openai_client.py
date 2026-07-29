@@ -8,6 +8,7 @@ import warnings
 from collections.abc import AsyncIterator
 from typing import Any
 
+import httpx
 from openai import AsyncOpenAI, BadRequestError
 
 from limbo.config import Config
@@ -18,6 +19,7 @@ from limbo.llm.catalog import (
     resolve_model,
 )
 from limbo.llm.client import RequestHook
+from limbo.llm.retry import RetryPolicy, stream_with_retry
 from limbo.models import (
     CompletionMeta,
     LLMEvent,
@@ -59,6 +61,13 @@ class OpenAICompatibleClient:
             self._client = AsyncOpenAI(
                 api_key=api_key,
                 base_url=resolve_base_url(self.spec, self.config.llm.base_url),
+                # SDK built-in retries are disabled: stream_with_retry owns
+                # retrying so every attempt is trace-visible via on_request.
+                max_retries=0,
+                timeout=httpx.Timeout(
+                    self.config.llm.timeout,
+                    connect=self.config.llm.connect_timeout,
+                ),
             )
         return self._client
 
@@ -98,12 +107,25 @@ class OpenAICompatibleClient:
             return {"thinking": {"type": "enabled"}}
         return {}
 
-    async def chat(
+    def chat(
         self,
         messages: list[Message],
         tools: list[dict[str, Any]],
         on_request: RequestHook | None = None,
     ) -> AsyncIterator[LLMEvent]:
+        """Stream events, retrying pre-first-event failures (see llm.retry)."""
+        policy = RetryPolicy.from_config(self.config.llm)
+        return stream_with_retry(
+            lambda: self._chat_inner(messages, tools, on_request), policy
+        )
+
+    async def _chat_inner(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]],
+        on_request: RequestHook | None = None,
+    ) -> AsyncIterator[LLMEvent]:
+        """One streaming attempt: build the request and yield its events."""
         include_reasoning = self.spec.requires_reasoning_content
         request_messages = [
             _message_to_openai(m, include_reasoning=include_reasoning)
