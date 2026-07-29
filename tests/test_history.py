@@ -40,19 +40,6 @@ def test_record_result_replaces_existing_in_place():
     assert tool_msgs[0].content == "real output"
 
 
-def test_record_error_marks_crashed_call_and_siblings():
-    messages = [assistant_with_calls("c1", "c2", "c3")]
-    history = ToolHistory(messages)
-
-    history.record_error(messages[0], 1, "c2", "Tool error: boom")
-
-    results = {m.tool_call_id: m.content for m in messages if m.role == "tool"}
-    assert results == {
-        "c2": "Tool error: boom",
-        "c3": "Action not executed: earlier tool failed.",
-    }
-
-
 def test_repair_drops_system_and_fixes_dangling_tool_calls():
     messages = [
         Message(role="system", content="sys"),

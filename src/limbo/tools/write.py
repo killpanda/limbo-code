@@ -6,6 +6,7 @@ from typing import Any
 
 from limbo.models import ToolResult
 from limbo.tools.base import BaseTool
+from limbo.tools.mutation_queue import mutation_lock_for
 
 
 class WriteTool(BaseTool):
@@ -25,10 +26,11 @@ class WriteTool(BaseTool):
         content = arguments.get("content", "")
         target = self.resolve_creatable(raw_path)
 
-        try:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(content, encoding="utf-8")
-        except OSError as e:
-            return ToolResult(success=False, error=f"Could not write file: {e}")
+        with mutation_lock_for(target):
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(content, encoding="utf-8")
+            except OSError as e:
+                return ToolResult(success=False, error=f"Could not write file: {e}")
 
         return ToolResult(success=True, output=f"Wrote {raw_path}.")

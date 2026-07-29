@@ -107,6 +107,7 @@ class Agent:
         self.registry = ToolRegistry(workdir=workdir, config=config)
         self._history = ToolHistory([])
         self._iteration_count = 0
+        self._last_finish_reason: str | None = None
         self._init_system_message()
 
         self._session_dir = session_dir or Path.home() / ".limbo" / "sessions"
@@ -329,6 +330,14 @@ class Agent:
             if not last.tool_calls:
                 break
 
+            # Length-stop guard: the response was cut off by the output
+            # token limit, so tool-call arguments may be truncated. Fail
+            # the whole batch without executing it.
+            if self._last_finish_reason == "length":
+                async for event in self._fail_truncated_tool_calls(last):
+                    yield event
+                continue
+
             # If we've reached the iteration limit on an assistant message that
             # requests tool calls, cancel the calls instead of executing them.
             # OpenAI requires a matching ``role="tool"`` result for every
@@ -358,21 +367,105 @@ class Agent:
                 name = tc["function"]["name"]
                 arguments = tc["function"]["arguments"]
                 yield ToolCallRequest(id=tc["id"], name=name, arguments=arguments)
-                try:
-                    result = await self._execute_tool(tc["id"], name, arguments)
-                except Exception as e:  # noqa: BLE001
-                    error_message = f"Tool error: {e}"
-                    yield ErrorEvent(message=error_message)
-                    self._history.record_error(
-                        last, idx, tc["id"], error_message
-                    )
-                    return
+            async for event in self._execute_tool_calls(last):
+                yield event
+
+    async def _execute_tool_calls(self, assistant: Message) -> AsyncIterator[AgentEvent]:
+        """Execute one batch of tool calls.
+
+        Semantics (aligned with pi's agent loop):
+
+        - Tool calls run concurrently when ``tools.parallel`` is enabled
+          (default). ``ToolResultEvent``s stream out in *completion* order
+          so a fast tool is never blocked behind a slow one; results are
+          recorded into history in *source* order once the batch finishes,
+          keeping session replay and traces readable.
+        - A tool crash becomes an error ``ToolResult`` for that call only;
+          sibling calls finish normally and the loop continues.
+        """
+        tool_calls = assistant.tool_calls or []
+        results: dict[str, ToolResult] = {}
+
+        if self.config.tools.parallel and len(tool_calls) > 1:
+            async def run_one(tc: dict[str, Any]) -> tuple[dict[str, Any], ToolResult]:
+                result = await self._execute_tool_safe(
+                    tc["id"], tc["function"]["name"], tc["function"]["arguments"]
+                )
+                return tc, result
+
+            futures = [asyncio.ensure_future(run_one(tc)) for tc in tool_calls]
+            for future in asyncio.as_completed(futures):
+                tc, result = await future
+                results[tc["id"]] = result
                 yield ToolResultEvent(
-                    id=tc["id"], name=name, result=result, arguments=arguments
+                    id=tc["id"],
+                    name=tc["function"]["name"],
+                    result=result,
+                    arguments=tc["function"]["arguments"],
                 )
-                self._history.record_result(
-                    tc["id"], result.output or result.error or ""
+        else:
+            for tc in tool_calls:
+                result = await self._execute_tool_safe(
+                    tc["id"], tc["function"]["name"], tc["function"]["arguments"]
                 )
+                results[tc["id"]] = result
+                yield ToolResultEvent(
+                    id=tc["id"],
+                    name=tc["function"]["name"],
+                    result=result,
+                    arguments=tc["function"]["arguments"],
+                )
+
+        # Record results in assistant source order after the batch completes.
+        for tc in tool_calls:
+            result = results[tc["id"]]
+            self._history.record_result(
+                tc["id"], result.output or result.error or ""
+            )
+
+    async def _execute_tool_safe(
+        self,
+        call_id: str,
+        name: str,
+        arguments: dict[str, Any],
+    ) -> ToolResult:
+        """Execute one tool, converting crashes into error results."""
+        try:
+            return await self._execute_tool(call_id, name, arguments)
+        except Exception as e:  # noqa: BLE001
+            return ToolResult(success=False, error=f"Tool error: {e}")
+
+    async def _fail_truncated_tool_calls(
+        self, assistant: Message
+    ) -> AsyncIterator[AgentEvent]:
+        """Fail a whole batch without executing it (length-stop guard).
+
+        A ``finish_reason == "length"`` response was cut off by the output
+        token limit, so any tool call in it may carry truncated arguments
+        that still parse. None of them are safe to execute; return an error
+        result for each so the model can re-issue them (pi does the same).
+        """
+        message = (
+            "Tool call was not executed: the response hit the output token "
+            "limit, so its arguments may be truncated. Re-issue the tool "
+            "call with complete arguments."
+        )
+        self.trace.log(
+            "error",
+            turn=self._turn_count,
+            kind="length_stop",
+            message="Response hit the output token limit; tool calls were not executed.",
+            cancelled_tool_call_ids=[tc["id"] for tc in assistant.tool_calls or []],
+        )
+        for tc in assistant.tool_calls or []:
+            name = tc["function"]["name"]
+            arguments = tc["function"]["arguments"]
+            yield ToolCallRequest(id=tc["id"], name=name, arguments=arguments)
+            result = ToolResult(success=False, error=message)
+            yield ToolResultEvent(
+                id=tc["id"], name=name, result=result, arguments=arguments
+            )
+            self._history.record_result(tc["id"], message)
 
     async def _call_llm(self) -> AsyncIterator[AgentEvent]:
         tool_definitions = self.registry.definitions()
@@ -419,6 +512,7 @@ class Agent:
                 meta = event
 
         usage = meta.usage if meta else None
+        self._last_finish_reason = meta.finish_reason if meta else None
         self.trace.log(
             "llm_response",
             turn=self._turn_count,
