@@ -332,8 +332,10 @@ class Agent:
 
             # Length-stop guard: the response was cut off by the output
             # token limit, so tool-call arguments may be truncated. Fail
-            # the whole batch without executing it.
-            if self._last_finish_reason == "length":
+            # the whole batch without executing it. OpenAI reports this as
+            # "length"; Anthropic reports it as "max_tokens" (its
+            # stop_reason is passed through verbatim by the client).
+            if self._last_finish_reason in ("length", "max_tokens"):
                 async for event in self._fail_truncated_tool_calls(last):
                     yield event
                 continue

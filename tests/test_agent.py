@@ -902,14 +902,21 @@ async def test_agent_parallel_disabled_falls_back_to_sequential(workdir):
 
 
 @pytest.mark.asyncio
-async def test_agent_length_stop_fails_whole_batch_without_executing(workdir):
-    """finish_reason == 'length' must fail all tool calls without executing."""
+@pytest.mark.parametrize("finish_reason", ["length", "max_tokens"])
+async def test_agent_length_stop_fails_whole_batch_without_executing(
+    workdir, finish_reason
+):
+    """Truncated responses fail all tool calls without executing them.
+
+    OpenAI signals output truncation as ``length``; Anthropic as
+    ``max_tokens`` (its stop_reason is passed through verbatim).
+    """
     cfg = Config()
     fake_llm = FakeLLMClient([
         [
             ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"}),
             ToolCallEvent(id="c2", name="read", arguments={"path": "y.txt"}),
-            CompletionMeta(finish_reason="length"),
+            CompletionMeta(finish_reason=finish_reason),
         ],
         [TextChunk(text="done")],
     ])
