@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -48,9 +49,31 @@ class ReadTool(BaseTool):
         super().__init__(workdir)
         self.sensitive_files = set(sensitive_files or DEFAULT_SENSITIVE_FILES)
 
+    @staticmethod
+    def _resolve_offload_path(raw_path: str) -> Path | None:
+        """Whitelist limbo's own offloaded bash output outside the workdir.
+
+        Bash offloading writes full command output to
+        ``$TMPDIR/limbo-output-<id>.log`` and tells the model to retrieve it
+        with read — but the workdir boundary would reject those paths.
+        Only files directly inside ``tempfile.gettempdir()`` whose name
+        matches what ``BashTool`` writes are allowed; everything else still
+        goes through the normal workdir check.
+        """
+        try:
+            target = Path(raw_path).expanduser().resolve(strict=False)
+            tmpdir = Path(tempfile.gettempdir()).resolve()
+        except (OSError, RuntimeError):
+            return None
+        if target.parent != tmpdir:
+            return None
+        if not (target.name.startswith("limbo-output-") and target.name.endswith(".log")):
+            return None
+        return target
+
     def run(self, arguments: dict[str, Any]) -> ToolResult:
         raw_path = arguments.get("path", "")
-        target = self.resolve(raw_path)
+        target = self._resolve_offload_path(raw_path) or self.resolve(raw_path)
 
         if target.name in self.sensitive_files or any(
             part in self.sensitive_files for part in target.parts
@@ -81,6 +104,7 @@ class ReadTool(BaseTool):
             return ToolResult(success=False, error=f"Could not read file: {e}")
 
         lines = text.splitlines(keepends=True)
+        total_file_lines = len(lines)
         offset = arguments.get("offset")
         limit = arguments.get("limit")
 
@@ -103,9 +127,13 @@ class ReadTool(BaseTool):
         truncation = truncate_head(selected)
         output = truncation.content
         if truncation.truncated:
+            # Report absolute file line numbers: the truncation window is a
+            # slice of the file starting at `offset` (default 1).
+            first_line = offset or 1
+            last_line = first_line + truncation.output_lines - 1
             output += (
-                f"\n[Output truncated: showing lines 1-"
-                f"{truncation.output_lines} of {truncation.total_lines}. "
+                f"\n[Output truncated: showing lines {first_line}-"
+                f"{last_line} of {total_file_lines}. "
                 f"Use offset/limit to read more.]"
             )
 

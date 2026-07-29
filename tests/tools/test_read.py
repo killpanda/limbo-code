@@ -159,6 +159,55 @@ def test_read_truncates_output_by_line_budget(workdir):
     assert "Use offset/limit to read more" in result.output
 
 
+def test_read_truncation_hint_uses_absolute_line_numbers(workdir):
+    """With offset, the hint must refer to file line numbers, not slice-relative ones."""
+    (workdir / "lines.txt").write_text("\n".join(f"line-{i}" for i in range(1, 3001)))
+    tool = ReadTool(workdir=workdir)
+    result = tool.execute({"path": "lines.txt", "offset": 500})
+    assert result.success is True
+    assert "line-500" in result.output
+    assert "line-2499" in result.output
+    assert "line-2500" not in result.output
+    assert "showing lines 500-2499 of 3000" in result.output
+
+
+def test_read_allows_offloaded_bash_output_in_tmpdir(workdir):
+    """Bash offloading promises the model can retrieve full output with read."""
+    offload = Path(tempfile.gettempdir()) / "limbo-output-testdeadbeef.log"
+    offload.write_text("full bash output")
+    try:
+        tool = ReadTool(workdir=workdir)
+        result = tool.execute({"path": str(offload)})
+        assert result.success is True
+        assert result.output == "full bash output"
+    finally:
+        offload.unlink(missing_ok=True)
+
+
+def test_read_offload_whitelist_rejects_other_tmp_paths(workdir):
+    """Only limbo-output-*.log directly inside tmpdir is whitelisted."""
+    tmpdir = Path(tempfile.gettempdir())
+    victims = [
+        tmpdir / "other.log",  # not a limbo offload name
+        tmpdir / "limbo-output-x.txt",  # wrong extension
+    ]
+    sub = tmpdir / "limbo-sub"
+    sub.mkdir(exist_ok=True)
+    victims.append(sub / "limbo-output-x.log")  # not directly inside tmpdir
+    try:
+        for victim in victims:
+            victim.write_text("secret")
+        tool = ReadTool(workdir=workdir)
+        for victim in victims:
+            result = tool.execute({"path": str(victim)})
+            assert result.success is False, victim
+            assert "outside working directory" in (result.error or "").lower()
+    finally:
+        for victim in victims:
+            victim.unlink(missing_ok=True)
+        sub.rmdir()
+
+
 def test_read_rejects_files_above_max_size(workdir):
     """Files larger than the generous cap must be refused before reading."""
     big = workdir / "huge.txt"
