@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -17,7 +19,7 @@ from limbo.agent import (
 )
 from limbo.config import Config
 from limbo.llm.retry import LLMHttpError
-from limbo.models import CompletionMeta, Message, TextChunk, ToolCallEvent
+from limbo.models import CompletionMeta, Message, TextChunk, ToolCallEvent, ToolResult
 from limbo.trace import read_trace
 
 
@@ -255,17 +257,18 @@ async def test_agent_iteration_count_resets_per_turn(workdir):
 
 @pytest.mark.asyncio
 async def test_agent_multi_tool_turn_executes_all_calls(workdir):
-    """Every tool call in a multi-tool turn executes in order, without pausing."""
+    """Every tool call in a multi-tool turn executes, without pausing."""
     cfg = Config()
     fake_llm = FakeLLMClient([
         [
-            ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"}),
+            ToolCallEvent(id="c1", name="read", arguments={"path": "a.txt"}),
             ToolCallEvent(id="c2", name="write", arguments={"path": "x.txt", "content": "hi"}),
-            ToolCallEvent(id="c3", name="read", arguments={"path": "x.txt"}),
+            ToolCallEvent(id="c3", name="read", arguments={"path": "b.txt"}),
         ],
         [TextChunk(text="done")],
     ])
-    (workdir / "main.py").write_text("x = 1\n")
+    (workdir / "a.txt").write_text("aaa\n")
+    (workdir / "b.txt").write_text("bbb\n")
     agent = Agent(
         config=cfg,
         llm_client=fake_llm,
@@ -275,7 +278,7 @@ async def test_agent_multi_tool_turn_executes_all_calls(workdir):
 
     events = await _collect(agent.run("multi"))
     result_events = [e for e in events if isinstance(e, ToolResultEvent)]
-    assert [e.name for e in result_events] == ["read", "write", "read"]
+    assert {e.id for e in result_events} == {"c1", "c2", "c3"}
     assert all(e.result.success for e in result_events)
     assert (workdir / "x.txt").read_text() == "hi"
     assert any(isinstance(e, TextDelta) and e.text == "done" for e in events)
@@ -287,18 +290,18 @@ async def test_agent_multi_tool_turn_executes_all_calls(workdir):
     tool_result_ids = {m.tool_call_id for m in agent.messages if m.role == "tool"}
     assert tool_call_ids == tool_result_ids
 
-    # The final read saw the file written by the earlier write call.
-    c3_message = next(
-        m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c3"
-    )
-    assert "hi" in (c3_message.content or "")
+    # Results land in history in assistant source order, not completion order.
+    tool_msgs = [m for m in agent.messages if m.role == "tool"]
+    assert [m.tool_call_id for m in tool_msgs] == ["c1", "c2", "c3"]
 
 
 @pytest.mark.asyncio
-async def test_agent_tool_crash_yields_tool_error_event(workdir):
+async def test_agent_tool_crash_becomes_error_result_and_loop_continues(workdir):
+    """A crashed tool yields an error ToolResult; siblings and the loop go on."""
     cfg = Config()
     fake_llm = FakeLLMClient([
         [ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"})],
+        [TextChunk(text="done")],
     ])
     agent = Agent(
         config=cfg,
@@ -313,22 +316,27 @@ async def test_agent_tool_crash_yields_tool_error_event(workdir):
     agent.registry.execute = crashing_execute
 
     events = await _collect(agent.run("read main.py"))
-    error_events = [e for e in events if isinstance(e, ErrorEvent)]
-    assert len(error_events) == 1
-    assert error_events[0].message == "Tool error: tool exploded"
-    assert not any("LLM error" in e.message for e in error_events)
+    result_events = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(result_events) == 1
+    assert result_events[0].result.success is False
+    assert "tool exploded" in (result_events[0].result.error or "")
+    # The loop continued and produced the final text response.
+    assert any(isinstance(e, TextDelta) and e.text == "done" for e in events)
+    assert not any(isinstance(e, ErrorEvent) for e in events)
 
 
 @pytest.mark.asyncio
-async def test_agent_tool_crash_appends_tool_results(workdir):
-    """A crashed tool must not leave the assistant's tool_calls unmatched."""
+async def test_agent_tool_crash_does_not_cancel_siblings(workdir):
+    """A crashed call must not cancel its siblings; all calls get results."""
     cfg = Config()
     fake_llm = FakeLLMClient([
         [
             ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"}),
             ToolCallEvent(id="c2", name="write", arguments={"path": "x.txt", "content": "hi"}),
         ],
+        [TextChunk(text="done")],
     ])
+    (workdir / "main.py").write_text("x = 1\n")
     agent = Agent(
         config=cfg,
         llm_client=fake_llm,
@@ -336,14 +344,20 @@ async def test_agent_tool_crash_appends_tool_results(workdir):
         session_dir=workdir / "sessions",
     )
 
-    async def crashing_execute(name, arguments):
-        raise RuntimeError("tool exploded")
+    original_execute = agent.registry.execute
 
-    agent.registry.execute = crashing_execute
+    async def execute_with_crash(name, arguments):
+        if name == "read":
+            raise RuntimeError("tool exploded")
+        return await original_execute(name, arguments)
+
+    agent.registry.execute = execute_with_crash
 
     events = await _collect(agent.run("multi"))
-    error_events = [e for e in events if isinstance(e, ErrorEvent)]
-    assert len(error_events) == 1
+    result_events = {e.id: e for e in events if isinstance(e, ToolResultEvent)}
+    assert result_events["c1"].result.success is False
+    assert "tool exploded" in (result_events["c1"].result.error or "")
+    assert result_events["c2"].result.success is True
 
     assistant = [m for m in agent.messages if m.role == "assistant" and m.tool_calls]
     assert len(assistant) == 1
@@ -355,10 +369,12 @@ async def test_agent_tool_crash_appends_tool_results(workdir):
         m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c1"
     )
     assert "tool exploded" in (crashed_message.content or "")
-    remaining_message = next(
+    sibling_message = next(
         m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c2"
     )
-    assert "not executed" in (remaining_message.content or "").lower()
+    assert "hi" not in (sibling_message.content or "").lower()  # it's the write ack
+    assert "wrote" in (sibling_message.content or "").lower()
+    assert any(isinstance(e, TextDelta) and e.text == "done" for e in events)
 
 
 @pytest.mark.asyncio
@@ -830,3 +846,190 @@ async def test_agent_trace_file_does_not_pollute_session_listing(workdir):
     assert len(sessions) == 1
     # find_session must not see the trace file as an ambiguous match.
     assert find_session(session_dir, agent.session_id) == agent._session_file
+
+
+# ---------------------------------------------------------------------------
+# Parallel tool execution
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_agent_parallel_tool_calls_run_concurrently(workdir):
+    """Two slow tool calls must overlap: wall time < serial execution."""
+    cfg = Config()
+    fake_llm = FakeLLMClient([
+        [
+            ToolCallEvent(id="c1", name="read", arguments={"path": "a.txt"}),
+            ToolCallEvent(id="c2", name="read", arguments={"path": "b.txt"}),
+        ],
+        [TextChunk(text="done")],
+    ])
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    async def slow_execute(name, arguments):
+        await asyncio.sleep(0.3)
+        return ToolResult(success=True, output=f"ok:{name}")
+
+    agent.registry.execute = slow_execute
+
+    start = time.monotonic()
+    events = await _collect(agent.run("read both"))
+    elapsed = time.monotonic() - start
+
+    result_events = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(result_events) == 2
+    assert all(e.result.success for e in result_events)
+    # Serial execution would take ~0.6s; concurrent should be well under.
+    assert elapsed < 0.55
+
+
+@pytest.mark.asyncio
+async def test_agent_parallel_events_completion_order_history_source_order(workdir):
+    """Events stream in completion order; history records in source order."""
+    cfg = Config()
+    fake_llm = FakeLLMClient([
+        [
+            ToolCallEvent(id="c1", name="read", arguments={"path": "slow.txt"}),
+            ToolCallEvent(id="c2", name="read", arguments={"path": "fast.txt"}),
+        ],
+        [TextChunk(text="done")],
+    ])
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    async def variably_slow_execute(name, arguments):
+        if arguments["path"] == "slow.txt":
+            await asyncio.sleep(0.3)
+        return ToolResult(success=True, output=f"ok:{arguments['path']}")
+
+    agent.registry.execute = variably_slow_execute
+
+    events = await _collect(agent.run("read both"))
+    result_events = [e for e in events if isinstance(e, ToolResultEvent)]
+    # c2 finishes first even though c1 was requested first.
+    assert [e.id for e in result_events] == ["c2", "c1"]
+
+    tool_msgs = [m for m in agent.messages if m.role == "tool"]
+    assert [m.tool_call_id for m in tool_msgs] == ["c1", "c2"]
+
+
+@pytest.mark.asyncio
+async def test_agent_parallel_disabled_falls_back_to_sequential(workdir):
+    cfg = Config()
+    cfg.tools.parallel = False
+    fake_llm = FakeLLMClient([
+        [
+            ToolCallEvent(id="c1", name="read", arguments={"path": "slow.txt"}),
+            ToolCallEvent(id="c2", name="read", arguments={"path": "fast.txt"}),
+        ],
+        [TextChunk(text="done")],
+    ])
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    async def variably_slow_execute(name, arguments):
+        if arguments["path"] == "slow.txt":
+            await asyncio.sleep(0.2)
+        return ToolResult(success=True, output="ok")
+
+    agent.registry.execute = variably_slow_execute
+
+    events = await _collect(agent.run("read both"))
+    result_events = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert [e.id for e in result_events] == ["c1", "c2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("finish_reason", ["length", "max_tokens"])
+async def test_agent_length_stop_fails_whole_batch_without_executing(
+    workdir, finish_reason
+):
+    """Truncated responses fail all tool calls without executing them.
+
+    OpenAI signals output truncation as ``length``; Anthropic as
+    ``max_tokens`` (its stop_reason is passed through verbatim).
+    """
+    cfg = Config()
+    fake_llm = FakeLLMClient([
+        [
+            ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"}),
+            ToolCallEvent(id="c2", name="read", arguments={"path": "y.txt"}),
+            CompletionMeta(finish_reason=finish_reason),
+        ],
+        [TextChunk(text="done")],
+    ])
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    executed = []
+    original_execute = agent.registry.execute
+
+    async def spy_execute(name, arguments):
+        executed.append(name)
+        return await original_execute(name, arguments)
+
+    agent.registry.execute = spy_execute
+
+    events = await _collect(agent.run("go"))
+    assert executed == []
+
+    result_events = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert {e.id for e in result_events} == {"c1", "c2"}
+    assert all(not e.result.success for e in result_events)
+    assert all("truncated" in (e.result.error or "") for e in result_events)
+
+    # Every call still got a matching tool message, and the loop continued.
+    tool_msgs = [m for m in agent.messages if m.role == "tool"]
+    assert [m.tool_call_id for m in tool_msgs] == ["c1", "c2"]
+    assert any(isinstance(e, TextDelta) and e.text == "done" for e in events)
+
+    records = read_trace(agent.trace.path)
+    assert any(r.get("kind") == "length_stop" for r in records if r["type"] == "error")
+
+
+@pytest.mark.asyncio
+async def test_agent_same_file_write_and_edit_do_not_interleave(workdir):
+    """Concurrent write+edit on the same file serialize via the mutation queue."""
+    cfg = Config()
+    fake_llm = FakeLLMClient([
+        [
+            ToolCallEvent(id="c1", name="write", arguments={"path": "f.txt", "content": "one"}),
+            ToolCallEvent(
+                id="c2",
+                name="edit",
+                arguments={"path": "f.txt", "old_text": "seed", "new_text": "two"},
+            ),
+        ],
+        [TextChunk(text="done")],
+    ])
+    (workdir / "f.txt").write_text("seed")
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    events = await _collect(agent.run("mutate"))
+    result_events = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(result_events) == 2
+    # Both calls completed; the file ends in one of the two consistent states
+    # (serialized), never an interleaved corruption.
+    assert (workdir / "f.txt").read_text() in {"one", "two"}

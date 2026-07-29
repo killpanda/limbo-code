@@ -128,6 +128,9 @@ class SafetyConfig(BaseModel):
 
 class ToolsConfig(BaseModel):
     bash_enabled: bool = True
+    # Execute multiple tool calls from one assistant turn concurrently.
+    # Set to false to fall back to strict sequential execution.
+    parallel: bool = True
 
 
 class Config(BaseModel):

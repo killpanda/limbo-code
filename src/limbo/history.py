@@ -9,7 +9,6 @@ from __future__ import annotations
 from limbo.models import Message
 
 INTERRUPTED_CONTENT = "[session restored: tool call interrupted]"
-NOT_EXECUTED_AFTER_FAILURE = "Action not executed: earlier tool failed."
 
 
 class ToolHistory:
@@ -28,24 +27,6 @@ class ToolHistory:
             self.messages.append(
                 Message(role="tool", content=content, tool_call_id=tool_call_id)
             )
-
-    def record_error(
-        self,
-        assistant: Message,
-        start_idx: int,
-        crashed_id: str,
-        error_message: str,
-    ) -> None:
-        """Record an error for a crashed call and cancel its later siblings."""
-        tool_calls = assistant.tool_calls or []
-        for idx in range(start_idx, len(tool_calls)):
-            tc = tool_calls[idx]
-            content = (
-                error_message
-                if tc["id"] == crashed_id
-                else NOT_EXECUTED_AFTER_FAILURE
-            )
-            self.record_result(tc["id"], content)
 
 
 def repair(messages: list[Message]) -> list[Message]:
