@@ -41,6 +41,12 @@ class ChatWidget(VerticalScroll):
         self.messages.append(msg)
         self._mount_and_scroll(msg)
 
+    def add_art(self, text: str) -> None:
+        """Add preformatted ASCII art (e.g. the startup banner) verbatim."""
+        msg = Static(text, classes="ascii-art", markup=False)
+        self.messages.append(msg)
+        self._mount_and_scroll(msg)
+
     def add_error(self, text: str) -> None:
         self._current_assistant = None
         self._current_thinking = None
