@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from rich.text import Text
 from textual.containers import VerticalScroll
 from textual.widgets import Markdown, Static
 
@@ -41,8 +42,12 @@ class ChatWidget(VerticalScroll):
         self.messages.append(msg)
         self._mount_and_scroll(msg)
 
-    def add_art(self, text: str) -> None:
-        """Add preformatted ASCII art (e.g. the startup banner) verbatim."""
+    def add_art(self, text: str | Text) -> None:
+        """Add preformatted ASCII art (e.g. the startup banner) verbatim.
+
+        Accepts a Rich ``Text`` for per-character colors; plain strings are
+        rendered without markup.
+        """
         msg = Static(text, classes="ascii-art", markup=False)
         self.messages.append(msg)
         self._mount_and_scroll(msg)
