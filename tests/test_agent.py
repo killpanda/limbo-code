@@ -84,129 +84,8 @@ async def test_agent_calls_tool_and_loops(workdir):
 
 
 @pytest.mark.asyncio
-async def test_agent_stops_on_confirmation(workdir):
-    cfg = Config()
-    fake_llm = FakeLLMClient([
-        [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
-    ])
-    agent = Agent(
-        config=cfg,
-        llm_client=fake_llm,
-        workdir=workdir,
-        session_dir=workdir / "sessions",
-    )
-
-    events = await _collect(agent.run("write x.txt"))
-    result_events = [e for e in events if isinstance(e, ToolResultEvent)]
-    assert len(result_events) == 1
-    assert result_events[0].result.requires_confirmation is True
-    assert agent._pending_tool is not None
-    assert not (workdir / "x.txt").exists()
-
-
-@pytest.mark.asyncio
-async def test_agent_apply_tool_confirms(workdir):
-    cfg = Config()
-    fake_llm = FakeLLMClient([
-        [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
-    ])
-    agent = Agent(
-        config=cfg,
-        llm_client=fake_llm,
-        workdir=workdir,
-        session_dir=workdir / "sessions",
-    )
-    await _collect(agent.run("write x.txt"))
-
-    result = await agent.apply_tool("write", {"path": "x.txt", "content": "hi"})
-    assert result.success is True
-    assert (workdir / "x.txt").read_text() == "hi"
-    assert agent._pending_tool is None
-
-
-@pytest.mark.asyncio
-async def test_agent_apply_tool_rejects_mismatch(workdir):
-    cfg = Config()
-    fake_llm = FakeLLMClient([
-        [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
-    ])
-    agent = Agent(
-        config=cfg,
-        llm_client=fake_llm,
-        workdir=workdir,
-        session_dir=workdir / "sessions",
-    )
-    await _collect(agent.run("write x.txt"))
-
-    result = await agent.apply_tool("write", {"path": "x.txt", "content": "different"})
-    assert result.success is False
-    assert "does not match" in result.error
-    assert agent._pending_tool is not None
-    assert not (workdir / "x.txt").exists()
-
-
-@pytest.mark.asyncio
-async def test_agent_apply_tool_requires_pending_tool(workdir):
-    cfg = Config()
-    fake_llm = FakeLLMClient([[TextChunk(text="hello")]])
-    agent = Agent(
-        config=cfg,
-        llm_client=fake_llm,
-        workdir=workdir,
-        session_dir=workdir / "sessions",
-    )
-    await _collect(agent.run("hi"))
-
-    result = await agent.apply_tool("write", {"path": "x.txt", "content": "hi"})
-    assert result.success is False
-    assert "No tool is pending" in result.error
-
-
-@pytest.mark.asyncio
-async def test_agent_apply_tool_catches_execution_failure(workdir):
-    cfg = Config()
-    fake_llm = FakeLLMClient([
-        [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
-    ])
-    agent = Agent(
-        config=cfg,
-        llm_client=fake_llm,
-        workdir=workdir,
-        session_dir=workdir / "sessions",
-    )
-    await _collect(agent.run("write x.txt"))
-    assert agent._pending_tool is not None
-
-    original_execute = agent.registry.execute
-
-    async def failing_execute(name, arguments, dry_run=False):
-        if not dry_run:
-            raise RuntimeError("wet run failed")
-        return await original_execute(name, arguments, dry_run)
-
-    agent.registry.execute = failing_execute
-
-    result = await agent.apply_tool("write", {"path": "x.txt", "content": "hi"})
-    assert result.success is False
-    assert "wet run failed" in result.error
-    assert agent._pending_tool is not None
-
-    c1_message = next(
-        m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c1"
-    )
-    assert "wet run failed" in (c1_message.content or "")
-    assert agent._confirmation_applied is False
-
-    # A retry after the transient failure should still be able to apply.
-    agent.registry.execute = original_execute
-    retry = await agent.apply_tool("write", {"path": "x.txt", "content": "hi"})
-    assert retry.success is True
-    assert agent._pending_tool is None
-    assert agent._confirmation_applied is True
-
-
-@pytest.mark.asyncio
-async def test_agent_continue_after_confirmation_resumes_loop(workdir):
+async def test_agent_executes_write_tool_immediately(workdir):
+    """Tools run without confirmation: write applies during the turn."""
     cfg = Config()
     fake_llm = FakeLLMClient([
         [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
@@ -222,16 +101,14 @@ async def test_agent_continue_after_confirmation_resumes_loop(workdir):
     events = await _collect(agent.run("write x.txt"))
     result_events = [e for e in events if isinstance(e, ToolResultEvent)]
     assert len(result_events) == 1
-    assert result_events[0].result.requires_confirmation is True
-
-    apply_result = await agent.apply_tool("write", {"path": "x.txt", "content": "hi"})
-    assert apply_result.success is True
+    assert result_events[0].result.success is True
     assert (workdir / "x.txt").read_text() == "hi"
+    assert any(isinstance(e, TextDelta) and e.text == "done" for e in events)
 
-    continuation = await _collect(agent.continue_after_confirmation())
-    assert any(isinstance(e, TextDelta) and e.text == "done" for e in continuation)
-    assert agent._pending_tool is None
-    assert agent._confirmation_applied is False
+    tool_message = next(
+        m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c1"
+    )
+    assert "wrote" in (tool_message.content or "").lower()
 
 
 @pytest.mark.asyncio
@@ -325,64 +202,16 @@ async def test_agent_iteration_count_resets_per_turn(workdir):
 
 
 @pytest.mark.asyncio
-async def test_agent_reject_pending_tool_clears_state(workdir):
-    cfg = Config()
-    fake_llm = FakeLLMClient([
-        [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
-    ])
-    agent = Agent(
-        config=cfg,
-        llm_client=fake_llm,
-        workdir=workdir,
-        session_dir=workdir / "sessions",
-    )
-    await _collect(agent.run("write x.txt"))
-    assert agent._pending_tool is not None
-
-    agent.reject_pending_tool()
-    assert agent._pending_tool is None
-    tool_messages = [m for m in agent.messages if m.role == "tool"]
-    assert any(
-        m.tool_call_id == "c1" and "rejected" in (m.content or "").lower()
-        for m in tool_messages
-    )
-
-
-@pytest.mark.asyncio
-async def test_agent_new_turn_clears_stale_pending_tool(workdir):
-    cfg = Config()
-    fake_llm = FakeLLMClient([
-        [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
-        [TextChunk(text="fresh turn")],
-    ])
-    agent = Agent(
-        config=cfg,
-        llm_client=fake_llm,
-        workdir=workdir,
-        session_dir=workdir / "sessions",
-    )
-    await _collect(agent.run("write x.txt"))
-    assert agent._pending_tool is not None
-
-    events = await _collect(agent.run("new turn"))
-    assert agent._pending_tool is None
-    assert any(isinstance(e, TextDelta) and e.text == "fresh turn" for e in events)
-    tool_messages = [m for m in agent.messages if m.role == "tool"]
-    assert any(
-        m.tool_call_id == "c1" and "superseded" in (m.content or "").lower()
-        for m in tool_messages
-    )
-
-
-@pytest.mark.asyncio
-async def test_agent_multi_tool_confirmation_appends_placeholders(workdir):
+async def test_agent_multi_tool_turn_executes_all_calls(workdir):
+    """Every tool call in a multi-tool turn executes in order, without pausing."""
     cfg = Config()
     fake_llm = FakeLLMClient([
         [
             ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"}),
             ToolCallEvent(id="c2", name="write", arguments={"path": "x.txt", "content": "hi"}),
-            ToolCallEvent(id="c3", name="ls", arguments={"path": "."}),
+            ToolCallEvent(id="c3", name="read", arguments={"path": "x.txt"}),
         ],
+        [TextChunk(text="done")],
     ])
     (workdir / "main.py").write_text("x = 1\n")
     agent = Agent(
@@ -393,12 +222,11 @@ async def test_agent_multi_tool_confirmation_appends_placeholders(workdir):
     )
 
     events = await _collect(agent.run("multi"))
-    # The second tool (write) requires confirmation, so the loop stops there.
     result_events = [e for e in events if isinstance(e, ToolResultEvent)]
-    assert len(result_events) == 2
-    assert result_events[1].result.requires_confirmation is True
-    assert agent._pending_tool is not None
-    assert agent._pending_tool["id"] == "c2"
+    assert [e.name for e in result_events] == ["read", "write", "read"]
+    assert all(e.result.success for e in result_events)
+    assert (workdir / "x.txt").read_text() == "hi"
+    assert any(isinstance(e, TextDelta) and e.text == "done" for e in events)
 
     # Every assistant tool_call must have a matching tool result message.
     assistant = [m for m in agent.messages if m.role == "assistant" and m.tool_calls]
@@ -407,115 +235,11 @@ async def test_agent_multi_tool_confirmation_appends_placeholders(workdir):
     tool_result_ids = {m.tool_call_id for m in agent.messages if m.role == "tool"}
     assert tool_call_ids == tool_result_ids
 
-    # The pending tool and remaining calls have placeholder results.
-    pending_placeholder = next(
-        m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c2"
-    )
-    assert "pending" in (pending_placeholder.content or "").lower()
-    remaining_placeholder = next(
-        m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c3"
-    )
-    assert "pending" in (remaining_placeholder.content or "").lower()
-
-    # After confirmation the pending placeholder is replaced with the real result.
-    apply_result = await agent.apply_tool(
-        "write", {"path": "x.txt", "content": "hi"}
-    )
-    assert apply_result.success is True
-    c2_message = next(
-        m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c2"
-    )
-    assert "wrote" in (c2_message.content or "").lower()
-
-
-@pytest.mark.asyncio
-async def test_agent_continue_executes_remaining_tools_after_confirmation(workdir):
-    (workdir / "main.py").write_text("x = 1\n")
-    cfg = Config()
-    fake_llm = FakeLLMClient([
-        [
-            ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"}),
-            ToolCallEvent(
-                id="c2", name="write", arguments={"path": "x.txt", "content": "hi"}
-            ),
-            ToolCallEvent(id="c3", name="read", arguments={"path": "x.txt"}),
-        ],
-        [TextChunk(text="done")],
-    ])
-    agent = Agent(
-        config=cfg,
-        llm_client=fake_llm,
-        workdir=workdir,
-        session_dir=workdir / "sessions",
-    )
-
-    events = await _collect(agent.run("multi"))
-    result_events = [e for e in events if isinstance(e, ToolResultEvent)]
-    assert len(result_events) == 2  # c1 read, c2 write dry-run
-    assert agent._pending_tool is not None
-    assert agent._pending_tool["id"] == "c2"
-
-    apply_result = await agent.apply_tool(
-        "write", {"path": "x.txt", "content": "hi"}
-    )
-    assert apply_result.success is True
-
-    continuation = await _collect(agent.continue_after_confirmation())
-    result_events = [e for e in continuation if isinstance(e, ToolResultEvent)]
-    assert len(result_events) == 1
-    assert result_events[0].name == "read"
-    assert result_events[0].result.success is True
-    assert any(isinstance(e, TextDelta) and e.text == "done" for e in continuation)
-    assert agent._pending_tool is None
-
-    # No placeholder messages should remain.
-    for msg in agent.messages:
-        if msg.role == "tool":
-            assert "pending" not in (msg.content or "").lower()
-
-    # The remaining read tool actually saw the file written by c2.
+    # The final read saw the file written by the earlier write call.
     c3_message = next(
         m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c3"
     )
     assert "hi" in (c3_message.content or "")
-
-
-@pytest.mark.asyncio
-async def test_agent_continue_stops_when_remaining_tool_requires_confirmation(workdir):
-    cfg = Config()
-    fake_llm = FakeLLMClient([
-        [
-            ToolCallEvent(
-                id="c1", name="write", arguments={"path": "a.txt", "content": "a"}
-            ),
-            ToolCallEvent(
-                id="c2", name="write", arguments={"path": "b.txt", "content": "b"}
-            ),
-        ],
-    ])
-    agent = Agent(
-        config=cfg,
-        llm_client=fake_llm,
-        workdir=workdir,
-        session_dir=workdir / "sessions",
-    )
-
-    await _collect(agent.run("multi"))
-    assert agent._pending_tool is not None
-    assert agent._pending_tool["id"] == "c1"
-
-    apply_result = await agent.apply_tool(
-        "write", {"path": "a.txt", "content": "a"}
-    )
-    assert apply_result.success is True
-
-    continuation = await _collect(agent.continue_after_confirmation())
-    result_events = [e for e in continuation if isinstance(e, ToolResultEvent)]
-    assert len(result_events) == 1
-    assert result_events[0].result.requires_confirmation is True
-    assert agent._pending_tool is not None
-    assert agent._pending_tool["id"] == "c2"
-    assert (workdir / "b.txt").exists() is False
 
 
 @pytest.mark.asyncio
@@ -531,7 +255,7 @@ async def test_agent_tool_crash_yields_tool_error_event(workdir):
         session_dir=workdir / "sessions",
     )
 
-    async def crashing_execute(name, arguments, dry_run=False):
+    async def crashing_execute(name, arguments):
         raise RuntimeError("tool exploded")
 
     agent.registry.execute = crashing_execute
@@ -560,7 +284,7 @@ async def test_agent_tool_crash_appends_tool_results(workdir):
         session_dir=workdir / "sessions",
     )
 
-    async def crashing_execute(name, arguments, dry_run=False):
+    async def crashing_execute(name, arguments):
         raise RuntimeError("tool exploded")
 
     agent.registry.execute = crashing_execute
@@ -586,57 +310,6 @@ async def test_agent_tool_crash_appends_tool_results(workdir):
 
 
 @pytest.mark.asyncio
-async def test_agent_continue_after_confirmation_replaces_placeholder_on_crash(workdir):
-    """A crash while executing remaining tools must replace the placeholder."""
-    (workdir / "main.py").write_text("x = 1\n")
-    cfg = Config()
-    fake_llm = FakeLLMClient([
-        [
-            ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"}),
-            ToolCallEvent(id="c2", name="read", arguments={"path": "main.py"}),
-        ],
-        [TextChunk(text="done")],
-    ])
-    agent = Agent(
-        config=cfg,
-        llm_client=fake_llm,
-        workdir=workdir,
-        session_dir=workdir / "sessions",
-    )
-
-    events = await _collect(agent.run("multi"))
-    result_events = [e for e in events if isinstance(e, ToolResultEvent)]
-    assert len(result_events) == 1
-    assert agent._pending_tool is not None
-    assert agent._pending_tool["id"] == "c1"
-
-    apply_result = await agent.apply_tool(
-        "write", {"path": "x.txt", "content": "hi"}
-    )
-    assert apply_result.success is True
-
-    original_execute = agent.registry.execute
-
-    async def crashing_read(name, arguments, dry_run=False):
-        if name == "read":
-            raise RuntimeError("read crashed")
-        return await original_execute(name, arguments, dry_run)
-
-    agent.registry.execute = crashing_read
-
-    continuation = await _collect(agent.continue_after_confirmation())
-    error_events = [e for e in continuation if isinstance(e, ErrorEvent)]
-    assert len(error_events) == 1
-    assert "read crashed" in error_events[0].message
-
-    c2_message = next(
-        m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c2"
-    )
-    assert "pending" not in (c2_message.content or "").lower()
-    assert "read crashed" in (c2_message.content or "")
-
-
-@pytest.mark.asyncio
 async def test_agent_max_iterations_cancels_tool_calls(workdir):
     cfg = Config()
     cfg.llm.max_iterations = 1
@@ -654,9 +327,9 @@ async def test_agent_max_iterations_cancels_tool_calls(workdir):
     executed = []
     original_execute = agent.registry.execute
 
-    async def tracking_execute(name, arguments, dry_run=False):
-        executed.append((name, arguments, dry_run))
-        return await original_execute(name, arguments, dry_run)
+    async def tracking_execute(name, arguments):
+        executed.append((name, arguments))
+        return await original_execute(name, arguments)
 
     agent.registry.execute = tracking_execute
 
@@ -677,56 +350,6 @@ async def test_agent_max_iterations_cancels_tool_calls(workdir):
     error_events = [e for e in events if isinstance(e, ErrorEvent)]
     assert len(error_events) == 1
     assert "maximum" in error_events[0].message.lower()
-
-
-@pytest.mark.asyncio
-async def test_agent_continue_appends_missing_placeholder(workdir):
-    """If a remaining-tool placeholder is missing, a new tool message is appended."""
-    (workdir / "main.py").write_text("x = 1\n")
-    cfg = Config()
-    fake_llm = FakeLLMClient([
-        [
-            ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"}),
-            ToolCallEvent(
-                id="c2", name="write", arguments={"path": "x.txt", "content": "hi"}
-            ),
-            ToolCallEvent(id="c3", name="read", arguments={"path": "x.txt"}),
-        ],
-        [TextChunk(text="done")],
-    ])
-    agent = Agent(
-        config=cfg,
-        llm_client=fake_llm,
-        workdir=workdir,
-        session_dir=workdir / "sessions",
-    )
-
-    await _collect(agent.run("multi"))
-    assert agent._pending_tool is not None
-    assert agent._pending_tool["id"] == "c2"
-
-    apply_result = await agent.apply_tool(
-        "write", {"path": "x.txt", "content": "hi"}
-    )
-    assert apply_result.success is True
-
-    # Remove the placeholder message for the remaining tool, but keep its id in
-    # the pending set so the continuation still tries to execute it.
-    agent.messages = [
-        m
-        for m in agent.messages
-        if not (m.role == "tool" and m.tool_call_id == "c3")
-    ]
-    assert "c3" in agent._pending_placeholders
-
-    continuation = await _collect(agent.continue_after_confirmation())
-    assert any(isinstance(e, TextDelta) and e.text == "done" for e in continuation)
-    assert agent._pending_tool is None
-
-    c3_message = next(
-        m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c3"
-    )
-    assert "hi" in (c3_message.content or "")
 
 
 @pytest.mark.asyncio
@@ -756,69 +379,6 @@ async def test_agent_rewrites_session_on_subsequent_turns(workdir):
     assert roles.count("system") == 1
     assert roles.count("user") == 2
     assert "assistant" in roles
-
-
-@pytest.mark.asyncio
-async def test_agent_session_rewrite_replaces_placeholder(workdir):
-    """Placeholder tool results updated in-place must be reflected on disk."""
-    cfg = Config()
-    fake_llm = FakeLLMClient([
-        [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
-    ])
-    session_dir = workdir / "sessions"
-    agent = Agent(
-        config=cfg,
-        llm_client=fake_llm,
-        workdir=workdir,
-        session_dir=session_dir,
-    )
-
-    await _collect(agent.run("write x.txt"))
-    session_file = next(session_dir.glob("*.jsonl"))
-    lines_before = session_file.read_text().strip().splitlines()
-    placeholder_line = next(
-        line for line in lines_before if json.loads(line).get("tool_call_id") == "c1"
-    )
-    assert "pending" in placeholder_line.lower()
-
-    await agent.apply_tool("write", {"path": "x.txt", "content": "hi"})
-    await agent._save_session()
-    lines_after = session_file.read_text().strip().splitlines()
-    updated_line = next(
-        line for line in lines_after if json.loads(line).get("tool_call_id") == "c1"
-    )
-    assert "pending" not in updated_line.lower()
-    assert "wrote" in updated_line.lower()
-
-
-@pytest.mark.asyncio
-async def test_agent_does_not_mutate_stored_messages(workdir):
-    cfg = Config()
-    fake_llm = FakeLLMClient([
-        [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
-    ])
-    agent = Agent(
-        config=cfg,
-        llm_client=fake_llm,
-        workdir=workdir,
-        session_dir=workdir / "sessions",
-    )
-
-    events = await _collect(agent.run("write x.txt"))
-    assert any(isinstance(e, ToolResultEvent) and e.result.requires_confirmation for e in events)
-    placeholder = next(
-        m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c1"
-    )
-    placeholder_id = id(placeholder)
-
-    result = await agent.apply_tool("write", {"path": "x.txt", "content": "hi"})
-    assert result.success is True
-
-    updated = next(
-        m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c1"
-    )
-    assert "wrote" in (updated.content or "").lower()
-    assert id(updated) != placeholder_id, "Agent should replace the message, not mutate it in place"
 
 
 @pytest.mark.asyncio
@@ -1091,7 +651,6 @@ async def test_agent_trace_records_full_turn(workdir):
     tool_call, tool_result = records[4], records[5]
     assert tool_call["name"] == "read"
     assert tool_call["arguments"] == {"path": "main.py"}
-    assert tool_call["dry_run"] is True
     assert tool_result["success"] is True
     assert tool_result["duration"] >= 0
     assert "x = 1" in tool_result["output"]
@@ -1099,61 +658,6 @@ async def test_agent_trace_records_full_turn(workdir):
     turn_end = records[-1]
     assert turn_end["status"] == "completed"
     assert turn_end["iterations"] == 2
-
-
-@pytest.mark.asyncio
-async def test_agent_trace_records_confirmation_decisions(workdir):
-    fake_llm = FakeLLMClient([
-        [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
-    ])
-    agent = Agent(
-        config=Config(),
-        llm_client=fake_llm,
-        workdir=workdir,
-        session_dir=workdir / "sessions",
-    )
-    await _collect(agent.run("write x.txt"))
-
-    result = await agent.apply_tool("write", {"path": "x.txt", "content": "hi"})
-    assert result.success is True
-
-    records = read_trace(agent.trace.path)
-    confirmation = next(r for r in records if r["type"] == "confirmation")
-    assert confirmation["decision"] == "approved"
-    assert confirmation["tool_call_id"] == "c1"
-    assert confirmation["wait"] is not None
-    # The real (non-dry-run) execution is logged too.
-    wet_run = next(
-        r
-        for r in records
-        if r["type"] == "tool_result" and r["dry_run"] is False
-    )
-    assert wet_run["success"] is True
-
-
-@pytest.mark.asyncio
-async def test_agent_trace_records_rejection_and_supersede(workdir):
-    fake_llm = FakeLLMClient([
-        [ToolCallEvent(id="c1", name="write", arguments={"path": "x.txt", "content": "hi"})],
-        [ToolCallEvent(id="c2", name="write", arguments={"path": "y.txt", "content": "hi"})],
-        [TextChunk(text="ok")],
-    ])
-    agent = Agent(
-        config=Config(),
-        llm_client=fake_llm,
-        workdir=workdir,
-        session_dir=workdir / "sessions",
-    )
-    await _collect(agent.run("write x.txt"))
-    agent.reject_pending_tool()
-
-    await _collect(agent.run("write y.txt"))
-    # Starting a new turn with a pending tool supersedes it.
-    await _collect(agent.run("third"))
-
-    records = read_trace(agent.trace.path)
-    decisions = [r["decision"] for r in records if r["type"] == "confirmation"]
-    assert decisions == ["rejected", "superseded"]
 
 
 @pytest.mark.asyncio
@@ -1191,7 +695,7 @@ async def test_agent_trace_records_tool_crash(workdir):
         session_dir=workdir / "sessions",
     )
 
-    async def crashing_execute(name, arguments, dry_run=False):
+    async def crashing_execute(name, arguments):
         raise RuntimeError("tool exploded")
 
     agent.registry.execute = crashing_execute

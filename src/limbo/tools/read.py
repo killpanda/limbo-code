@@ -38,7 +38,7 @@ class ReadTool(BaseTool):
         super().__init__(workdir)
         self.sensitive_files = set(sensitive_files or DEFAULT_SENSITIVE_FILES)
 
-    def run(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
+    def run(self, arguments: dict[str, Any]) -> ToolResult:
         raw_path = arguments.get("path", "")
         target = self.resolve(raw_path)
 

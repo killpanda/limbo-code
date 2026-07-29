@@ -32,7 +32,7 @@ class FindTool(BaseTool):
         "required": ["pattern"],
     }
 
-    def run(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
+    def run(self, arguments: dict[str, Any]) -> ToolResult:
         pattern = arguments.get("pattern", "")
         path = arguments.get("path", ".")
         limit = arguments.get("limit", MAX_RESULTS)

@@ -56,16 +56,11 @@ ToolCard .tool-header {
 ToolCard.running .tool-header {
     color: $warning;
 }
-ToolCard.success .tool-header,
-ToolCard.applied .tool-header {
+ToolCard.success .tool-header {
     color: $success;
 }
-ToolCard.error .tool-header,
-ToolCard.rejected .tool-header {
+ToolCard.error .tool-header {
     color: $error;
-}
-ToolCard.pending .tool-header {
-    color: $warning;
 }
 ToolCard .tool-body {
     height: auto;
@@ -98,39 +93,6 @@ ToolCard .tool-body {
     height: 1;
     padding: 0 2;
     color: $text-muted;
-}
-
-/* ---- 确认弹窗 ---- */
-ConfirmDialog {
-    align: center middle;
-}
-ConfirmDialog > Vertical {
-    width: 80%;
-    max-width: 110;
-    height: auto;
-    max-height: 80%;
-    border: round $warning;
-    background: $surface;
-    padding: 1 2;
-}
-ConfirmDialog #dialog-title {
-    text-style: bold;
-    margin-bottom: 1;
-}
-ConfirmDialog #dialog-warning {
-    color: $warning;
-    margin-top: 1;
-}
-ConfirmDialog #diff-body {
-    max-height: 60%;
-}
-ConfirmDialog #dialog-buttons {
-    height: auto;
-    align: center middle;
-    margin-top: 1;
-}
-ConfirmDialog Button {
-    margin: 0 1;
 }
 
 /* ---- 会话选择弹窗 ---- */

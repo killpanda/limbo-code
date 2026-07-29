@@ -110,12 +110,9 @@ you no longer need them.
 limbo --workdir /path/to/project
 ```
 
-## Safety and confirmation
+## Safety
 
-Limbo asks for confirmation before applying destructive or workspace-modifying
-tool calls. Writes and edits are gated by default, and **bash is also
-confirmation-gated** because it is unsandboxed and can mutate state.
-
+Limbo executes every tool call immediately, without asking for confirmation.
 File tools (`read`, `edit`, `write`, `grep`, `find`, `ls`) are bounded to the
 current working directory and reject paths that escape it, including via
 symlinks. The boundary check resolves the path before each operation, so a
@@ -125,7 +122,7 @@ race) could escape the workdir. **This is a known limitation for the MVP.**
 Bash is an exception: it is started in the working directory but is **not**
 sandboxed. Commands can `cd ..`, use absolute paths, and read or write outside
 the workdir. In addition, commands that match dangerous patterns such as `rm`
-or `git reset --hard` are **rejected outright and cannot be confirmed**.
+or `git reset --hard` are **rejected outright**.
 The pattern list is configurable but cannot be disabled from the UI. Bash
 commands are filtered with a simple heuristic, but that filter can be bypassed
 by subshells (`bash -c 'rm -rf /'`), command substitution (`$(rm -rf /)`),

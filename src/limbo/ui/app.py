@@ -9,7 +9,6 @@ from textual.app import App
 from limbo.config import Config
 from limbo.llm.client import LLMClient
 from limbo.ui.screens.main import MainScreen
-from limbo.ui.widgets.confirm import Confirmed, Rejected
 
 
 class LimboApp(App[None]):
@@ -51,15 +50,3 @@ class LimboApp(App[None]):
                 resume=self.resume,
             )
         )
-
-    def on_confirmed(self, _event: Confirmed) -> None:
-        for screen in reversed(self.screen_stack):
-            if isinstance(screen, MainScreen):
-                screen.handle_confirmation()
-                break
-
-    def on_rejected(self, _event: Rejected) -> None:
-        for screen in reversed(self.screen_stack):
-            if isinstance(screen, MainScreen):
-                screen.handle_rejection()
-                break

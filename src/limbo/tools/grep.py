@@ -49,7 +49,7 @@ class GrepTool(BaseTool):
         "required": ["pattern"],
     }
 
-    def run(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
+    def run(self, arguments: dict[str, Any]) -> ToolResult:
         pattern = arguments.get("pattern", "")
         path = arguments.get("path", ".")
         glob = arguments.get("glob")

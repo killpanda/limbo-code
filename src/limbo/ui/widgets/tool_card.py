@@ -2,7 +2,7 @@
 
 A tool card renders as a single summary line (state symbol + tool name +
 argument summary + elapsed time) and can be expanded to show the full tool
-output. State machine: running → success | error | pending → applied | rejected.
+output. State machine: running → success | error.
 """
 
 from __future__ import annotations
@@ -20,17 +20,11 @@ _STATE_SYMBOLS = {
     "running": "…",
     "success": "✓",
     "error": "✗",
-    "pending": "⏸",
-    "applied": "✓",
-    "rejected": "✗",
 }
 _STATE_LABELS = {
     "running": "运行中",
     "success": "",
     "error": "失败",
-    "pending": "等待确认",
-    "applied": "已应用",
-    "rejected": "已拒绝",
 }
 
 # Argument keys worth showing in the one-line summary, in priority order.
@@ -82,24 +76,13 @@ class ToolCard(Vertical):
 
     # -- state transitions -------------------------------------------------
 
-    def set_pending(self, output: str) -> None:
-        """Awaiting user confirmation; body shows the dry-run preview/diff."""
-        self._set_state("pending")
+    def set_success(self, output: str) -> None:
+        self._set_state("success")
         self._set_body(output, lexer=self._lexer_for_body())
-
-    def set_success(self, output: str, *, state: str = "success") -> None:
-        self._set_state(state)
-        self._set_body(output, lexer=self._lexer_for_body())
-
-    def set_applied(self, output: str) -> None:
-        self.set_success(output, state="applied")
 
     def set_error(self, error: str) -> None:
         self._set_state("error")
         self._set_body(error)
-
-    def set_rejected(self) -> None:
-        self._set_state("rejected")
 
     # -- expansion ----------------------------------------------------------
 

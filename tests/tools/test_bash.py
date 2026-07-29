@@ -123,7 +123,7 @@ def test_is_dangerous_allows_redirection_in_quoted_string():
 
 
 def test_is_dangerous_allows_redirection_by_default(workdir):
-    """Redirection is no longer hard-blocked by default; it is confirmation-gated."""
+    """Redirection is not hard-blocked by default."""
     target = workdir / "limbo-test-redir.txt"
     tool = BashTool(workdir=workdir)
     result = tool.execute({"command": f"echo a > {target}"})
@@ -190,26 +190,6 @@ def test_bash_allows_command_not_in_custom_patterns(workdir):
     tool = BashTool(workdir=workdir, dangerous_patterns=["reboot"])
     result = tool.execute({"command": "echo hello"})
     assert result.success is True
-
-
-def test_bash_dry_run_does_not_execute(workdir):
-    tool = BashTool(workdir=workdir)
-    marker = workdir / "dry-run-marker.txt"
-    result = tool.execute(
-        {"command": f"touch {marker}"}, dry_run=True
-    )
-    assert result.success is True
-    assert result.requires_confirmation is True
-    assert "dry-run-marker" in result.output
-    assert "approval" in result.output.lower()
-    assert not marker.exists()
-
-
-def test_bash_dry_run_blocks_dangerous_command(workdir):
-    tool = BashTool(workdir=workdir)
-    result = tool.execute({"command": "rm -rf /"}, dry_run=True)
-    assert result.success is False
-    assert "blocked" in result.error.lower()
 
 
 def test_bash_handles_non_utf8_output(workdir):

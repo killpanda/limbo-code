@@ -221,10 +221,10 @@ def export_jsonl(
 
     1. a ``meta`` record (session metadata + export timestamp),
     2. every trace record in chronological order (LLM request bodies,
-       usage, tool calls/results, confirmations, errors) when the trace
+       usage, tool calls/results, errors) when the trace
        file exists — otherwise the raw conversation messages,
     3. a final ``messages_snapshot`` record with the exact message history
-       as persisted (placeholders, rejections and all).
+       as persisted.
     """
     meta_line = json.dumps(
         {

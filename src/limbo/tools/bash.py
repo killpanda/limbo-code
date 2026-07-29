@@ -23,7 +23,7 @@ class BashTool(BaseTool):
         "Execute a bash command in the current working directory. Returns stdout and stderr. "
         "WARNING: bash is not sandboxed and can access files outside the workdir. "
         "Commands matching dangerous patterns (e.g. rm, git reset --hard) are "
-        "rejected outright and cannot be confirmed. The filter is heuristic only: "
+        "rejected outright. The filter is heuristic only: "
         "subshells, command substitution, variable indirection, options before the command "
         "name, and variable assignments before the command name "
         "(e.g. 'bash -c rm -rf /', '$(rm ...)', 'git -C /foo reset --hard', "
@@ -47,7 +47,7 @@ class BashTool(BaseTool):
             DEFAULT_DANGEROUS_COMMANDS
         )
 
-    def run(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
+    def run(self, arguments: dict[str, Any]) -> ToolResult:
         command = arguments.get("command", "")
         timeout = arguments.get("timeout", DEFAULT_TIMEOUT)
 
@@ -59,9 +59,6 @@ class BashTool(BaseTool):
                 success=False,
                 error=f"Command blocked by safety policy: {command}",
             )
-
-        if dry_run:
-            return self.confirm(f"Will execute on approval:\n$ {command}")
 
         # Cap the effective timeout so a huge value cannot block the worker
         # indefinitely. The cap is documented in the tool schema above.
@@ -140,8 +137,7 @@ def is_dangerous(command: str, patterns: list[str]) -> bool:
         subshells (``bash -c ...``), command substitution (``$(rm ...)``),
         variable indirection, variable assignments before a command name
         (``VAR=1 rm -rf /``), and options between the command name and the
-        matched tokens (``git -C /foo reset --hard``) can bypass it. Review all
-        commands before confirming destructive actions.
+        matched tokens (``git -C /foo reset --hard``) can bypass it.
     """
     tokens = _tokenize_command(command)
     control_operators = {";", "&&", "&", "||", "|"}

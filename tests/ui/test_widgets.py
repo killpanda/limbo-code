@@ -2,7 +2,6 @@ import pytest
 from textual.app import App
 
 from limbo.ui.widgets.chat import ChatWidget
-from limbo.ui.widgets.confirm import ConfirmDialog, Rejected
 from limbo.ui.widgets.input import InputWidget, UserSubmitted
 
 
@@ -84,27 +83,6 @@ async def test_input_shift_enter_inserts_newline():
 
 
 @pytest.mark.asyncio
-async def test_confirm_dialog_escape_posts_rejected():
-    rejected = []
-
-    class TestApp(App[None]):
-        def on_rejected(self, event: Rejected) -> None:
-            rejected.append(event)
-
-    app = TestApp()
-    async with app.run_test() as pilot:
-        dialog = ConfirmDialog(title="Test", body="body")
-        pilot.app.push_screen(dialog)
-        await pilot.pause()
-
-        await pilot.press("escape")
-        await pilot.pause()
-
-    assert len(rejected) == 1
-    assert isinstance(rejected[0], Rejected)
-
-
-@pytest.mark.asyncio
 async def test_chat_append_streams_into_one_block():
     class TestApp(App[None]):
         def compose(self):
@@ -151,14 +129,8 @@ async def test_tool_card_state_transitions():
         card = widget.add_tool_card("c1", "write", {"path": "x.txt", "content": "hi"})
         assert card.state == "running"
 
-        card.set_pending("preview body")
-        assert card.state == "pending"
-
-        card.set_applied("written")
-        assert card.state == "applied"
-
-        card.set_rejected()
-        assert card.state == "rejected"
+        card.set_success("written")
+        assert card.state == "success"
 
         err_card = widget.add_tool_card("c2", "read", {"path": "missing.txt"})
         err_card.set_error("not found")

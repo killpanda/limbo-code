@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-from collections.abc import AsyncIterator
 from pathlib import Path
 
 from textual.app import ComposeResult
@@ -30,11 +28,8 @@ from limbo.ui.screens.game2048 import Game2048Screen
 from limbo.ui.screens.session_picker import SessionPicker
 from limbo.ui.widgets.chat import ChatWidget
 from limbo.ui.widgets.command_menu import SlashCommandMenu
-from limbo.ui.widgets.confirm import ConfirmDialog
 from limbo.ui.widgets.input import InputWidget, UserSubmitted
 from limbo.ui.widgets.status_bar import StatusBar
-
-CONFIRMATION_TIMEOUT = 300.0
 
 
 class MainScreen(Screen[None]):
@@ -61,8 +56,6 @@ class MainScreen(Screen[None]):
         self.llm_client = llm_client or create_llm_client(self.config)
         self.session_dir = session_dir or Path.home() / ".limbo" / "sessions"
         self.agent = self._new_agent(resume=resume)
-        self._confirmation_event = asyncio.Event()
-        self._confirmation_result: bool | None = None
         self._slash_menu_open = False
         self._commands = SlashCommandRegistry()
         self._register_builtin_commands()
@@ -319,16 +312,6 @@ class MainScreen(Screen[None]):
     def action_game2048(self) -> None:
         self._open_game2048()
 
-    def handle_confirmation(self) -> None:
-        """Handle an approval from the confirmation dialog."""
-        self._confirmation_result = True
-        self._confirmation_event.set()
-
-    def handle_rejection(self) -> None:
-        """Handle a rejection from the confirmation dialog."""
-        self._confirmation_result = False
-        self._confirmation_event.set()
-
     async def on_unmount(self) -> None:
         """Close the LLM client on shutdown to release its HTTP resources."""
         close = getattr(self.llm_client, "close", None)
@@ -350,19 +333,8 @@ class MainScreen(Screen[None]):
         input_widget.disabled = True
         statusbar.set_state("thinking…", "thinking")
         try:
-            stream: AsyncIterator[AgentEvent] = self.agent.run(user_input)
-            # The agent may pause for confirmation mid-turn. When a tool is
-            # confirmed, `confirmation_applied` becomes True and the stream is
-            # replaced with the continuation so remaining tools/responses are
-            # processed before returning to the user.
-            while True:
-                async for event in stream:
-                    await self._process_agent_event(event)
-
-                if self.agent.confirmation_applied:
-                    stream = self.agent.continue_after_confirmation()
-                    continue
-                break
+            async for event in self.agent.run(user_input):
+                await self._process_agent_event(event)
         finally:
             input_widget.disabled = False
             # Disabling the input mid-turn moves focus away; give it back so
@@ -373,7 +345,6 @@ class MainScreen(Screen[None]):
     async def _process_agent_event(self, event: AgentEvent) -> None:
         chat = self.query_one("#chat", ChatWidget)
         statusbar = self.query_one("#statusbar", StatusBar)
-        input_widget = self.query_one("#input", InputWidget)
 
         if isinstance(event, TextDelta):
             await chat.append_assistant_text(event.text)
@@ -387,54 +358,9 @@ class MainScreen(Screen[None]):
         elif isinstance(event, ToolResultEvent):
             result = event.result
             card = chat.add_tool_card(event.id, event.name, event.arguments)
-
-            if not result.requires_confirmation:
-                if result.success:
-                    card.set_success(result.output or "")
-                    statusbar.set_state("thinking…", "thinking")
-                else:
-                    card.set_error(result.error or "Tool failed.")
-                    statusbar.set_state("idle")
-                return
-
-            # --- confirmation flow ---
-            card.set_pending(result.output or "")
-            input_widget.disabled = True
-            self._confirmation_event.clear()
-            self._confirmation_result = None
-            warning = None
-            if event.name == "bash":
-                warning = (
-                    "bash 安全过滤仅是启发式的，可能被子 shell 或命令替换绕过，"
-                    "请仔细审查后再确认。"
-                )
-            dialog = ConfirmDialog(
-                title=f"Apply {event.name}?",
-                body=result.output or "",
-                warning=warning,
-            )
-            self.app.push_screen(dialog)
-            try:
-                await asyncio.wait_for(
-                    self._confirmation_event.wait(),
-                    timeout=CONFIRMATION_TIMEOUT,
-                )
-            except asyncio.TimeoutError:
-                chat.add_error(f"[{event.name} 确认超时，已自动拒绝]")
-                card.set_rejected()
-                dialog.dismiss()
-                input_widget.disabled = False
-                self.agent.reject_pending_tool(decision="timeout")
-                return
-
-            if self._confirmation_result:
-                apply_result = await self.agent.apply_tool(
-                    event.name, event.arguments
-                )
-                if apply_result.success:
-                    card.set_applied(apply_result.output or "")
-                else:
-                    card.set_error(apply_result.error or "Tool failed.")
+            if result.success:
+                card.set_success(result.output or "")
+                statusbar.set_state("thinking…", "thinking")
             else:
-                card.set_rejected()
-                self.agent.reject_pending_tool()
+                card.set_error(result.error or "Tool failed.")
+                statusbar.set_state("idle")

@@ -1,4 +1,4 @@
-from limbo.models import Message, TextChunk, ToolCall, ToolCallEvent, ToolResult
+from limbo.models import Message, TextChunk, ToolCall, ToolCallEvent
 
 
 def test_message_creation():
@@ -13,11 +13,6 @@ def test_tool_call_creation():
     tc = ToolCall(id="call_1", name="read", arguments={"path": "main.py"})
     assert tc.name == "read"
     assert tc.arguments["path"] == "main.py"
-
-
-def test_tool_result_requires_confirmation_defaults_false():
-    result = ToolResult(success=True, output="ok")
-    assert result.requires_confirmation is False
 
 
 def test_llm_events_are_frozen_dataclasses():

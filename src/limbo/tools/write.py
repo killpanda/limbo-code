@@ -20,15 +20,10 @@ class WriteTool(BaseTool):
         "required": ["path", "content"],
     }
 
-    def run(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
+    def run(self, arguments: dict[str, Any]) -> ToolResult:
         raw_path = arguments.get("path", "")
         content = arguments.get("content", "")
         target = self.resolve_creatable(raw_path)
-
-        if dry_run:
-            return self.confirm(
-                f"Will create/overwrite {raw_path} ({len(content)} chars)."
-            )
 
         try:
             target.parent.mkdir(parents=True, exist_ok=True)

@@ -14,34 +14,24 @@ def workdir():
 
 def test_write_creates_file(workdir):
     tool = WriteTool(workdir=workdir)
-    result = tool.execute({"path": "new.txt", "content": "hello"}, dry_run=False)
+    result = tool.execute({"path": "new.txt", "content": "hello"})
     assert result.success is True
-    assert result.requires_confirmation is False
     assert (workdir / "new.txt").read_text() == "hello"
 
 
 def test_write_overwrites_file(workdir):
     (workdir / "x.txt").write_text("old")
     tool = WriteTool(workdir=workdir)
-    result = tool.execute({"path": "x.txt", "content": "new"}, dry_run=False)
+    result = tool.execute({"path": "x.txt", "content": "new"})
     assert result.success is True
     assert (workdir / "x.txt").read_text() == "new"
 
 
 def test_write_outside_workdir(workdir):
     tool = WriteTool(workdir=workdir)
-    result = tool.execute({"path": "../x.txt", "content": "x"}, dry_run=False)
+    result = tool.execute({"path": "../x.txt", "content": "x"})
     assert result.success is False
     assert "outside" in result.error.lower()
-
-
-def test_write_dry_run_does_not_create_file(workdir):
-    tool = WriteTool(workdir=workdir)
-    result = tool.execute({"path": "new.txt", "content": "hello"}, dry_run=True)
-    assert result.success is True
-    assert result.requires_confirmation is True
-    assert "Will create/overwrite" in result.output
-    assert not (workdir / "new.txt").exists()
 
 
 def test_write_rejects_symlink_escape(workdir):
@@ -50,7 +40,7 @@ def test_write_rejects_symlink_escape(workdir):
     link.symlink_to(outside)
     tool = WriteTool(workdir=workdir)
     result = tool.execute(
-        {"path": "escape_link", "content": "escaped"}, dry_run=False
+        {"path": "escape_link", "content": "escaped"}
     )
     assert result.success is False
     assert "outside" in result.error.lower()
@@ -67,7 +57,7 @@ def test_write_broken_symlink_to_outside_is_rejected(workdir):
 
     tool = WriteTool(workdir=workdir)
     result = tool.execute(
-        {"path": "broken_link", "content": "escaped"}, dry_run=False
+        {"path": "broken_link", "content": "escaped"}
     )
     assert result.success is False
     assert "outside" in result.error.lower()

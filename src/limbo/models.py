@@ -36,7 +36,6 @@ class ToolResult(BaseModel):
     success: bool
     output: str | None = None
     error: str | None = None
-    requires_confirmation: bool = False
 
 
 @dataclass(frozen=True)

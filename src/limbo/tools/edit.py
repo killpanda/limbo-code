@@ -31,7 +31,7 @@ class EditTool(BaseTool):
         "required": ["path", "old_text", "new_text"],
     }
 
-    def run(self, arguments: dict[str, Any], dry_run: bool = False) -> ToolResult:
+    def run(self, arguments: dict[str, Any]) -> ToolResult:
         raw_path = arguments.get("path", "")
         old_text = arguments.get("old_text", "")
         new_text = arguments.get("new_text", "")
@@ -56,9 +56,6 @@ class EditTool(BaseTool):
             return ToolResult(success=False, error=f"No changes to {raw_path}.")
 
         diff = self._make_diff(content, new_content)
-
-        if dry_run:
-            return self.confirm(f"Proposed edit to {raw_path}:\n{diff}")
 
         try:
             target.write_text(new_content, encoding="utf-8")

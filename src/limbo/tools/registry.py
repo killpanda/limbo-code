@@ -46,13 +46,11 @@ class ToolRegistry:
     def get(self, name: str) -> BaseTool | None:
         return self._tools.get(name)
 
-    async def execute(
-        self, name: str, arguments: dict[str, Any], dry_run: bool = False
-    ) -> ToolResult:
+    async def execute(self, name: str, arguments: dict[str, Any]) -> ToolResult:
         tool = self.get(name)
         if tool is None:
             return ToolResult(success=False, error=f"Unknown tool: {name}")
-        return await asyncio.to_thread(tool.execute, arguments, dry_run)
+        return await asyncio.to_thread(tool.execute, arguments)
 
     def definitions(self) -> list[dict[str, Any]]:
         return [
