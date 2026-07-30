@@ -122,6 +122,17 @@ async def test_swap_tolerates_client_without_close():
 
 
 @pytest.mark.asyncio
+async def test_swap_persists_model_to_config(tmp_path, monkeypatch):
+    """The switch survives restarts: the new model is written to config.toml
+    (isolated here — the real one belongs to the developer)."""
+    config_file = tmp_path / "config.toml"
+    monkeypatch.setattr("limbo.config.DEFAULT_CONFIG_PATH", config_file)
+    config = _config(model="glm-4.7")
+    await swap_llm_client(config, _CloseableClient(), _StubAgent())
+    assert 'model = "glm-4.7"' in config_file.read_text()
+
+
+@pytest.mark.asyncio
 async def test_swap_reports_persistence_failure(monkeypatch):
     monkeypatch.setattr("limbo.model_switch.save_model_to_config", lambda model: False)
     config = _config(model="deepseek-chat")

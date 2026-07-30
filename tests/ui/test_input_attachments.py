@@ -121,12 +121,16 @@ async def test_ctrl_v_empty_clipboard_falls_back(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_submit_drops_attachments_whose_marker_was_deleted(monkeypatch):
+async def test_submit_drops_attachments_whose_marker_was_deleted(
+    monkeypatch, tmp_path: Path
+):
     monkeypatch.setattr(
         clipboard,
         "read_clipboard",
         lambda: clipboard.ClipboardImage(b"x", "png"),
     )
+    # ctrl+v persists the image — keep it out of the real ~/.limbo.
+    monkeypatch.setattr(clipboard, "ATTACHMENTS_DIR", tmp_path / "attachments")
     submitted = []
     app = make_app(submitted)
     async with app.run_test() as pilot:
