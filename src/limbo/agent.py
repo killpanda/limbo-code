@@ -28,7 +28,7 @@ from limbo.compaction import (
 from limbo.config import Config
 from limbo.history import ToolHistory
 from limbo.history import repair as repair_history
-from limbo.llm.catalog import resolve_model
+from limbo.llm.catalog import resolve_base_url, resolve_model
 from limbo.llm.client import LLMClient
 from limbo.llm.retry import friendly_message
 from limbo.models import (
@@ -206,8 +206,12 @@ def _extract_cached_tokens(usage: dict[str, Any] | None) -> int | None:
 def _extract_total_tokens(usage: dict[str, Any] | None) -> int | None:
     """Normalize provider-specific total-token counters.
 
-    OpenAI-compatible providers report ``total_tokens``; Anthropic reports
-    separate ``input_tokens`` / ``output_tokens``.
+    OpenAI-compatible providers report ``total_tokens`` (its
+    ``prompt_tokens`` already includes cached tokens). Anthropic reports
+    separate ``input_tokens`` / ``output_tokens``, with cache traffic
+    reported apart — cache reads/creations are real processed (and billed)
+    tokens, so they are added back; otherwise the cumulative counter
+    massively undercounts cache-heavy sessions.
     """
     if not usage:
         return None
@@ -217,8 +221,32 @@ def _extract_total_tokens(usage: dict[str, Any] | None) -> int | None:
     input_tokens = usage.get("input_tokens")
     output_tokens = usage.get("output_tokens")
     if isinstance(input_tokens, int) or isinstance(output_tokens, int):
-        return (input_tokens or 0) + (output_tokens or 0)
+        result = (input_tokens or 0) + (output_tokens or 0)
+        for key in ("cache_read_input_tokens", "cache_creation_input_tokens"):
+            extra = usage.get(key)
+            if isinstance(extra, int):
+                result += extra
+        return result
     return None
+
+
+def _resolved_llm_trace_fields(config: Config) -> dict[str, Any]:
+    """Resolved provider identity for trace events.
+
+    The raw ``[llm]`` config values alone can't tell which endpoint/dialect
+    actually served a session (provider overrides and catalog defaults win
+    over them), so trace events record the resolved spec alongside.
+    """
+    spec = resolve_model(config.llm.model)
+    return {
+        "model": spec.id,
+        "provider": spec.provider.id,
+        "api": spec.provider.api,
+        "base_url": resolve_base_url(spec, config),
+        "context_window": spec.context_window,
+        "max_tokens": config.llm.max_tokens or spec.max_tokens,
+        "thinking_effort": config.llm.thinking_effort,
+    }
 
 
 class Agent:
@@ -317,6 +345,7 @@ class Agent:
                 "thinking_effort": config.llm.thinking_effort,
                 "bash_enabled": config.tools.bash_enabled,
             },
+            resolved=_resolved_llm_trace_fields(config),
         )
 
     def update_llm(self, llm_client: LLMClient) -> None:
@@ -331,6 +360,11 @@ class Agent:
         self._context_window = spec.context_window
         self._vision = spec.vision
         self._compaction_config = self._build_compaction_config(self.config)
+        self.trace.log(
+            "model_switch",
+            turn=self._turn_count,
+            resolved=_resolved_llm_trace_fields(self.config),
+        )
 
     def _build_compaction_config(self, config: Config) -> CompactionConfig:
         """Map [compaction] settings, with a cross-check against the window.
