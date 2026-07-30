@@ -8,7 +8,7 @@ import respx
 from httpx import Response
 from openai import BadRequestError, RateLimitError
 
-from limbo.config import Config
+from limbo.config import Config, ProviderOverride
 from limbo.llm.openai_client import OpenAICompatibleClient, _message_to_openai
 from limbo.models import (
     Attachment,
@@ -251,6 +251,130 @@ async def test_deepseek_format_thinking_toggle():
 
     body = json.loads(route.calls.last.request.content)
     assert body["thinking"] == {"type": "disabled"}
+
+
+def _glm_client(
+    model: str = "glm-4.7", thinking_effort: str | None = None
+) -> OpenAICompatibleClient:
+    cfg = Config()
+    cfg.llm.api_key = "test"
+    cfg.llm.base_url = "https://api.test.com/v1"
+    cfg.llm.model = model
+    cfg.llm.thinking_effort = thinking_effort
+    return OpenAICompatibleClient(cfg)
+
+
+_OK_STREAM = 'data: {"choices":[{"delta":{"content":"ok"}}]}\n\ndata: [DONE]\n\n'
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_zai_format_thinking_enabled_with_clear_thinking():
+    glm = _glm_client(thinking_effort="high")
+    route = respx.post("https://api.test.com/v1/chat/completions").mock(
+        return_value=_sse_response(_OK_STREAM)
+    )
+
+    await _collect(glm.chat([Message(role="user", content="hi")], tools=[]))
+
+    body = json.loads(route.calls.last.request.content)
+    assert body["thinking"] == {"type": "enabled", "clear_thinking": False}
+    assert "reasoning_effort" not in body  # glm-4.7 declares no levels
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_zai_format_thinking_disabled():
+    glm = _glm_client(thinking_effort="off")
+    route = respx.post("https://api.test.com/v1/chat/completions").mock(
+        return_value=_sse_response(_OK_STREAM)
+    )
+
+    await _collect(glm.chat([Message(role="user", content="hi")], tools=[]))
+
+    body = json.loads(route.calls.last.request.content)
+    assert body["thinking"] == {"type": "disabled"}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_glm_5_2_sends_reasoning_effort_alongside_thinking():
+    glm = _glm_client(model="glm-5.2", thinking_effort="low")
+    route = respx.post("https://api.test.com/v1/chat/completions").mock(
+        return_value=_sse_response(_OK_STREAM)
+    )
+
+    await _collect(glm.chat([Message(role="user", content="hi")], tools=[]))
+
+    body = json.loads(route.calls.last.request.content)
+    # pi sends both for glm-5.2: zai thinking + reasoning_effort (low→high).
+    assert body["thinking"] == {"type": "enabled", "clear_thinking": False}
+    assert body["reasoning_effort"] == "high"
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_glm_5_2_unsupported_effort_warns_but_keeps_thinking():
+    glm = _glm_client(model="glm-5.2", thinking_effort="xhigh")
+    route = respx.post("https://api.test.com/v1/chat/completions").mock(
+        return_value=_sse_response(_OK_STREAM)
+    )
+
+    with pytest.warns(UserWarning, match="not supported"):
+        await _collect(glm.chat([Message(role="user", content="hi")], tools=[]))
+
+    body = json.loads(route.calls.last.request.content)
+    assert "reasoning_effort" not in body
+    assert body["thinking"] == {"type": "enabled", "clear_thinking": False}
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_glm_tool_stream_sent_only_with_tools():
+    glm = _glm_client()
+    route = respx.post("https://api.test.com/v1/chat/completions").mock(
+        return_value=_sse_response(_OK_STREAM)
+    )
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "read",
+                "description": "Read a file",
+                "parameters": {"type": "object", "properties": {}},
+            },
+        }
+    ]
+
+    await _collect(glm.chat([Message(role="user", content="hi")], tools=tools))
+    body = json.loads(route.calls.last.request.content)
+    assert body["tool_stream"] is True
+
+    await _collect(glm.chat([Message(role="user", content="hi")], tools=[]))
+    body = json.loads(route.calls.last.request.content)
+    assert "tool_stream" not in body
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_provider_override_base_url_and_api_key_used():
+    cfg = Config()
+    cfg.llm.model = "glm-4.7"
+    cfg.providers["glm"] = ProviderOverride(
+        base_url="https://relay.example.com/v4",
+        api_key="override-key",
+        headers={"x-relay": "on"},
+    )
+    glm = OpenAICompatibleClient(cfg)
+    route = respx.post("https://relay.example.com/v4/chat/completions").mock(
+        return_value=_sse_response(_OK_STREAM)
+    )
+
+    await _collect(glm.chat([Message(role="user", content="hi")], tools=[]))
+
+    request = route.calls.last.request
+    assert request.headers["authorization"] == "Bearer override-key"
+    assert request.headers["x-relay"] == "on"
 
 
 @pytest.mark.asyncio

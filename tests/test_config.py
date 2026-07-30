@@ -14,6 +14,34 @@ def test_default_config():
     assert cfg.llm.max_iterations == 50
     assert cfg.tools.bash_enabled is True
     assert ".ssh" in cfg.safety.sensitive_files
+    assert cfg.providers == {}
+
+
+def test_load_config_providers_overrides(tmp_path):
+    path = tmp_path / "providers.toml"
+    path.write_text(
+        """
+[providers.codex]
+base_url = "https://relay.example.com/v1"
+api_key_env = "CODEX_API_KEY"
+
+[providers.glm]
+base_url = "https://api.z.ai/api/coding/paas/v4"
+api_key = "glm-key"
+headers = {x-relay = "on"}
+"""
+    )
+    cfg = load_config(path)
+    codex = cfg.providers["codex"]
+    assert codex.base_url == "https://relay.example.com/v1"
+    assert codex.api_key is None
+    assert codex.api_key_env == "CODEX_API_KEY"
+    assert codex.headers == {}
+    glm = cfg.providers["glm"]
+    assert glm.base_url == "https://api.z.ai/api/coding/paas/v4"
+    assert glm.api_key == "glm-key"
+    assert glm.api_key_env is None
+    assert glm.headers == {"x-relay": "on"}
 
 
 def test_load_config_from_file():

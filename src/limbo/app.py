@@ -51,7 +51,7 @@ def main() -> int:
 
     config = load_config()
     spec = resolve_model(config.llm.model)
-    if not resolve_api_key(spec, config.llm.api_key):
+    if not resolve_api_key(spec, config):
         env_hint = (
             f" or ${spec.provider.api_key_env}"
             if spec.provider.api_key_env
