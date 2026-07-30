@@ -20,6 +20,7 @@ from limbo.agent import (
     ToolCallRequest,
     ToolResultEvent,
     _extract_cached_tokens,
+    _extract_total_tokens,
 )
 from limbo.compaction import SUMMARY_TAG
 from limbo.config import CompactionSettings, Config
@@ -738,6 +739,53 @@ async def test_agent_trace_records_full_turn(workdir):
     turn_end = records[-1]
     assert turn_end["status"] == "completed"
     assert turn_end["iterations"] == 2
+
+
+def test_agent_trace_session_start_records_resolved_provider(workdir):
+    # The raw [llm] config alone can't tell which endpoint/dialect served
+    # the session (provider overrides / catalog defaults win), so the
+    # resolved spec is recorded alongside it.
+    config = Config()
+    agent = Agent(
+        config=config,
+        llm_client=FakeLLMClient([]),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    records = read_trace(agent.trace.path)
+    resolved = records[0]["resolved"]
+    assert resolved == {
+        "model": "deepseek-chat",
+        "provider": "deepseek",
+        "api": "openai-completions",
+        "base_url": "https://api.deepseek.com/v1",
+        "context_window": 128_000,
+        "max_tokens": 8_192,
+        "thinking_effort": None,
+    }
+
+
+def test_agent_trace_records_model_switch(workdir):
+    config = Config()
+    agent = Agent(
+        config=config,
+        llm_client=FakeLLMClient([]),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    # Simulate a /model switch: config is updated first, then the client.
+    config.llm.model = "k3"
+    agent.update_llm(FakeLLMClient([]))
+
+    records = read_trace(agent.trace.path)
+    switch = next(r for r in records if r["type"] == "model_switch")
+    assert switch["resolved"]["model"] == "k3"
+    assert switch["resolved"]["provider"] == "kimi-coding"
+    assert switch["resolved"]["api"] == "anthropic-messages"
+    assert switch["resolved"]["base_url"] == "https://api.kimi.com/coding"
+    assert switch["resolved"]["context_window"] == 1_048_576
+    assert switch["resolved"]["max_tokens"] == 131_072
+    assert agent._context_window == 1_048_576
 
 
 @pytest.mark.asyncio
@@ -1565,6 +1613,35 @@ def test_extract_cached_tokens_existing_branches_win_first():
     assert _extract_cached_tokens({"cache_read_input_tokens": 30}) == 30
     assert _extract_cached_tokens({"input_tokens": 5}) is None
     assert _extract_cached_tokens(None) is None
+
+
+def test_extract_total_tokens_openai_total_wins():
+    # OpenAI's total_tokens already includes cached prompt tokens.
+    assert (
+        _extract_total_tokens(
+            {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110}
+        )
+        == 110
+    )
+
+
+def test_extract_total_tokens_anthropic_counts_cache_traffic():
+    # Anthropic reports cache reads/creations apart from input_tokens; they
+    # are real processed tokens and must count toward the session total.
+    usage = {
+        "input_tokens": 871,
+        "output_tokens": 900,
+        "cache_read_input_tokens": 10240,
+        "cache_creation_input_tokens": 0,
+    }
+    assert _extract_total_tokens(usage) == 871 + 900 + 10240
+
+
+def test_extract_total_tokens_anthropic_without_cache_keys():
+    assert _extract_total_tokens({"input_tokens": 5, "output_tokens": 7}) == 12
+    assert _extract_total_tokens({"output_tokens": 3}) == 3
+    assert _extract_total_tokens({}) is None
+    assert _extract_total_tokens(None) is None
 
 
 # -- steer queue (RFC LIM-20) --------------------------------------------------
