@@ -341,6 +341,7 @@ class MainScreen(Screen[None]):
 
     def _start_new_session(self) -> None:
         chat = self.query_one("#chat", ChatWidget)
+        self.agent.close()  # release the old session's trace file handle
         self.agent = self._new_agent()
         chat.clear()
         chat.add_info(f"已开始新会话 {self.agent.session_id}")
@@ -387,6 +388,7 @@ class MainScreen(Screen[None]):
         if path is None:
             return
         chat = self.query_one("#chat", ChatWidget)
+        self.agent.close()  # release the old session's trace file handle
         self.agent = self._new_agent(resume=path)
         chat.clear()
         self._render_history()
@@ -447,7 +449,9 @@ class MainScreen(Screen[None]):
         self._open_game2048()
 
     async def on_unmount(self) -> None:
-        """Close the LLM client on shutdown to release its HTTP resources."""
+        """Close owned resources on shutdown: the LLM client's HTTP pool and
+        the agent's trace file handle."""
+        self.agent.close()
         close = getattr(self.llm_client, "close", None)
         if close is not None:
             await close()

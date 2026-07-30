@@ -68,3 +68,16 @@ def test_read_trace_skips_malformed_lines(tmp_path: Path):
 
 def test_read_trace_missing_file(tmp_path: Path):
     assert read_trace(tmp_path / "missing.jsonl") == []
+
+
+def test_close_is_idempotent(tmp_path: Path):
+    # close() is called from Agent.close() at every replacement point plus
+    # teardown, so it must be safe to call repeatedly.
+    logger = TraceLogger(tmp_path / "s.trace.jsonl")
+    logger.log("session_start", session_id="s")
+    logger.close()
+    logger.close()  # no raise
+    logger.log("late", x=1)  # dropped silently, fd is gone
+    records = read_trace(tmp_path / "s.trace.jsonl")
+    assert [r["type"] for r in records] == ["session_start"]
+

@@ -2093,3 +2093,40 @@ async def test_agent_degrades_image_tool_result_without_vision(workdir):
     assert tool_message.attachments is None
     assert "pic.png" in (tool_message.content or "")
     assert "不支持图像" in (tool_message.content or "")
+
+
+# -- Agent.close() releases the trace file handle ----------------------------
+
+
+def test_agent_close_releases_trace_file_handle(workdir):
+    """close() must release the trace's file handle so it is not leaked when
+    the agent is replaced (``/new`` / resume) or the app tears down."""
+    agent = Agent(
+        config=Config(),
+        llm_client=FakeLLMClient([]),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    agent.trace.log("user_message", turn=1, content="before close")
+    before = read_trace(agent.trace.path)
+    assert len(before) == 2  # session_start + the user_message above
+
+    agent.close()
+
+    # The trace fd is closed; further writes are dropped, not raised.
+    agent.trace.log("user_message", turn=2, content="after close")
+    after = read_trace(agent.trace.path)
+    assert len(after) == 2  # unchanged: the post-close write was dropped
+    assert after[-1]["content"] == "before close"
+
+
+def test_agent_close_is_idempotent(workdir):
+    """Repeated close() (replacement + teardown) must be a safe no-op."""
+    agent = Agent(
+        config=Config(),
+        llm_client=FakeLLMClient([]),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    agent.close()
+    agent.close()  # second close at teardown must not raise
