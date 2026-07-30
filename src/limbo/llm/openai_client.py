@@ -17,6 +17,7 @@ from limbo.config import Config
 from limbo.llm.catalog import (
     ModelSpec,
     resolve_api_key,
+    resolve_api_key_env,
     resolve_base_url,
     resolve_headers,
     resolve_model,
@@ -55,7 +56,7 @@ class OpenAICompatibleClient:
         if self._client is None:
             api_key = resolve_api_key(self.spec, self.config)
             if not api_key:
-                env = self.spec.provider.api_key_env
+                env = resolve_api_key_env(self.spec, self.config)
                 raise ValueError(
                     f"No API key for provider {self.spec.provider.id!r}. "
                     f"Set [llm] api_key in ~/.limbo/config.toml"
@@ -166,8 +167,9 @@ class OpenAICompatibleClient:
         }
         thinking_params, thinking_extra = self._thinking_params()
         kwargs.update(thinking_params)
-        # Provider extra-body fields (quirks the SDK doesn't type); thinking
-        # extras win on conflict, tool-scoped extras apply with tools only.
+        # Provider extra-body fields (quirks the SDK doesn't type). Merge
+        # order: provider defaults first, thinking extras override them on
+        # conflict, tool-scoped extras (sent only with tools) apply last.
         extra_body: dict[str, Any] = dict(self.spec.provider.extra_body)
         extra_body.update(thinking_extra)
         if tools:

@@ -224,6 +224,18 @@ def test_factory_creates_anthropic_client_for_kimi_coding():
     assert client.spec.provider.id == "kimi-coding"
 
 
+def test_factory_creates_responses_client_for_codex():
+    from limbo.llm.responses_client import OpenAIResponsesClient
+
+    cfg = Config()
+    cfg.llm.model = "gpt-5.5"
+    cfg.providers["codex"] = ProviderOverride(api_key="relay-key")
+    client = create_llm_client(cfg)
+    assert isinstance(client, OpenAIResponsesClient)
+    assert client.spec.provider.id == "codex"
+    assert client.spec.provider.api == "openai-responses"
+
+
 def test_factory_rejects_unsupported_api_dialect(monkeypatch):
     import limbo.llm.catalog as catalog
 

@@ -38,6 +38,31 @@ Built-in providers:
 | `moonshotai` (Kimi) | openai-completions | `https://api.moonshot.ai/v1` | `MOONSHOT_API_KEY` |
 | `kimi-coding` (Kimi For Coding) | anthropic-messages | `https://api.kimi.com/coding` | `KIMI_API_KEY` |
 | `glm` (GLM Coding Plan) | openai-completions | `https://open.bigmodel.cn/api/coding/paas/v4` | `ZHIPUAI_API_KEY` |
+| `codex` (OpenAI Codex) | openai-responses | `https://api.openai.com/v1` (override with your relay) | `CODEX_API_KEY` |
+
+Built-in Codex models include `gpt-5.5`, `gpt-5.6-sol`/`terra`/`luna`,
+`gpt-5.4`, `gpt-5.4-mini`, and `gpt-5.3-codex-spark`. **`gpt-5.5` is
+verified by live test against the target relay** (its 1M context is
+relay-reported); the other entries mirror pi's built-in catalog and are
+unverified — availability depends on the relay in use, and unknown or
+unsupported models fall back to the generic OpenAI-compatible defaults.
+Codex speaks the
+OpenAI **Responses API** (`POST {base_url}/responses`), served by a
+dedicated client (`src/limbo/llm/responses_client.py`, plain httpx SSE):
+system messages become `instructions`, tool definitions are flattened, and
+reasoning models stream `reasoning` summaries and replay encrypted
+reasoning items across turns. Limbo targets **API-key relays**, not the
+ChatGPT subscription backend (OAuth) — point the provider at your relay
+and make sure its model IDs match the catalog:
+
+```toml
+[llm]
+model = "gpt-5.5"
+
+[providers.codex]
+base_url = "https://my-relay.example.com/v1"
+api_key_env = "CODEX_API_KEY"
+```
 
 Built-in GLM Coding Plan models: `glm-4.7`, `glm-5.1`, `glm-5.2` (1M
 context), `glm-5-turbo`, `glm-5v-turbo` (vision), and `glm-4.5-air`. The
@@ -127,6 +152,10 @@ thinking_effort = "high" # reasoning control; default = provider behavior
 - `glm-*` (z.ai-style): like DeepSeek-style but with `clear_thinking: false`
   so thinking is preserved across turns; `glm-5.2` additionally maps
   `low`/`high`/`max` to `reasoning_effort` (`low` clamps to `high`).
+- `gpt-5.*` codex models (Responses API): `low` | `medium` | `high` |
+  `xhigh` → `reasoning: {effort, summary: auto}`; 5.6-generation models
+  (`gpt-5.6-*`) also accept `max`. Temperature is omitted for reasoning
+  models.
 - Non-reasoning models: ignored.
 
 Reasoning output streams into the chat as muted thinking blocks and is
