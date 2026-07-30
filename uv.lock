@@ -326,7 +326,6 @@ wheels = [
 
 [[package]]
 name = "limbo-code"
-version = "0.1.1"
 source = { editable = "." }
 dependencies = [
     { name = "httpx" },

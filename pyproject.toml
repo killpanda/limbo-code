@@ -1,6 +1,6 @@
 [project]
 name = "limbo-code"
-version = "0.1.1"
+dynamic = ["version"]
 description = "A minimal terminal AI coding agent"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -31,8 +31,14 @@ dev = [
 limbo = "limbo.app:main"
 
 [build-system]
-requires = ["hatchling"]
+requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
+
+# Version is derived from git tags (e.g. tag `v0.2.0` -> version `0.2.0`).
+# Between releases, commits after the last tag get a local dev version
+# (e.g. `0.2.1.dev3+ga9a8fdf`), so PyPI uploads always need a fresh tag.
+[tool.hatch.version]
+source = "vcs"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/limbo"]
