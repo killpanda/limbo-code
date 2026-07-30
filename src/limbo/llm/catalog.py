@@ -29,10 +29,11 @@ DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
 DEFAULT_CONTEXT_WINDOW = 128_000
 DEFAULT_MAX_TOKENS = 16_384
 
-# API dialects. Only "openai-completions" has a client implementation today;
-# the factory raises a clear error for the rest until one is added.
+# API dialects. Each has a client implementation registered in
+# limbo.llm.factory; the factory raises a clear error for anything else.
 API_OPENAI_COMPLETIONS = "openai-completions"
 API_ANTHROPIC_MESSAGES = "anthropic-messages"
+API_OPENAI_RESPONSES = "openai-responses"
 
 # Mainland-China Moonshot endpoint; select via an explicit [llm] base_url
 # override (same API and model ids as the international endpoint).
@@ -74,8 +75,9 @@ class ModelSpec:
     # How thinking is controlled: "openai" (reasoning_effort parameter),
     # "deepseek" (thinking: {type: enabled|disabled}), "zai" (deepseek shape
     # plus clear_thinking: false, with optional reasoning_effort passthrough
-    # for models that declare thinking_levels), or None (the model reasons
-    # but the API exposes no switch, e.g. deepseek-reasoner).
+    # for models that declare thinking_levels), "openai-responses"
+    # (reasoning: {effort, summary} on the Responses API), or None (the
+    # model reasons but the API exposes no switch, e.g. deepseek-reasoner).
     thinking_format: str | None = None
     # Supported thinking levels mapped to provider values (openai format;
     # also drives reasoning_effort passthrough for the zai format).
@@ -129,6 +131,45 @@ GLM_CODING = ProviderSpec(
     # pi sets tool_stream on all zai-coding tool requests (zaiToolStream).
     tool_extra_body={"tool_stream": True},
 )
+
+# OpenAI Codex via the Responses API. Model metadata mirrors pi's
+# openai-codex provider (providers/data/openai-codex.json) — note pi targets
+# the ChatGPT subscription backend (OAuth); limbo targets API-key relays, so
+# point [providers.codex] base_url at your relay and make sure the model IDs
+# below match what the relay actually exposes.
+CODEX = ProviderSpec(
+    id="codex",
+    api=API_OPENAI_RESPONSES,
+    base_url="https://api.openai.com/v1",
+    api_key_env="CODEX_API_KEY",
+)
+
+
+def _codex(
+    model_id: str,
+    *,
+    context_window: int = 272_000,
+    max_tokens: int = 128_000,
+    vision: bool = True,
+    supports_max: bool = False,
+) -> ModelSpec:
+    # Codex models reason with Responses reasoning effort. pi's
+    # thinkingLevelMap: standard levels through "high" pass through by the
+    # provider default mapping, "minimal" maps to "low", "xhigh" is
+    # explicit, and 5.6-generation models add "max".
+    levels = {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh"}
+    if supports_max:
+        levels["max"] = "max"
+    return ModelSpec(
+        id=model_id,
+        provider=CODEX,
+        context_window=context_window,
+        max_tokens=max_tokens,
+        reasoning=True,
+        vision=vision,
+        thinking_format="openai-responses",
+        thinking_levels=levels,
+    )
 
 
 def _kimi_coding(
@@ -274,6 +315,16 @@ CATALOG: dict[str, ModelSpec] = {
         thinking_levels={"low": "high", "high": "high", "max": "max"},
     ),
     "glm-5v-turbo": _glm("glm-5v-turbo", context_window=200_000, vision=True),
+    # -- OpenAI Codex (Responses API dialect) --------------------------------
+    "gpt-5.3-codex-spark": _codex(
+        "gpt-5.3-codex-spark", context_window=128_000, vision=False
+    ),
+    "gpt-5.4": _codex("gpt-5.4"),
+    "gpt-5.4-mini": _codex("gpt-5.4-mini"),
+    "gpt-5.5": _codex("gpt-5.5"),
+    "gpt-5.6-sol": _codex("gpt-5.6-sol", supports_max=True),
+    "gpt-5.6-terra": _codex("gpt-5.6-terra", supports_max=True),
+    "gpt-5.6-luna": _codex("gpt-5.6-luna", supports_max=True),
 }
 
 
@@ -309,20 +360,25 @@ def resolve_api_key(spec: ModelSpec, config: Config) -> str | None:
 
     Resolution order (first hit wins): ``[providers.<id>] api_key``, then
     ``[llm] api_key``, then the environment variable named by
-    ``[providers.<id>] api_key_env`` (rename) or the catalog provider's
-    built-in ``api_key_env``.
+    ``resolve_api_key_env``.
     """
     override = config.providers.get(spec.provider.id)
     if override and override.api_key:
         return override.api_key
     if config.llm.api_key:
         return config.llm.api_key
-    env = spec.provider.api_key_env
-    if override and override.api_key_env:
-        env = override.api_key_env
+    env = resolve_api_key_env(spec, config)
     if env:
         return os.environ.get(env)
     return None
+
+
+def resolve_api_key_env(spec: ModelSpec, config: Config) -> str | None:
+    """Effective credential env var name (``[providers.<id>] api_key_env`` wins)."""
+    override = config.providers.get(spec.provider.id)
+    if override and override.api_key_env:
+        return override.api_key_env
+    return spec.provider.api_key_env
 
 
 def resolve_headers(spec: ModelSpec, config: Config) -> dict[str, str]:

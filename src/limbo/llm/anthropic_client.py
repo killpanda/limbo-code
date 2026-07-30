@@ -30,11 +30,12 @@ from limbo.config import Config
 from limbo.llm.catalog import (
     ModelSpec,
     resolve_api_key,
+    resolve_api_key_env,
     resolve_base_url,
     resolve_headers,
     resolve_model,
 )
-from limbo.llm.client import RequestHook
+from limbo.llm.client import RESPONSES_SIGNATURE_PREFIX, RequestHook
 from limbo.llm.retry import (
     LLMHttpError,
     LLMOverloadedError,
@@ -42,6 +43,7 @@ from limbo.llm.retry import (
     parse_retry_after,
     stream_with_retry,
 )
+from limbo.llm.sse import iter_sse
 from limbo.models import (
     CompletionMeta,
     LLMEvent,
@@ -67,7 +69,7 @@ class AnthropicMessagesClient:
         if self._client is None:
             api_key = resolve_api_key(self.spec, self.config)
             if not api_key:
-                env = self.spec.provider.api_key_env
+                env = resolve_api_key_env(self.spec, self.config)
                 raise ValueError(
                     f"No API key for provider {self.spec.provider.id!r}. "
                     f"Set [llm] api_key in ~/.limbo/config.toml"
@@ -176,7 +178,7 @@ class AnthropicMessagesClient:
 
             # Tool-use blocks accumulate streamed partial JSON by index.
             tool_blocks: dict[int, dict[str, Any]] = {}
-            async for event in _iter_sse(resp):
+            async for event in iter_sse(resp):
                 if ttft is None:
                     ttft = time.monotonic() - start
                 event_type = event.get("type")
@@ -252,25 +254,6 @@ def _tool_call_event(block: dict[str, Any]) -> ToolCallEvent:
     except json.JSONDecodeError as e:
         args = {"raw_arguments": raw, "parse_error": str(e)}
     return ToolCallEvent(id=block["id"], name=block["name"], arguments=args)
-
-
-async def _iter_sse(resp: httpx.Response) -> AsyncIterator[dict[str, Any]]:
-    """Yield parsed ``data:`` payloads from an Anthropic SSE stream."""
-    data_lines: list[str] = []
-    async for line in resp.aiter_lines():
-        if not line:
-            if data_lines:
-                payload = "\n".join(data_lines)
-                data_lines = []
-                try:
-                    yield json.loads(payload)
-                except json.JSONDecodeError:
-                    continue
-            continue
-        if line.startswith("data:"):
-            data_lines.append(line[len("data:"):].strip())
-        # event:/id:/retry: lines and comments (: ping) are ignored; the
-        # payload's own "type" field drives dispatch.
 
 
 def _tool_to_anthropic(tool: dict[str, Any]) -> dict[str, Any]:
@@ -356,13 +339,17 @@ def _user_content(message: Message) -> str | list[dict[str, Any]]:
 def _assistant_blocks(message: Message) -> list[dict[str, Any]]:
     blocks: list[dict[str, Any]] = []
     if message.reasoning:
-        # Kimi accepts empty signatures on replayed thinking blocks; real
-        # Anthropic models get the stored signature.
+        signature = message.reasoning_signature or ""
+        if signature.startswith(RESPONSES_SIGNATURE_PREFIX):
+            # Foreign-dialect signature (stored by the Responses client
+            # before a model switch): replaying it as an Anthropic
+            # signature would 400. Kimi accepts an empty signature instead.
+            signature = ""
         blocks.append(
             {
                 "type": "thinking",
                 "thinking": message.reasoning,
-                "signature": message.reasoning_signature or "",
+                "signature": signature,
             }
         )
     if message.content:
