@@ -136,8 +136,10 @@ class OpenAIResponsesClient:
             # Ask for replayable reasoning items (needed for function-call
             # pairing under store:false); only reasoning models emit them.
             body["include"] = ["reasoning.encrypted_content"]
-        if "reasoning" not in body:
-            # Reasoning models reject an explicit temperature.
+        if not self.spec.reasoning:
+            # Reasoning models reject an explicit temperature (pi only sends
+            # it when the user sets one explicitly; limbo's config always
+            # has a default, so gate on the model instead).
             body["temperature"] = self.config.llm.temperature
         if tools:
             body["tools"] = [_tool_to_responses(t) for t in tools]

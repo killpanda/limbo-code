@@ -108,14 +108,17 @@ async def test_request_headers_and_body(client):
 
 @pytest.mark.asyncio
 @respx.mock
-async def test_reasoning_omitted_without_effort_and_temperature_sent(client):
+async def test_reasoning_model_omits_temperature_by_default(client):
+    # pi only sends temperature when the user sets it explicitly; limbo's
+    # config always carries a default, so reasoning models must not get it
+    # even with thinking_effort unset (official endpoints 400 otherwise).
     route = respx.post(RESPONSES_URL).mock(return_value=_text_stream())
 
     await _collect(client.chat([Message(role="user", content="hi")], tools=[]))
 
     body = json.loads(route.calls.last.request.content)
     assert "reasoning" not in body
-    assert body["temperature"] == 0.2
+    assert "temperature" not in body
     # include is still requested: the model reasons regardless of the switch.
     assert body["include"] == ["reasoning.encrypted_content"]
 
