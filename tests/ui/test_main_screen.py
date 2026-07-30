@@ -10,6 +10,7 @@ from limbo.ui.app import LimboApp
 from limbo.ui.screens.main import MainScreen
 from limbo.ui.widgets.chat import ChatWidget
 from limbo.ui.widgets.input import InputWidget
+from limbo.ui.widgets.status_bar import StatusBar
 
 
 class FakeLLMClient:
@@ -111,6 +112,67 @@ async def test_tool_error_is_shown(tmp_path):
         chat = main_screen.query_one("#chat", ChatWidget)
         card = chat.tool_cards["c1"]
         assert card.state == "error"
+
+
+@pytest.mark.asyncio
+async def test_status_bar_stays_busy_after_tool_failure(tmp_path):
+    """Regression: a failed tool result must not flip the status bar to
+    idle. The turn keeps running (the model gets another LLM call to react
+    to the failure), so the bar must keep showing a busy state — showing
+    idle made users believe the turn was over and their next message got
+    steer-queued, which looked like a stuck agent."""
+    cfg = Config()
+    cfg.llm.api_key = "test"
+
+    hold = asyncio.Event()
+
+    class FailingThenHoldingLLMClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def chat(self, messages, tools, on_request=None):
+            self.calls += 1
+            if self.calls == 1:
+                yield ToolCallEvent(
+                    id="c1", name="read", arguments={"path": "missing.txt"}
+                )
+                return
+            # Second call (the model reacting to the failure) hangs
+            # mid-stream, so the turn is still in flight when we inspect.
+            await hold.wait()
+            yield TextChunk(text="recovered")
+
+    client = FailingThenHoldingLLMClient()
+    app = LimboApp(
+        workdir=tmp_path,
+        config=cfg,
+        llm_client=client,
+        session_dir=tmp_path / "sessions",
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        main_screen = pilot.app.screen_stack[-1]
+        assert isinstance(main_screen, MainScreen)
+
+        main_screen.run_worker(main_screen._handle_turn("read missing"))
+        for _ in range(20):
+            await pilot.pause()
+            if client.calls >= 2:
+                break
+
+        chat = main_screen.query_one("#chat", ChatWidget)
+        statusbar = main_screen.query_one("#statusbar", StatusBar)
+        assert chat.tool_cards["c1"].state == "error"
+        assert main_screen._agent_busy is True
+        # The turn is still running: the bar must not claim idle.
+        assert statusbar._state_label.has_class("thinking")
+
+        hold.set()
+        await pilot.pause()
+        await pilot.pause()
+
+        assert main_screen._agent_busy is False
+        assert not statusbar._state_label.has_class("thinking")
 
 
 @pytest.mark.asyncio

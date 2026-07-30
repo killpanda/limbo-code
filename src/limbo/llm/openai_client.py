@@ -2,28 +2,29 @@
 
 from __future__ import annotations
 
-import base64
 import json
 import time
 import warnings
 from collections.abc import AsyncIterator
-from pathlib import Path
 from typing import Any
 
-import httpx
 from openai import AsyncOpenAI, BadRequestError
 
 from limbo.config import Config
 from limbo.llm.catalog import (
     ModelSpec,
-    resolve_api_key,
-    resolve_api_key_env,
     resolve_base_url,
     resolve_headers,
     resolve_model,
 )
 from limbo.llm.client import RequestHook
-from limbo.llm.retry import RetryPolicy, stream_with_retry
+from limbo.llm.scaffold import (
+    chat_with_retry,
+    encode_image_data,
+    http_timeout,
+    map_thinking_effort,
+    require_api_key,
+)
 from limbo.models import (
     CompletionMeta,
     LLMEvent,
@@ -54,25 +55,14 @@ class OpenAICompatibleClient:
     @property
     def client(self) -> AsyncOpenAI:
         if self._client is None:
-            api_key = resolve_api_key(self.spec, self.config)
-            if not api_key:
-                env = resolve_api_key_env(self.spec, self.config)
-                raise ValueError(
-                    f"No API key for provider {self.spec.provider.id!r}. "
-                    f"Set [llm] api_key in ~/.limbo/config.toml"
-                    + (f" or the ${env} environment variable." if env else ".")
-                )
             self._client = AsyncOpenAI(
-                api_key=api_key,
+                api_key=require_api_key(self.spec, self.config),
                 base_url=resolve_base_url(self.spec, self.config),
                 default_headers=resolve_headers(self.spec, self.config) or None,
                 # SDK built-in retries are disabled: stream_with_retry owns
                 # retrying so every attempt is trace-visible via on_request.
                 max_retries=0,
-                timeout=httpx.Timeout(
-                    self.config.llm.timeout,
-                    connect=self.config.llm.connect_timeout,
-                ),
+                timeout=http_timeout(self.config),
             )
         return self._client
 
@@ -96,13 +86,8 @@ class OpenAICompatibleClient:
         if effort is None:
             return {}, {}
         if spec.thinking_format == "openai":
-            value = spec.thinking_levels.get(effort)
+            value = map_thinking_effort(spec, effort)
             if value is None:
-                warnings.warn(
-                    f"thinking_effort={effort!r} is not supported by {spec.id} "
-                    f"(supported: {sorted(spec.thinking_levels)}); ignoring.",
-                    stacklevel=2,
-                )
                 return {}, {}
             return {"reasoning_effort": value}, {}
         if spec.thinking_format in ("deepseek", "zai"):
@@ -122,14 +107,8 @@ class OpenAICompatibleClient:
             params: dict[str, Any] = {}
             if spec.thinking_format == "zai" and spec.thinking_levels:
                 # glm-5.2 additionally takes reasoning_effort (pi sends both).
-                value = spec.thinking_levels.get(effort)
-                if value is None:
-                    warnings.warn(
-                        f"thinking_effort={effort!r} is not supported by {spec.id} "
-                        f"(supported: {sorted(spec.thinking_levels)}); ignoring.",
-                        stacklevel=2,
-                    )
-                else:
+                value = map_thinking_effort(spec, effort)
+                if value is not None:
                     params["reasoning_effort"] = value
             return params, {"thinking": thinking}
         return {}, {}
@@ -141,9 +120,8 @@ class OpenAICompatibleClient:
         on_request: RequestHook | None = None,
     ) -> AsyncIterator[LLMEvent]:
         """Stream events, retrying pre-first-event failures (see llm.retry)."""
-        policy = RetryPolicy.from_config(self.config.llm)
-        return stream_with_retry(
-            lambda: self._chat_inner(messages, tools, on_request), policy
+        return chat_with_retry(
+            self._chat_inner, self.config, messages, tools, on_request
         )
 
     async def _chat_inner(
@@ -294,13 +272,10 @@ def _message_to_openai(
         for attachment in message.attachments:
             if attachment.kind != "image":
                 continue
-            try:
-                data = base64.standard_b64encode(
-                    Path(attachment.path).read_bytes()
-                ).decode("ascii")
-            except OSError:
+            encoded = encode_image_data(attachment)
+            if encoded is None:
                 continue
-            mime = attachment.mime or "image/png"
+            data, mime = encoded
             blocks.append(
                 {
                     "type": "image_url",

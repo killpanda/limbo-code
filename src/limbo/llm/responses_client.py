@@ -19,12 +19,9 @@ headers):
 
 from __future__ import annotations
 
-import base64
 import json
 import time
-import warnings
 from collections.abc import AsyncIterator
-from pathlib import Path
 from typing import Any
 
 import httpx
@@ -32,8 +29,6 @@ import httpx
 from limbo.config import Config
 from limbo.llm.catalog import (
     ModelSpec,
-    resolve_api_key,
-    resolve_api_key_env,
     resolve_base_url,
     resolve_headers,
     resolve_model,
@@ -42,9 +37,14 @@ from limbo.llm.client import RESPONSES_SIGNATURE_PREFIX, RequestHook
 from limbo.llm.retry import (
     LLMHttpError,
     LLMOverloadedError,
-    RetryPolicy,
     parse_retry_after,
-    stream_with_retry,
+)
+from limbo.llm.scaffold import (
+    chat_with_retry,
+    encode_image_data,
+    http_timeout,
+    map_thinking_effort,
+    require_api_key,
 )
 from limbo.llm.sse import iter_sse
 from limbo.models import (
@@ -68,25 +68,14 @@ class OpenAIResponsesClient:
     @property
     def client(self) -> httpx.AsyncClient:
         if self._client is None:
-            api_key = resolve_api_key(self.spec, self.config)
-            if not api_key:
-                env = resolve_api_key_env(self.spec, self.config)
-                raise ValueError(
-                    f"No API key for provider {self.spec.provider.id!r}. "
-                    f"Set [llm] api_key in ~/.limbo/config.toml"
-                    + (f" or the ${env} environment variable." if env else ".")
-                )
             self._client = httpx.AsyncClient(
                 base_url=resolve_base_url(self.spec, self.config).rstrip("/"),
                 headers={
-                    "Authorization": f"Bearer {api_key}",
+                    "Authorization": f"Bearer {require_api_key(self.spec, self.config)}",
                     "content-type": "application/json",
                     **resolve_headers(self.spec, self.config),
                 },
-                timeout=httpx.Timeout(
-                    self.config.llm.timeout,
-                    connect=self.config.llm.connect_timeout,
-                ),
+                timeout=http_timeout(self.config),
             )
         return self._client
 
@@ -106,13 +95,8 @@ class OpenAIResponsesClient:
         effort = self.config.llm.thinking_effort
         if effort is None:
             return {}
-        value = spec.thinking_levels.get(effort)
+        value = map_thinking_effort(spec, effort)
         if value is None:
-            warnings.warn(
-                f"thinking_effort={effort!r} is not supported by {spec.id} "
-                f"(supported: {sorted(spec.thinking_levels)}); ignoring.",
-                stacklevel=2,
-            )
             return {}
         return {"reasoning": {"effort": value, "summary": "auto"}}
 
@@ -159,9 +143,8 @@ class OpenAIResponsesClient:
         on_request: RequestHook | None = None,
     ) -> AsyncIterator[LLMEvent]:
         """Stream events, retrying pre-first-event failures (see llm.retry)."""
-        policy = RetryPolicy.from_config(self.config.llm)
-        return stream_with_retry(
-            lambda: self._chat_inner(messages, tools, on_request), policy
+        return chat_with_retry(
+            self._chat_inner, self.config, messages, tools, on_request
         )
 
     async def _chat_inner(
@@ -348,13 +331,10 @@ def _user_content(message: Message) -> list[dict[str, Any]]:
         for attachment in message.attachments:
             if attachment.kind != "image":
                 continue
-            try:
-                data = base64.standard_b64encode(
-                    Path(attachment.path).read_bytes()
-                ).decode("ascii")
-            except OSError:
+            encoded = encode_image_data(attachment)
+            if encoded is None:
                 continue
-            mime = attachment.mime or "image/png"
+            data, mime = encoded
             blocks.append(
                 {
                     "type": "input_image",
