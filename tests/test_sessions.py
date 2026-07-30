@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from limbo.models import Message
+from limbo.models import Attachment, Message
 from limbo.sessions import (
     AmbiguousSessionError,
     SessionMeta,
@@ -404,3 +404,29 @@ def test_legacy_file_loads_with_empty_compactions(tmp_path: Path):
     assert compactions == []
     # Messages minted from legacy lines still get entry ids.
     assert messages[0].id
+
+
+def test_attachments_roundtrip(tmp_path: Path):
+    path = tmp_path / "with-attachments.jsonl"
+    meta = make_meta()
+    messages = make_messages() + [
+        Message(
+            role="user",
+            content="看图 [图片 #1]",
+            attachments=[
+                Attachment(
+                    kind="image",
+                    name="shot.png",
+                    path="/tmp/limbo-test/shot.png",
+                    mime="image/png",
+                )
+            ],
+        )
+    ]
+    save_session(path, meta, messages)
+    _, loaded, _ = load_session(path)
+    restored = loaded[-1]
+    assert restored.attachments is not None
+    assert restored.attachments[0].kind == "image"
+    assert restored.attachments[0].path == "/tmp/limbo-test/shot.png"
+    assert [m.model_dump() for m in loaded] == [m.model_dump() for m in messages]

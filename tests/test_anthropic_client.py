@@ -1,6 +1,7 @@
 """Tests for the Anthropic Messages client (Kimi For Coding dialect)."""
 
 import asyncio
+import base64
 import json
 
 import httpx
@@ -15,7 +16,14 @@ from limbo.llm.anthropic_client import (
     _tool_to_anthropic,
 )
 from limbo.llm.retry import LLMHttpError, LLMOverloadedError
-from limbo.models import CompletionMeta, Message, TextChunk, ThinkingChunk, ToolCallEvent
+from limbo.models import (
+    Attachment,
+    CompletionMeta,
+    Message,
+    TextChunk,
+    ThinkingChunk,
+    ToolCallEvent,
+)
 
 MESSAGES_URL = "https://api.kimi.com/coding/v1/messages"
 
@@ -531,3 +539,51 @@ async def test_mid_stream_drop_after_first_event_is_not_retried(client, sleeps):
     # duplicate output, so the exception passes through with no 2nd request.
     assert route.call_count == 1
     assert sleeps == []
+
+
+def test_user_message_with_image_attachment_becomes_blocks(tmp_path):
+    image = tmp_path / "shot.png"
+    image.write_bytes(b"png-bytes")
+    message = Message(
+        role="user",
+        content="看这张图 [图片 #1]",
+        attachments=[
+            Attachment(
+                kind="image", name="shot.png", path=str(image), mime="image/png"
+            )
+        ],
+    )
+    _, converted = _messages_to_anthropic([message])
+    content = converted[0]["content"]
+    assert isinstance(content, list)
+    assert content[0] == {
+        "type": "image",
+        "source": {
+            "type": "base64",
+            "media_type": "image/png",
+            "data": base64.standard_b64encode(b"png-bytes").decode("ascii"),
+        },
+    }
+    assert content[1] == {"type": "text", "text": "看这张图 [图片 #1]"}
+
+
+def test_user_message_missing_image_falls_back_to_plain_text(tmp_path):
+    message = Message(
+        role="user",
+        content="看这张图 [图片 #1]",
+        attachments=[
+            Attachment(
+                kind="image",
+                name="gone.png",
+                path=str(tmp_path / "gone.png"),
+                mime="image/png",
+            )
+        ],
+    )
+    _, converted = _messages_to_anthropic([message])
+    assert converted[0]["content"] == "看这张图 [图片 #1]"
+
+
+def test_user_message_without_attachments_stays_plain_string():
+    _, converted = _messages_to_anthropic([Message(role="user", content="hi")])
+    assert converted[0]["content"] == "hi"

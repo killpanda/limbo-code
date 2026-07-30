@@ -6,6 +6,7 @@ Markdown (streamed), inline tool-call cards, and error/info lines.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from rich.text import Text
@@ -14,6 +15,7 @@ from textual.containers import VerticalScroll
 from textual.css.query import NoMatches
 from textual.widgets import Markdown, Static
 
+from limbo.models import Attachment
 from limbo.ui.widgets.tool_card import ToolCard
 
 
@@ -42,12 +44,28 @@ class ChatWidget(VerticalScroll):
 
     # -- messages -----------------------------------------------------------
 
-    def add_user_message(self, text: str) -> None:
+    def add_user_message(
+        self, text: str, attachments: list[Attachment] | None = None
+    ) -> None:
         self._current_assistant = None
         self._current_thinking = None
         msg = Static(f"❯ {text}", classes="user-message", markup=False)
         self.messages.append(msg)
         self._mount_and_scroll(msg)
+        if attachments:
+            chips = []
+            for attachment in attachments:
+                label = "图片" if attachment.kind == "image" else "文件"
+                chip = f"{label}: {attachment.name}"
+                # Restored sessions may reference deleted files.
+                if not Path(attachment.path).exists():
+                    chip += "（已过期）"
+                chips.append(chip)
+            chip_msg = Static(
+                "📎 " + " · ".join(chips), classes="attachment-chips", markup=False
+            )
+            self.messages.append(chip_msg)
+            self._mount_and_scroll(chip_msg)
 
     def add_info(self, text: str) -> None:
         msg = Static(text, classes="info-message", markup=False)

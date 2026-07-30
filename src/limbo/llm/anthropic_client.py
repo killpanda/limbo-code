@@ -16,10 +16,12 @@ Conventions follow pi's anthropic-messages provider:
 
 from __future__ import annotations
 
+import base64
 import json
 import time
 import warnings
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -297,7 +299,7 @@ def _messages_to_anthropic(
             if message.content:
                 system_parts.append(message.content)
         elif message.role == "user":
-            converted.append({"role": "user", "content": message.content or ""})
+            converted.append({"role": "user", "content": _user_content(message)})
         elif message.role == "assistant":
             converted.append(
                 {"role": "assistant", "content": _assistant_blocks(message)}
@@ -317,6 +319,37 @@ def _messages_to_anthropic(
                 converted.append({"role": "user", "content": [block]})
 
     return "\n\n".join(system_parts), converted
+
+
+def _user_content(message: Message) -> str | list[dict[str, Any]]:
+    """User content: plain string, or image blocks + text when attached.
+
+    Missing image files (expired session attachments) are skipped so a
+    restored session can still be replayed; the marker text in ``content``
+    keeps the reference visible to the model.
+    """
+    blocks: list[dict[str, Any]] = []
+    for attachment in message.attachments or []:
+        if attachment.kind != "image":
+            continue
+        try:
+            data = base64.standard_b64encode(Path(attachment.path).read_bytes())
+        except OSError:
+            continue
+        blocks.append(
+            {
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": attachment.mime or "image/png",
+                    "data": data.decode("ascii"),
+                },
+            }
+        )
+    if not blocks:
+        return message.content or ""
+    blocks.append({"type": "text", "text": message.content or ""})
+    return blocks
 
 
 def _assistant_blocks(message: Message) -> list[dict[str, Any]]:

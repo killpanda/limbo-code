@@ -57,6 +57,10 @@ class ModelSpec:
     context_window: int = DEFAULT_CONTEXT_WINDOW
     max_tokens: int = DEFAULT_MAX_TOKENS
     reasoning: bool = False
+    # Whether the model accepts image input (multimodal). Conservative by
+    # default: unknown models (GENERIC_OPENAI fallback) stay False and image
+    # attachments degrade to path references instead of breaking the call.
+    vision: bool = False
     # How thinking is controlled: "openai" (reasoning_effort parameter),
     # "deepseek" (thinking: {type: enabled|disabled}), or None (the model
     # reasons but the API exposes no switch, e.g. deepseek-reasoner).
@@ -126,6 +130,7 @@ def _moonshot(
     context_window: int = 262_144,
     max_tokens: int = 262_144,
     reasoning: bool = False,
+    vision: bool = False,
     thinking_format: str | None = None,
     thinking_levels: dict[str, str] | None = None,
     thinking_can_disable: bool = True,
@@ -137,6 +142,7 @@ def _moonshot(
         context_window=context_window,
         max_tokens=max_tokens,
         reasoning=reasoning,
+        vision=vision,
         thinking_format=thinking_format,
         thinking_levels=thinking_levels or {},
         thinking_can_disable=thinking_can_disable,
@@ -167,8 +173,9 @@ CATALOG: dict[str, ModelSpec] = {
     "kimi-k2-thinking-turbo": _moonshot(
         "kimi-k2-thinking-turbo", reasoning=True, thinking_format="deepseek"
     ),
+    # Kimi K2.5 is Moonshot's multimodal generation (accepts image input).
     "kimi-k2.5": _moonshot(
-        "kimi-k2.5", reasoning=True, thinking_format="deepseek"
+        "kimi-k2.5", reasoning=True, thinking_format="deepseek", vision=True
     ),
     "kimi-k2.6": _moonshot(
         "kimi-k2.6", reasoning=True, thinking_format="deepseek"

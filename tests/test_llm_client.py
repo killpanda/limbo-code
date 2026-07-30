@@ -1,4 +1,5 @@
 import asyncio
+import base64
 import json
 from unittest.mock import AsyncMock
 
@@ -9,7 +10,14 @@ from openai import BadRequestError, RateLimitError
 
 from limbo.config import Config
 from limbo.llm.openai_client import OpenAICompatibleClient, _message_to_openai
-from limbo.models import CompletionMeta, Message, TextChunk, ThinkingChunk, ToolCallEvent
+from limbo.models import (
+    Attachment,
+    CompletionMeta,
+    Message,
+    TextChunk,
+    ThinkingChunk,
+    ToolCallEvent,
+)
 
 
 @pytest.fixture
@@ -483,3 +491,43 @@ async def test_max_retries_zero_disables_retry(client, sleeps):
 
     assert route.call_count == 1
     assert sleeps == []
+
+
+def test_message_to_openai_with_image_attachment(tmp_path):
+    image = tmp_path / "shot.png"
+    image.write_bytes(b"png-bytes")
+    message = Message(
+        role="user",
+        content="看这张图 [图片 #1]",
+        attachments=[
+            Attachment(
+                kind="image", name="shot.png", path=str(image), mime="image/png"
+            )
+        ],
+    )
+    result = _message_to_openai(message)
+    content = result["content"]
+    assert isinstance(content, list)
+    assert content[0]["type"] == "image_url"
+    expected = base64.standard_b64encode(b"png-bytes").decode("ascii")
+    assert content[0]["image_url"]["url"] == f"data:image/png;base64,{expected}"
+    assert content[1] == {"type": "text", "text": "看这张图 [图片 #1]"}
+
+
+def test_message_to_openai_missing_image_stays_plain(tmp_path):
+    message = Message(
+        role="user",
+        content="hi",
+        attachments=[
+            Attachment(
+                kind="image", name="gone.png", path=str(tmp_path / "gone.png")
+            )
+        ],
+    )
+    result = _message_to_openai(message)
+    assert result["content"] == "hi"
+
+
+def test_message_to_openai_without_attachments_unchanged():
+    result = _message_to_openai(Message(role="user", content="hi"))
+    assert result["content"] == "hi"

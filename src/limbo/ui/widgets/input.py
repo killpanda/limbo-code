@@ -12,6 +12,9 @@ from textual.message import Message
 from textual.widgets import TextArea
 from textual.widgets._text_area import EditResult
 
+from limbo.models import Attachment
+from limbo.ui import clipboard
+
 # Widget height is text rows + 2 rows of round border. The input starts at
 # one text row (height 3) and grows up to MAX_TEXT_ROWS before scrolling.
 MIN_TEXT_ROWS = 1
@@ -33,8 +36,9 @@ PASTE_MARKER_RE = re.compile(r"\[粘贴的文本 #(\d+)(?:，共 \d+ 行|，\d+ 
 class UserSubmitted(Message):
     """Event emitted when the user submits a message."""
 
-    def __init__(self, message: str):
+    def __init__(self, message: str, attachments: list[Attachment] | None = None):
         self.message = message
+        self.attachments = attachments or []
         super().__init__()
 
 
@@ -78,6 +82,10 @@ class InputWidget(TextArea):
         # are removed atomically (plain text deletions fall through).
         Binding("backspace", "paste_aware_delete_left", show=False, priority=True),
         Binding("delete", "paste_aware_delete_right", show=False, priority=True),
+        # Shadows TextArea's built-in ctrl+v (App-clipboard text paste); the
+        # action falls back to it explicitly when the OS clipboard holds no
+        # image/files.
+        Binding("ctrl+v", "paste_attachment", "Paste attachment", show=False),
     ]
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -95,6 +103,11 @@ class InputWidget(TextArea):
         # validPasteIds), so lookalike text is never expanded by accident.
         self._pastes: dict[int, str] = {}
         self._paste_counter = 0
+        # Pending attachments (clipboard images/files). Each has a marker in
+        # the document (``[图片 #N]`` / ``[文件 #N: name]``); at submit time
+        # only attachments whose marker is still present are sent.
+        self._attachments: list[tuple[str, Attachment]] = []
+        self._attachment_counter = 0
 
     def _menu_screen(self):
         """The screen, but only when its slash-command menu is open."""
@@ -220,11 +233,50 @@ class InputWidget(TextArea):
 
     def clear(self) -> EditResult:
         result = super().clear()
-        # Paste state is per-message; reset it on the same clear() path
-        # (regular and slash-command submits alike) so stale ids can't
-        # leak into the next message.
+        # Paste/attachment state is per-message; reset it on the same
+        # clear() path (regular and slash-command submits alike) so stale
+        # ids can't leak into the next message.
         self._pastes.clear()
+        self._attachments.clear()
         return result
+
+    # -- attachments -------------------------------------------------------------
+
+    def action_paste_attachment(self) -> None:
+        """Ctrl+V: attach clipboard images/files, else defer to text paste.
+
+        Degradation chain (RFC v2 §4.3.1): image/files → attachment markers;
+        text/empty/unreadable → TextArea's original ``action_paste`` (the
+        App-clipboard text path), never a silent no-op.
+        """
+        content = clipboard.read_clipboard()
+        if isinstance(content, clipboard.ClipboardImage):
+            path = clipboard.save_clipboard_image(content.data, content.ext)
+            self._attachment_counter += 1
+            n = self._attachment_counter
+            attachment = Attachment(
+                kind="image",
+                name=f"剪贴板图片-{n}.{content.ext}",
+                path=str(path),
+                mime=f"image/{content.ext}",
+            )
+            marker = f"[图片 #{n}]"
+            self._attachments.append((marker, attachment))
+            self.insert(marker)
+            return
+        if isinstance(content, clipboard.ClipboardFiles):
+            for path in content.paths:
+                self._attachment_counter += 1
+                n = self._attachment_counter
+                attachment = Attachment(
+                    kind="file", name=path.name, path=str(path)
+                )
+                marker = f"[文件 #{n}: {path.name}]"
+                self._attachments.append((marker, attachment))
+                self.insert(marker)
+            return
+        # Text/empty/failure: keep the built-in text paste behavior.
+        super().action_paste()
 
     # -- submission ------------------------------------------------------------
 
@@ -236,12 +288,14 @@ class InputWidget(TextArea):
         if invalid_ids:
             self.post_message(PasteMarkersInvalid(invalid_ids))
         if text:
+            # Only send attachments whose marker survived editing.
+            attachments = [a for marker, a in self._attachments if marker in text]
             if not self._history or self._history[-1] != text:
                 self._history.append(text)
             self._history_index = None
             self._history_value = None
             self._draft = ""
-            self.post_message(UserSubmitted(text))
+            self.post_message(UserSubmitted(text, attachments))
             self.clear()
 
     def action_newline(self) -> None:
