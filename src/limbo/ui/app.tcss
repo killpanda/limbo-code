@@ -64,6 +64,35 @@ ChatWidget {
     padding: 0 1;
     margin-left: 2;
 }
+.queued-message {
+    width: 1fr;
+    height: auto;
+}
+.queued-message .user-message {
+    margin-top: 1;
+}
+.queued-status {
+    height: 1;
+    margin-left: 2;
+}
+.queued-hint {
+    color: $text-tertiary;
+}
+.queued-cancel {
+    color: $text-secondary;
+    margin-left: 2;
+    text-style: underline;
+}
+.queued-cancel:hover {
+    color: $error-bright;
+}
+.queued-message.cancelled .user-message {
+    color: $text-tertiary;
+    text-style: strike;
+}
+.queued-message.cancelled .queued-hint {
+    color: $text-tertiary;
+}
 .ascii-art {
     color: $text-secondary;
     margin-top: 1;

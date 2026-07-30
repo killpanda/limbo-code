@@ -15,6 +15,7 @@ from limbo.agent import (
     Agent,
     CompactionEvent,
     ErrorEvent,
+    SteerEvent,
     TextDelta,
     ToolCallRequest,
     ToolResultEvent,
@@ -1564,3 +1565,401 @@ def test_extract_cached_tokens_existing_branches_win_first():
     assert _extract_cached_tokens({"cache_read_input_tokens": 30}) == 30
     assert _extract_cached_tokens({"input_tokens": 5}) is None
     assert _extract_cached_tokens(None) is None
+
+
+# -- steer queue (RFC LIM-20) --------------------------------------------------
+
+
+def _make_steer_agent(workdir, client, max_iterations: int | None = None) -> Agent:
+    cfg = Config()
+    if max_iterations is not None:
+        cfg.llm.max_iterations = max_iterations
+    agent = Agent(
+        config=cfg,
+        llm_client=FakeLLMClient([]),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    agent.llm_client = client
+    return agent
+
+
+@pytest.mark.asyncio
+async def test_steer_injected_at_loop_top(workdir):
+    """A message steered mid-turn is injected after the tool results and
+    before the next LLM request, as a plain user message."""
+    (workdir / "main.py").write_text("x = 1\n")
+
+    class SteeringClient:
+        def __init__(self):
+            self.calls = []
+
+        async def chat(self, messages, tools, on_request=None):
+            self.calls.append([m.model_dump() for m in messages])
+            if len(self.calls) == 1:
+                yield ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"})
+                agent.steer("改用 uv")
+            else:
+                yield TextChunk(text="done")
+
+    client = SteeringClient()
+    agent = _make_steer_agent(workdir, client)
+
+    events = await _collect(agent.run("read main.py"))
+
+    # Second request sees: system, user, assistant(tool_calls), tool, user(steer).
+    second = client.calls[1]
+    assert [m["role"] for m in second] == ["system", "user", "assistant", "tool", "user"]
+    assert second[-1]["content"] == "改用 uv"
+    # The SteerEvent is emitted before the follow-up response streams.
+    kinds = [type(e).__name__ for e in events]
+    assert kinds.index("SteerEvent") < kinds.index("TextDelta")
+    steer_events = [e for e in events if isinstance(e, SteerEvent)]
+    assert len(steer_events) == 1
+    assert steer_events[0].text == "改用 uv"
+    assert not agent.has_pending_steer()
+    # Trace marks the injected message as a steer (the turn's first input has
+    # no steer/followup flag).
+    records = read_trace(agent.trace.path)
+    steered = [r for r in records if r["type"] == "user_message" and r.get("steer")]
+    assert len(steered) == 1 and steered[0]["content"] == "改用 uv"
+    first = [
+        r
+        for r in records
+        if r["type"] == "user_message" and not r.get("steer") and not r.get("followup")
+    ]
+    assert len(first) == 1
+    # And the steer message persists with the session.
+    from limbo.sessions import load_session
+
+    _, persisted, _ = load_session(agent._session_file)
+    assert any(m.role == "user" and m.content == "改用 uv" for m in persisted)
+
+
+@pytest.mark.asyncio
+async def test_steer_fifo_multiple_injection(workdir):
+    """Multiple queued messages inject in FIFO order as adjacent user messages."""
+    (workdir / "main.py").write_text("x = 1\n")
+
+    class SteeringClient:
+        def __init__(self):
+            self.calls = []
+
+        async def chat(self, messages, tools, on_request=None):
+            self.calls.append([m.model_dump() for m in messages])
+            if len(self.calls) == 1:
+                yield ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"})
+                self.ids = [agent.steer(t) for t in ("一", "二", "三")]
+            else:
+                yield TextChunk(text="done")
+
+    client = SteeringClient()
+    agent = _make_steer_agent(workdir, client)
+
+    events = await _collect(agent.run("go"))
+
+    tail = client.calls[1][-3:]
+    assert [m["role"] for m in tail] == ["user", "user", "user"]
+    assert [m["content"] for m in tail] == ["一", "二", "三"]
+    steer_events = [e for e in events if isinstance(e, SteerEvent)]
+    assert [e.id for e in steer_events] == client.ids
+    assert [e.text for e in steer_events] == ["一", "二", "三"]
+
+
+@pytest.mark.asyncio
+async def test_steer_followup_resets_iteration_count(workdir):
+    """A message arriving as the final response streams keeps the turn alive
+    as a follow-up — a fresh input with a reset iteration budget."""
+
+    class FollowupClient:
+        def __init__(self):
+            self.calls = []
+
+        async def chat(self, messages, tools, on_request=None):
+            self.calls.append([m.model_dump() for m in messages])
+            if len(self.calls) == 1:
+                agent.steer("补充一下")
+                yield TextChunk(text="first")
+            else:
+                yield TextChunk(text="second")
+
+    client = FollowupClient()
+    # max_iterations=1: without the reset the follow-up could never run.
+    agent = _make_steer_agent(workdir, client, max_iterations=1)
+
+    events = await _collect(agent.run("hi"))
+
+    assert len(client.calls) == 2
+    assert client.calls[1][-1]["content"] == "补充一下"
+    assert [e.text for e in events if isinstance(e, SteerEvent)] == ["补充一下"]
+    texts = [e.text for e in events if isinstance(e, TextDelta)]
+    assert texts == ["first", "second"]
+    records = read_trace(agent.trace.path)
+    followups = [r for r in records if r["type"] == "user_message" and r.get("followup")]
+    assert len(followups) == 1 and followups[0]["content"] == "补充一下"
+
+
+@pytest.mark.asyncio
+async def test_steer_leftover_injected_before_next_input(workdir):
+    """Error exits skip the turn-end drain; the run()-head fallback injects
+    leftovers BEFORE the next turn's input (submission order preserved)."""
+
+    class FlakyClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def chat(self, messages, tools, on_request=None):
+            self.calls += 1
+            if self.calls == 1:
+                agent.steer("先到的")
+                raise RuntimeError("network down")
+            yield TextChunk(text="ok")
+
+    client = FlakyClient()
+    agent = _make_steer_agent(workdir, client)
+
+    events = await _collect(agent.run("hi"))
+    assert any(isinstance(e, ErrorEvent) for e in events)
+    assert agent.has_pending_steer()
+
+    events = await _collect(agent.run("新输入"))
+    user_texts = [m.content for m in agent.messages if m.role == "user"]
+    assert user_texts == ["hi", "先到的", "新输入"]
+    assert [e.text for e in events if isinstance(e, SteerEvent)] == ["先到的"]
+    assert not agent.has_pending_steer()
+
+
+@pytest.mark.asyncio
+async def test_steer_leftover_after_max_iterations(workdir):
+    """The max-iterations cancellation path also skips the turn-end drain;
+    leftovers survive for the next run()-head fallback."""
+    (workdir / "main.py").write_text("x = 1\n")
+
+    class ToolClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def chat(self, messages, tools, on_request=None):
+            self.calls += 1
+            if self.calls == 1:
+                yield ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"})
+                agent.steer("别忘了我")
+            else:
+                yield TextChunk(text="ok")
+
+    client = ToolClient()
+    agent = _make_steer_agent(workdir, client, max_iterations=1)
+
+    events = await _collect(agent.run("go"))
+    assert any(
+        isinstance(e, ErrorEvent) and "iteration" in e.message for e in events
+    )
+    assert agent.has_pending_steer()
+
+    await _collect(agent.run("next"))
+    user_texts = [m.content for m in agent.messages if m.role == "user"]
+    assert user_texts == ["go", "别忘了我", "next"]
+
+
+@pytest.mark.asyncio
+async def test_steer_with_attachments(workdir):
+    """Steer items carry attachments; injection reuses _build_user_content
+    (small files inline, images degrade without vision)."""
+    (workdir / "main.py").write_text("x = 1\n")
+    note = workdir / "note.txt"
+    note.write_text("备忘内容")
+    img = workdir / "pic.png"
+    img.write_bytes(b"\x89PNG fake")
+
+    class SteeringClient:
+        def __init__(self):
+            self.calls = []
+
+        async def chat(self, messages, tools, on_request=None):
+            self.calls.append([m.model_dump() for m in messages])
+            if len(self.calls) == 1:
+                yield ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"})
+                agent.steer(
+                    "看附件",
+                    [
+                        Attachment(kind="file", name="note.txt", path=str(note)),
+                        Attachment(
+                            kind="image",
+                            name="pic.png",
+                            path=str(img),
+                            mime="image/png",
+                        ),
+                    ],
+                )
+            else:
+                yield TextChunk(text="done")
+
+    client = SteeringClient()
+    agent = _make_steer_agent(workdir, client)
+
+    await _collect(agent.run("go"))
+
+    steer_msg = client.calls[1][-1]
+    assert "文件 note.txt 的内容" in steer_msg["content"]
+    assert "备忘内容" in steer_msg["content"]
+    # deepseek-chat has no vision: the image degrades to a path note.
+    assert "当前模型不支持图像输入" in steer_msg["content"]
+
+
+@pytest.mark.asyncio
+async def test_steer_injected_after_compaction_attempt(workdir):
+    """At loop-top the compaction check runs before the steer drain."""
+    (workdir / "main.py").write_text("x = 1\n")
+
+    class SteeringClient:
+        def __init__(self):
+            self.calls = []
+
+        async def chat(self, messages, tools, on_request=None):
+            self.calls.append([m.model_dump() for m in messages])
+            if len(self.calls) == 1:
+                yield ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"})
+                agent.steer("插队")
+            else:
+                yield TextChunk(text="done")
+
+    client = SteeringClient()
+    agent = _make_steer_agent(workdir, client)
+    # Tiny fake window: any estimate exceeds window - reserve, so the
+    # compaction check fires at loop-top (no safe split → CompactionEvent
+    # with compacted=False, which still proves the ordering).
+    agent._context_window = 100
+
+    events = await _collect(agent.run("hi"))
+
+    kinds = [type(e).__name__ for e in events]
+    assert "CompactionEvent" in kinds
+    assert kinds.index("CompactionEvent") < kinds.index("SteerEvent")
+    assert client.calls[1][-1]["content"] == "插队"
+
+
+@pytest.mark.asyncio
+async def test_cancel_steer_by_id(workdir):
+    """Cancelling a queued item removes it; the rest inject normally."""
+    (workdir / "main.py").write_text("x = 1\n")
+
+    class SteeringClient:
+        def __init__(self):
+            self.calls = []
+
+        async def chat(self, messages, tools, on_request=None):
+            self.calls.append([m.model_dump() for m in messages])
+            if len(self.calls) == 1:
+                yield ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"})
+                self.id1 = agent.steer("取消我")
+                self.id2 = agent.steer("保留我")
+                assert agent.cancel_steer(self.id1) is True
+            else:
+                yield TextChunk(text="done")
+
+    client = SteeringClient()
+    agent = _make_steer_agent(workdir, client)
+
+    events = await _collect(agent.run("go"))
+
+    assert client.calls[1][-1]["content"] == "保留我"
+    assert not any(
+        m.role == "user" and "取消我" in (m.content or "") for m in agent.messages
+    )
+    steer_events = [e for e in events if isinstance(e, SteerEvent)]
+    assert [e.id for e in steer_events] == [client.id2]
+    # The cancellation is traced; the cancelled text never reaches the session.
+    records = read_trace(agent.trace.path)
+    cancelled = [r for r in records if r["type"] == "steer_cancelled"]
+    assert len(cancelled) == 1 and cancelled[0]["text"] == "取消我"
+    from limbo.sessions import load_session
+
+    _, persisted, _ = load_session(agent._session_file)
+    assert not any("取消我" in (m.content or "") for m in persisted)
+
+
+@pytest.mark.asyncio
+async def test_cancel_steer_after_injection_returns_false(workdir):
+    """Past the drain boundary a message is part of history and cannot be
+    retracted; unknown ids are a no-op."""
+    (workdir / "main.py").write_text("x = 1\n")
+
+    class SteeringClient:
+        def __init__(self):
+            self.calls = []
+
+        async def chat(self, messages, tools, on_request=None):
+            self.calls.append([m.model_dump() for m in messages])
+            if len(self.calls) == 1:
+                yield ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"})
+                self.id1 = agent.steer("已注入")
+            else:
+                yield TextChunk(text="done")
+
+    client = SteeringClient()
+    agent = _make_steer_agent(workdir, client)
+
+    await _collect(agent.run("go"))
+
+    assert agent.cancel_steer(client.id1) is False
+    assert agent.cancel_steer("unknown-id") is False
+    assert any(
+        m.role == "user" and m.content == "已注入" for m in agent.messages
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancel_latest_steer_lifo(workdir):
+    """Esc semantics: cancel the newest queued message first."""
+    (workdir / "main.py").write_text("x = 1\n")
+
+    class SteeringClient:
+        def __init__(self):
+            self.calls = []
+
+        async def chat(self, messages, tools, on_request=None):
+            self.calls.append([m.model_dump() for m in messages])
+            if len(self.calls) == 1:
+                yield ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"})
+                self.ids = [agent.steer(t) for t in ("一", "二", "三")]
+                assert agent.cancel_latest_steer() == self.ids[2]
+                assert agent.cancel_latest_steer() == self.ids[1]
+            else:
+                yield TextChunk(text="done")
+
+    client = SteeringClient()
+    agent = _make_steer_agent(workdir, client)
+
+    await _collect(agent.run("go"))
+
+    user_texts = [m.content for m in agent.messages if m.role == "user"]
+    assert user_texts == ["go", "一"]
+    # Empty queue: nothing to cancel.
+    assert agent.cancel_latest_steer() is None
+
+
+@pytest.mark.asyncio
+async def test_cancel_all_before_turn_end_breaks_normally(workdir):
+    """When the only queued message is cancelled before the turn-end drain,
+    the turn breaks normally — no phantom follow-up."""
+
+    class SteeringClient:
+        def __init__(self):
+            self.calls = []
+
+        async def chat(self, messages, tools, on_request=None):
+            self.calls.append([m.model_dump() for m in messages])
+            item_id = agent.steer("撤回")
+            assert agent.cancel_steer(item_id) is True
+            yield TextChunk(text="only")
+
+    client = SteeringClient()
+    agent = _make_steer_agent(workdir, client)
+
+    events = await _collect(agent.run("hi"))
+
+    assert len(client.calls) == 1
+    assert not any(isinstance(e, SteerEvent) for e in events)
+    assert not any(
+        m.role == "user" and "撤回" in (m.content or "") for m in agent.messages
+    )

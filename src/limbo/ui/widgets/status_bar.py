@@ -31,6 +31,7 @@ class StatusBar(Horizontal):
         self._model = model
         self._workdir = workdir
         self._tokens = 0
+        self._queued = 0
         # NOTE: attribute names must not collide with MessagePump internals
         # (e.g. `_context` is a method on MessagePump).
         self._state_label = Static("● idle", id="statusbar-state", markup=False)
@@ -48,8 +49,20 @@ class StatusBar(Horizontal):
         parts = [self._model]
         if self._tokens:
             parts.append(f"↓↑ {_format_tokens(self._tokens)}")
+        if self._queued:
+            parts.append(f"⏳ {self._queued} 条排队中")
         parts.append(self._workdir)
         return " · ".join(parts)
+
+    def set_queued(self, count: int) -> None:
+        """Update the queued-steer-message counter (RFC LIM-20)."""
+        if count == self._queued:
+            return
+        self._queued = count
+        try:
+            self._context_label.update(self._context_text())
+        except Exception:  # noqa: BLE001 - not composed yet
+            pass
 
     def set_tokens(self, total: int) -> None:
         """Update the cumulative token counter on the right side."""

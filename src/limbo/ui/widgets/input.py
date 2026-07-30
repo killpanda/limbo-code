@@ -399,3 +399,11 @@ class InputWidget(TextArea):
         screen = self._menu_screen()
         if screen is not None:
             screen.slash_menu_close()
+            return
+        # Menu closed (RFC LIM-20): Esc cancels the newest queued steer
+        # message. The dispatch lives here — not in a screen-level binding —
+        # because this priority binding always sees Esc first while the
+        # input is focused.
+        cancel = getattr(self.screen, "cancel_latest_queued", None)
+        if cancel is not None:
+            cancel()

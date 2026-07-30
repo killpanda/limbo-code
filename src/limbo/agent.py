@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import collections
 import os
 import platform
 import secrets
@@ -10,7 +11,7 @@ import time
 import traceback
 import warnings
 from collections.abc import AsyncIterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -120,6 +121,27 @@ class UsageUpdate:
     total_tokens: int
 
 
+@dataclass(frozen=True)
+class SteerItem:
+    """A user message queued while the agent is mid-turn (RFC LIM-20)."""
+
+    id: str
+    text: str
+    attachments: list[Attachment] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class SteerEvent:
+    """A queued steer message was injected into the conversation history.
+
+    Emitted by every consumption point (loop-top steer, turn-end follow-up,
+    run()-head fallback) so the UI can flip the matching queued card by id.
+    """
+
+    id: str
+    text: str
+
+
 AgentEvent = (
     TextDelta
     | ThinkingDelta
@@ -128,6 +150,7 @@ AgentEvent = (
     | ErrorEvent
     | CompactionEvent
     | UsageUpdate
+    | SteerEvent
 )
 
 
@@ -214,6 +237,11 @@ class Agent:
         self.workdir = workdir
         self.registry = ToolRegistry(workdir=workdir, config=config)
         self._history = ToolHistory([])
+        # Steer queue (RFC LIM-20): user messages submitted mid-turn. A deque
+        # (not asyncio.Queue) so individual items can be cancelled by id;
+        # producers/consumers only ever use non-blocking ops on the single
+        # Textual event loop.
+        self._steer_queue: collections.deque[SteerItem] = collections.deque()
         self._iteration_count = 0
         self._last_finish_reason: str | None = None
         self._session_total_tokens = 0
@@ -420,6 +448,82 @@ class Agent:
     def messages(self, value: list[Message]) -> None:
         self._history.messages = value
 
+    # -- steer queue (LIM-20) -------------------------------------------------
+
+    def steer(self, text: str, attachments: list[Attachment] | None = None) -> str:
+        """Queue a user message for injection into the running turn.
+
+        Non-blocking; safe to call from the UI at any time. Returns the
+        queued item's id (the UI binds its queued card to it).
+        """
+        item = SteerItem(
+            id=secrets.token_hex(4), text=text, attachments=attachments or []
+        )
+        self._steer_queue.append(item)
+        return item.id
+
+    def cancel_steer(self, item_id: str) -> bool:
+        """Cancel a still-queued steer message.
+
+        Returns False when the item was already drained (injected or being
+        injected — past the boundary it is part of history and cannot be
+        retracted) or the id is unknown.
+        """
+        for item in self._steer_queue:
+            if item.id == item_id:
+                self._steer_queue.remove(item)
+                self.trace.log(
+                    "steer_cancelled",
+                    turn=self._turn_count,
+                    id=item_id,
+                    text=item.text,
+                )
+                return True
+        return False
+
+    def cancel_latest_steer(self) -> str | None:
+        """Cancel the newest queued steer message (Esc path)."""
+        if not self._steer_queue:
+            return None
+        item = self._steer_queue.pop()
+        self.trace.log(
+            "steer_cancelled", turn=self._turn_count, id=item.id, text=item.text
+        )
+        return item.id
+
+    def drain_steer(self) -> list[SteerItem]:
+        """Remove and return all queued items in FIFO order."""
+        items = list(self._steer_queue)
+        self._steer_queue.clear()
+        return items
+
+    def has_pending_steer(self) -> bool:
+        return bool(self._steer_queue)
+
+    @property
+    def queued_count(self) -> int:
+        return len(self._steer_queue)
+
+    def _inject_steer(self, item: SteerItem, *, followup: bool) -> SteerEvent:
+        """Append a queued message to the history as a user message.
+
+        Only ever called at consistency points (all tool results recorded,
+        no request in flight): loop-top, turn-end, or run()-head.
+        """
+        content, images = self._build_user_content(item.text, item.attachments)
+        self.messages.append(
+            Message(role="user", content=content, attachments=images or None)
+        )
+        self.trace.log(
+            "user_message",
+            turn=self._turn_count,
+            steer=not followup,
+            followup=followup,
+            id=item.id,
+            content=content,
+        )
+        return SteerEvent(id=item.id, text=item.text)
+
     def _build_user_content(
         self, user_input: str, attachments: list[Attachment]
     ) -> tuple[str, list[Attachment]]:
@@ -477,6 +581,12 @@ class Agent:
         self._auto_compact_noop_notified = False
         self._turn_count += 1
         self._turn_start = time.monotonic()
+
+        # Fallback drain (RFC LIM-20): leftovers from a previous turn (error
+        # exit, max-iterations cancellation, or the exit-window race) are
+        # injected BEFORE this turn's input so submission order is preserved.
+        for item in self.drain_steer():
+            yield self._inject_steer(item, followup=True)
 
         content, images = self._build_user_content(user_input, attachments or [])
         self.messages.append(
@@ -578,6 +688,11 @@ class Agent:
                         trigger="auto",
                         reason=f"自动压缩异常：{e}",
                     )
+            # Loop-top steer drain (RFC LIM-20): history is consistent here
+            # (previous batch's tool results are all recorded) and no request
+            # is in flight — the same safety argument as loop-top compaction.
+            for item in self.drain_steer():
+                yield self._inject_steer(item, followup=False)
             try:
                 async for event in self._call_llm():
                     yield event
@@ -595,7 +710,17 @@ class Agent:
 
             last = self.messages[-1]
             if not last.tool_calls:
-                break
+                # Turn-end follow-up drain (RFC LIM-20): messages that arrived
+                # as the final response streamed keep the turn alive as a
+                # follow-up — a fresh user input, so the iteration budget
+                # resets like run() does per input.
+                pending = self.drain_steer()
+                if not pending:
+                    break
+                self._iteration_count = 0
+                for item in pending:
+                    yield self._inject_steer(item, followup=True)
+                continue
 
             # Length-stop guard: the response was cut off by the output
             # token limit, so tool-call arguments may be truncated. Fail

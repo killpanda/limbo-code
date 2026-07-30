@@ -19,6 +19,10 @@ class SlashCommand:
     description: str
     takes_args: bool = False
     kind: str = "builtin"  # "builtin" | "skill"
+    # Commands that rewrite session/history state must NOT run mid-turn
+    # (RFC LIM-20): they are rejected while the agent is busy. Read-only
+    # commands opt in to busy availability here.
+    allow_when_busy: bool = False
     handler: Callable[[str], None] | None = field(
         default=None, compare=False, repr=False
     )
