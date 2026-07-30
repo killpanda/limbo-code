@@ -544,10 +544,11 @@ def test_missing_api_key_raises_with_env_hint():
 def test_catalog_resolves_codex_models():
     from limbo.llm.catalog import resolve_model
 
+    # gpt-5.5: verified live against the target relay (1M context,
+    # vision, 128K output per the relay's /models).
     spec = resolve_model("gpt-5.5")
     assert spec.provider.id == "codex"
     assert spec.provider.api == "openai-responses"
-    # Relay-reported metadata (verified live): 1M context, vision, 128K out.
     assert spec.context_window == 1_000_000
     assert spec.max_tokens == 128_000
     assert spec.vision is True
@@ -558,6 +559,20 @@ def test_catalog_resolves_codex_models():
         "high": "high",
         "xhigh": "xhigh",
     }
+
+    # pi-derived entries (unverified against the target relay).
+    sol = resolve_model("gpt-5.6-sol")
+    assert sol.context_window == 272_000
+    assert sol.thinking_levels["max"] == "max"
+    assert sol.vision is True
+
+    spark = resolve_model("gpt-5.3-codex-spark")
+    assert spark.context_window == 128_000
+    assert spark.vision is False
+    assert "max" not in spark.thinking_levels
+
+    for model_id in ("gpt-5.4", "gpt-5.4-mini", "gpt-5.6-terra", "gpt-5.6-luna"):
+        assert resolve_model(model_id).provider is spec.provider, model_id
 
 
 @pytest.mark.asyncio

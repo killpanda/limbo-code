@@ -149,11 +149,15 @@ def _codex(
     context_window: int,
     max_tokens: int = 128_000,
     vision: bool = True,
+    supports_max: bool = False,
 ) -> ModelSpec:
     # Codex models reason with Responses reasoning effort. pi's
     # thinkingLevelMap: standard levels through "high" pass through by the
     # provider default mapping, "minimal" maps to "low", "xhigh" is
-    # explicit.
+    # explicit, and 5.6-generation models add "max".
+    levels = {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh"}
+    if supports_max:
+        levels["max"] = "max"
     return ModelSpec(
         id=model_id,
         provider=CODEX,
@@ -162,12 +166,7 @@ def _codex(
         reasoning=True,
         vision=vision,
         thinking_format="openai-responses",
-        thinking_levels={
-            "low": "low",
-            "medium": "medium",
-            "high": "high",
-            "xhigh": "xhigh",
-        },
+        thinking_levels=levels,
     )
 
 
@@ -315,12 +314,24 @@ CATALOG: dict[str, ModelSpec] = {
     ),
     "glm-5v-turbo": _glm("glm-5v-turbo", context_window=200_000, vision=True),
     # -- OpenAI Codex (Responses API dialect) --------------------------------
-    # Verified by live test against the target relay (2026-07-30): full
-    # tool-call round trip passed, reasoning/include fields tolerated.
-    # Context window / vision are as reported by the relay's /models (pi's
-    # official-backend data says 272K — the relay exposes 1M). The effort
-    # map follows pi's thinkingLevelMap ("high" verified live).
+    # Model metadata mirrors pi's openai-codex provider
+    # (providers/data/openai-codex.json). Only gpt-5.5 has been verified by
+    # live test (2026-07-30, against the target relay: full tool-call round
+    # trip, reasoning/include fields tolerated; its 1M context is per the
+    # relay's /models — pi's official-backend data says 272K). The other entries are
+    # pi-derived and unverified: availability depends on the relay in use
+    # (unknown/unsupported models fall back to the generic provider spec).
     "gpt-5.5": _codex("gpt-5.5", context_window=1_000_000),
+    "gpt-5.3-codex-spark": _codex(
+        "gpt-5.3-codex-spark", context_window=128_000, vision=False
+    ),
+    "gpt-5.4": _codex("gpt-5.4", context_window=272_000),
+    "gpt-5.4-mini": _codex("gpt-5.4-mini", context_window=272_000),
+    "gpt-5.6-sol": _codex("gpt-5.6-sol", context_window=272_000, supports_max=True),
+    "gpt-5.6-terra": _codex(
+        "gpt-5.6-terra", context_window=272_000, supports_max=True
+    ),
+    "gpt-5.6-luna": _codex("gpt-5.6-luna", context_window=272_000, supports_max=True),
 }
 
 

@@ -40,10 +40,13 @@ Built-in providers:
 | `glm` (GLM Coding Plan) | openai-completions | `https://open.bigmodel.cn/api/coding/paas/v4` | `ZHIPUAI_API_KEY` |
 | `codex` (OpenAI Codex) | openai-responses | `https://api.openai.com/v1` (override with your relay) | `CODEX_API_KEY` |
 
-Built-in Codex models: `gpt-5.5` (1M context, vision) — the catalog entry
-is verified by live test against the target relay; other IDs from pi's
-catalog were dropped because the relay does not serve them (unknown IDs
-still work via the generic fallback). Codex speaks the
+Built-in Codex models include `gpt-5.5`, `gpt-5.6-sol`/`terra`/`luna`,
+`gpt-5.4`, `gpt-5.4-mini`, and `gpt-5.3-codex-spark`. **`gpt-5.5` is
+verified by live test against the target relay** (its 1M context is
+relay-reported); the other entries mirror pi's built-in catalog and are
+unverified — availability depends on the relay in use, and unknown or
+unsupported models fall back to the generic OpenAI-compatible defaults.
+Codex speaks the
 OpenAI **Responses API** (`POST {base_url}/responses`), served by a
 dedicated client (`src/limbo/llm/responses_client.py`, plain httpx SSE):
 system messages become `instructions`, tool definitions are flattened, and
@@ -149,9 +152,10 @@ thinking_effort = "high" # reasoning control; default = provider behavior
 - `glm-*` (z.ai-style): like DeepSeek-style but with `clear_thinking: false`
   so thinking is preserved across turns; `glm-5.2` additionally maps
   `low`/`high`/`max` to `reasoning_effort` (`low` clamps to `high`).
-- `gpt-5.5` (Responses API): `low` | `medium` | `high` | `xhigh` →
-  `reasoning: {effort, summary: auto}`. Temperature is omitted for
-  reasoning models.
+- `gpt-5.*` codex models (Responses API): `low` | `medium` | `high` |
+  `xhigh` → `reasoning: {effort, summary: auto}`; 5.6-generation models
+  (`gpt-5.6-*`) also accept `max`. Temperature is omitted for reasoning
+  models.
 - Non-reasoning models: ignored.
 
 Reasoning output streams into the chat as muted thinking blocks and is
