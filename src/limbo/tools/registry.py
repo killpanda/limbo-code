@@ -56,10 +56,17 @@ class ToolRegistry:
         Paths already inside the workdir or an existing grant are skipped.
         """
         added: list[Path] = []
+        try:
+            home = Path.home().resolve()
+        except (OSError, RuntimeError):
+            home = None
         for raw in sorted({str(p) for p in paths}):
             try:
                 root = Path(raw).expanduser().resolve(strict=False)
             except (OSError, RuntimeError):
+                continue
+            # Fence-voiding grants are never allowed, whatever the caller.
+            if root == root.parent or (home is not None and root == home):
                 continue
             if is_within_workdir(root, self.workdir):
                 continue

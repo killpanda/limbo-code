@@ -92,7 +92,12 @@ class BaseTool(ABC):
         """True if a resolved path is inside the workdir or an allowed root."""
         if is_within_workdir(path, self.workdir):
             return True
-        return any(is_within_workdir(path, root) for root in self.allowed_roots)
+        # Snapshot: tools run in worker threads while the UI thread may add
+        # grants; iterating the live set could raise "changed size during
+        # iteration".
+        return any(
+            is_within_workdir(path, root) for root in tuple(self.allowed_roots)
+        )
 
     def resolve_existing(
         self, raw_path: str, *, noun: str = "Path", kind: str = "any"

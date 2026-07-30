@@ -53,6 +53,23 @@ def test_skips_filesystem_root():
     assert extract_grantable_paths("从 / 开始找") == []
 
 
+def test_tilde_slash_does_not_grant_home(tree, monkeypatch):
+    """'~/' must not widen the fence to the whole home directory."""
+    monkeypatch.setenv("HOME", str(tree))
+    assert extract_grantable_paths("放在 ~/ 下就行") == []
+    # Sanity: a real subdirectory under home still grants normally.
+    assert extract_grantable_paths("看下 ~/proj") == [(tree / "proj").resolve()]
+
+
+def test_strips_trailing_cjk_punctuation(tree):
+    grants = extract_grantable_paths(f"路径是 {tree}/proj，请分析")
+    assert grants == [(tree / "proj").resolve()]
+    grants = extract_grantable_paths(f"读一下 {tree}/notes.txt。")
+    assert grants == [(tree / "notes.txt").resolve()]
+    grants = extract_grantable_paths(f"对比 {tree}/proj、{tree}/notes.txt；谢谢")
+    assert set(grants) == {(tree / "proj").resolve(), (tree / "notes.txt").resolve()}
+
+
 def test_child_subsumed_by_parent_grant(tree):
     grants = extract_grantable_paths(f"{tree}/proj 然后 {tree}/proj/src")
     assert grants == [(tree / "proj").resolve()]

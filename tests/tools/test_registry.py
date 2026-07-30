@@ -85,3 +85,11 @@ def test_add_allowed_roots_dedupes_and_skips_workdir(workdir):
         assert ls_tool.is_within_scope(outside.resolve())
     finally:
         outside.rmdir()
+
+
+def test_add_allowed_roots_never_grants_root_or_home(workdir, monkeypatch):
+    reg = ToolRegistry(workdir=workdir)
+    monkeypatch.setenv("HOME", str(workdir.parent))
+    assert reg.add_allowed_roots([Path("/")]) == []
+    assert reg.add_allowed_roots([Path("~/")]) == []
+    assert reg.allowed_roots == set()

@@ -20,12 +20,17 @@ from pathlib import Path
 _QUOTED = re.compile(r"""["'](?P<path>(?:/|~/)[^"']+)["']""")
 
 # Bare tokens starting with "/" or "~/". A path char class that stops at
-# whitespace and the usual quoting/grouping characters; the lookbehind
-# keeps us from matching inside longer tokens (URLs, relative paths).
-_BARE = re.compile(r"(?<![\w~./:-])(?P<path>~/[^\s\"'`()\[\]{}<>]*|/[^\s\"'`()\[\]{}<>]*)")
+# whitespace and the usual quoting/grouping/punctuation characters
+# (including CJK sentence punctuation); the lookbehind keeps us from
+# matching inside longer tokens (URLs, relative paths).
+_BARE = re.compile(
+    r"(?<![\w~./:-])(?P<path>~/[^\s\"'`()\[\]{}<>，。、；：？！\u201c\u201d\u2018\u2019（）【】《》]*"
+    r"|/[^\s\"'`()\[\]{}<>，。、；：？！\u201c\u201d\u2018\u2019（）【】《》]*)"
+)
 
-# Punctuation that commonly hugs a path in prose but is not part of it.
-_TRAILING = "\"'`).,;:!?]}>"
+# Punctuation that commonly hugs a path in prose but is not part of it
+# (ASCII + common CJK sentence punctuation for Chinese prose).
+_TRAILING = "\"'`).,;:!?]}>" + "，。、；：？！\u201c\u201d\u2018\u2019（）【】《》"
 
 
 def extract_grantable_paths(text: str) -> list[Path]:
@@ -42,6 +47,12 @@ def extract_grantable_paths(text: str) -> list[Path]:
         candidates.add(match.group("path"))
 
     grants: list[Path] = []
+    # Home is resolved once for the fence-voiding check (Path.home() may
+    # contain symlinks, e.g. /tmp on macOS, so compare resolved-to-resolved).
+    try:
+        home = Path.home().resolve()
+    except (OSError, RuntimeError):
+        home = None
     # Shorter (parent) paths first so subsumed children drop out.
     for raw in sorted(candidates, key=len):
         cleaned = raw.rstrip(_TRAILING)
@@ -52,6 +63,8 @@ def extract_grantable_paths(text: str) -> list[Path]:
         except (OSError, RuntimeError):
             continue
         if resolved == resolved.parent:  # filesystem root: would void the fence
+            continue
+        if home is not None and resolved == home:  # "~/" voids it just as much
             continue
         if not resolved.exists():
             continue
