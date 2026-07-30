@@ -47,9 +47,16 @@ def main() -> int:
         default=None,
         help="Resume a session by id (or unique id prefix)",
     )
+    parser.add_argument(
+        "--model",
+        default=None,
+        help="Override the configured model for this run (e.g. glm-4.7)",
+    )
     args = parser.parse_args()
 
     config = load_config()
+    if args.model:
+        config.llm.model = args.model
     spec = resolve_model(config.llm.model)
     if not resolve_api_key(spec, config):
         env = resolve_api_key_env(spec, config)

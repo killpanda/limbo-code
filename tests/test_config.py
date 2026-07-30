@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from limbo.config import Config, load_config
+from limbo.config import Config, load_config, save_model_to_config
 
 
 def test_default_config():
@@ -175,3 +175,46 @@ def test_load_config_invalid_retry_value_does_not_discard_other_fields(tmp_path)
         cfg = load_config(path)
     assert cfg.llm.model == "gpt-4o"
     assert cfg.llm.retry_base_delay == 1.0
+
+
+# -- save_model_to_config (tomlkit write-back) ---------------------------------
+
+
+def test_save_model_creates_minimal_config(tmp_path):
+    path = tmp_path / "sub" / "config.toml"
+    assert save_model_to_config("glm-4.7", path) is True
+    cfg = load_config(path)
+    assert cfg.llm.model == "glm-4.7"
+
+
+def test_save_model_preserves_comments_and_other_fields(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '# user notes\n[llm]\napi_key = "k"\nmodel = "deepseek-chat"  # inline\n'
+        '\n[tools]\nbash_enabled = false\n'
+    )
+    assert save_model_to_config("gpt-5.5", path) is True
+    text = path.read_text()
+    assert 'model = "gpt-5.5"' in text
+    assert "# user notes" in text
+    assert 'api_key = "k"' in text
+    assert "bash_enabled = false" in text
+
+
+def test_save_model_malformed_file_returns_false_and_keeps_file(tmp_path):
+    path = tmp_path / "config.toml"
+    path.write_text("[unclosed = ")
+    assert save_model_to_config("glm-4.7", path) is False
+    assert path.read_text() == "[unclosed = "
+
+
+def test_save_model_unwritable_path_returns_false(tmp_path):
+    path = tmp_path / "missing" / "config.toml"
+    path.parent.mkdir  # sanity: parent helper exists but dir not created
+    import os
+
+    os.chmod(tmp_path, 0o500)
+    try:
+        assert save_model_to_config("glm-4.7", path) is False
+    finally:
+        os.chmod(tmp_path, 0o700)

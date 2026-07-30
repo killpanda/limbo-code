@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 import toml  # type: ignore[import-untyped]
+import tomlkit
 from pydantic import (
     BaseModel,
     Field,
@@ -223,3 +224,29 @@ def load_config(path: Path | None = None) -> Config:
             stacklevel=2,
         )
         return Config()
+
+
+def save_model_to_config(model: str, path: Path | None = None) -> bool:
+    """Persist the selected model to ``config.toml``, preserving comments.
+
+    Uses tomlkit for a comment-preserving read-modify-write; creates a
+    minimal config file when none exists. Returns False on any I/O or parse
+    failure (a malformed file is never clobbered) so the caller can degrade
+    to a session-only switch.
+    """
+    path = path or DEFAULT_CONFIG_PATH
+    try:
+        if path.exists():
+            doc = tomlkit.parse(path.read_text(encoding="utf-8"))
+        else:
+            doc = tomlkit.document()
+        llm = doc.get("llm")
+        if not isinstance(llm, dict):
+            llm = tomlkit.table()
+            doc["llm"] = llm
+        llm["model"] = model
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+    except Exception:  # noqa: BLE001 - any failure degrades to session-only
+        return False
+    return True
