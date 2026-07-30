@@ -59,6 +59,14 @@ class StatusBar(Horizontal):
         except Exception:  # noqa: BLE001 - not composed yet
             pass
 
+    def set_model(self, model: str) -> None:
+        """Update the displayed model name (after a /model switch)."""
+        self._model = model
+        try:
+            self._context_label.update(self._context_text())
+        except Exception:  # noqa: BLE001 - not composed yet
+            pass
+
     def set_state(self, text: str, style: str = "idle") -> None:
         """Update the left side. ``style`` is one of idle/thinking/tool."""
         active = style in ("thinking", "tool")

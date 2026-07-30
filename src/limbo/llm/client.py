@@ -11,6 +11,12 @@ from limbo.models import LLMEvent, Message
 # every HTTP attempt. Used for trace logging; must not mutate the body.
 RequestHook = Callable[[dict[str, Any]], None]
 
+# Dialect prefix for ``Message.reasoning_signature`` values stored by the
+# Responses client. Signatures are dialect-specific: a value carrying this
+# prefix is a serialized Responses reasoning item, and other dialects must
+# skip it on replay instead of sending it as their own signature shape.
+RESPONSES_SIGNATURE_PREFIX = "responses:"
+
 
 class LLMClient(Protocol):
     def chat(

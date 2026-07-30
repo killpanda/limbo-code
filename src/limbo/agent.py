@@ -157,7 +157,8 @@ def _extract_cached_tokens(usage: dict[str, Any] | None) -> int | None:
     """Normalize provider-specific prompt cache-hit counters.
 
     DeepSeek reports ``prompt_cache_hit_tokens``, OpenAI nests
-    ``prompt_tokens_details.cached_tokens``, Anthropic reports
+    ``prompt_tokens_details.cached_tokens``, the Responses API nests
+    ``input_tokens_details.cached_tokens``, Anthropic reports
     ``cache_read_input_tokens``.
     """
     if not usage:
@@ -168,6 +169,11 @@ def _extract_cached_tokens(usage: dict[str, Any] | None) -> int | None:
     details = usage.get("prompt_tokens_details")
     if isinstance(details, dict):
         cached = details.get("cached_tokens")
+        if isinstance(cached, int):
+            return cached
+    input_details = usage.get("input_tokens_details")
+    if isinstance(input_details, dict):
+        cached = input_details.get("cached_tokens")
         if isinstance(cached, int):
             return cached
     read = usage.get("cache_read_input_tokens")
@@ -284,6 +290,19 @@ class Agent:
                 "bash_enabled": config.tools.bash_enabled,
             },
         )
+
+    def update_llm(self, llm_client: LLMClient) -> None:
+        """Swap the LLM client after a /model switch.
+
+        ``config.llm.model`` must already hold the new model id (the spec is
+        re-resolved here) so the context window, vision gate, and compaction
+        budget all follow the new model.
+        """
+        spec = resolve_model(self.config.llm.model)
+        self.llm_client = llm_client
+        self._context_window = spec.context_window
+        self._vision = spec.vision
+        self._compaction_config = self._build_compaction_config(self.config)
 
     def _build_compaction_config(self, config: Config) -> CompactionConfig:
         """Map [compaction] settings, with a cross-check against the window.

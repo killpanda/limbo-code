@@ -248,6 +248,23 @@ def test_thinking_replay_falls_back_to_empty_signature():
     }
 
 
+def test_thinking_replay_skips_foreign_dialect_signature():
+    # A Responses-dialect signature (stored before a mid-session model
+    # switch) must not be replayed as an Anthropic signature — that 400s.
+    message = Message(
+        role="assistant",
+        content="hi",
+        reasoning="thoughts",
+        reasoning_signature='responses:{"type": "reasoning", "id": "rs_1"}',
+    )
+    _, converted = _messages_to_anthropic([message])
+    assert converted[0]["content"][0] == {
+        "type": "thinking",
+        "thinking": "thoughts",
+        "signature": "",
+    }
+
+
 def test_consecutive_tool_results_merge_into_one_user_message():
     messages = [
         Message(role="assistant", content=None, tool_calls=[

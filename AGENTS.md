@@ -51,6 +51,7 @@ src/limbo/
     ├── screens/
     │   └── main.py         # Single-column chat screen + event handling + slash commands
     │   └── session_picker.py # Modal session switcher (/sessions)
+    │   └── model_picker.py   # Modal model switcher (/model), grouped by provider
     └── widgets/
         ├── chat.py         # Chat flow: user/assistant(Markdown)/tool cards/errors + scroll-follow
         ├── input.py        # Multi-line user input
@@ -171,6 +172,7 @@ text/background pairs must stay ≥ 4.5:1.
 - **No provider field**: Provider is inferred from `base_url`, `model`, `api_key`
 - **Async Agent, sync tools**: Tools run via `asyncio.to_thread()` — they are synchronous by default but executed in a thread pool
 - **Session persistence**: Full conversation history rewritten on each save (safe for MVP-scale conversations). Sessions are resumable — see [docs/session-management.md](./docs/session-management.md): `limbo --continue` / `--resume <id>`, and in-TUI `/sessions`, `/new`, `/export` commands
+- **Runtime model switching**: `/model` (picker or direct arg) rebuilds the LLM client mid-session — `MainScreen` sets `config.llm.model` first, then `agent.update_llm()` re-resolves the spec (context window, vision gate, compaction budget); the choice is written back to `config.toml` via tomlkit (comment-preserving, `save_model_to_config`). Busy turns refuse the switch
 - **System message**: Built into `Agent._init_system_message()` — tool descriptions and guidelines are hardcoded
 - **Bash safety filter**: Heuristic only — tokenizes the command, checks against pattern list. Known bypass vectors (subshells, command substitution, variable indirection) are documented.
 

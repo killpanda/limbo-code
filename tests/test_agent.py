@@ -18,6 +18,7 @@ from limbo.agent import (
     TextDelta,
     ToolCallRequest,
     ToolResultEvent,
+    _extract_cached_tokens,
 )
 from limbo.compaction import SUMMARY_TAG
 from limbo.config import CompactionSettings, Config
@@ -1538,3 +1539,28 @@ async def test_agent_persists_and_restores_allowed_roots(workdir):
     ls_tool = agent2.registry.get("ls")
     assert ls_tool is not None
     assert ls_tool.is_within_scope(granted.resolve())
+
+
+# -- usage counter normalization ----------------------------------------------
+
+
+def test_extract_cached_tokens_responses_dialect():
+    # The Responses API nests cache hits under input_tokens_details.
+    usage = {
+        "input_tokens": 164,
+        "output_tokens": 20,
+        "total_tokens": 184,
+        "input_tokens_details": {"cached_tokens": 64},
+    }
+    assert _extract_cached_tokens(usage) == 64
+
+
+def test_extract_cached_tokens_existing_branches_win_first():
+    assert _extract_cached_tokens({"prompt_cache_hit_tokens": 10}) == 10
+    assert (
+        _extract_cached_tokens({"prompt_tokens_details": {"cached_tokens": 20}})
+        == 20
+    )
+    assert _extract_cached_tokens({"cache_read_input_tokens": 30}) == 30
+    assert _extract_cached_tokens({"input_tokens": 5}) is None
+    assert _extract_cached_tokens(None) is None

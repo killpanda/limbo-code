@@ -161,3 +161,15 @@ def test_cli_resume_ambiguous_id_lists_candidates(
     assert main() == 1
     err = capsys.readouterr().err
     assert "abc1" in err and "abc2" in err
+
+
+def test_cli_model_flag_overrides_config(fake_config, monkeypatch):
+    mock_app_class = MagicMock()
+    monkeypatch.setattr(app_module, "LimboApp", mock_app_class)
+    monkeypatch.setattr(sys, "argv", ["limbo", "--model", "glm-4.7"])
+
+    assert main() == 0
+
+    assert fake_config.llm.model == "glm-4.7"
+    kwargs = mock_app_class.call_args.kwargs
+    assert kwargs["config"].llm.model == "glm-4.7"

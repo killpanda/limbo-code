@@ -21,7 +21,13 @@ from limbo.agent import (
     UsageUpdate,
 )
 from limbo.compaction import is_summary_message
-from limbo.config import Config
+from limbo.config import Config, load_config, save_model_to_config
+from limbo.llm.catalog import (
+    GENERIC_OPENAI,
+    resolve_api_key,
+    resolve_api_key_env,
+    resolve_model,
+)
 from limbo.llm.client import LLMClient
 from limbo.llm.factory import create_llm_client
 from limbo.models import Attachment
@@ -30,6 +36,7 @@ from limbo.skills import Skill, discover_skills
 from limbo.ui.banner import startup_art_text
 from limbo.ui.commands import SlashCommand, SlashCommandRegistry
 from limbo.ui.screens.game2048 import Game2048Screen
+from limbo.ui.screens.model_picker import ModelPicker
 from limbo.ui.screens.session_picker import SessionPicker
 from limbo.ui.widgets.chat import ChatWidget
 from limbo.ui.widgets.command_menu import SlashCommandMenu
@@ -206,6 +213,14 @@ class MainScreen(Screen[None]):
             )
         )
         self._commands.register(
+            SlashCommand(
+                "/model",
+                "切换模型（无参打开选择器）[model]",
+                takes_args=True,
+                handler=lambda arg: self._switch_model(arg),
+            )
+        )
+        self._commands.register(
             SlashCommand("/help", "显示帮助", handler=lambda arg: self._show_help())
         )
         self._commands.register(
@@ -261,6 +276,85 @@ class MainScreen(Screen[None]):
 
     def _show_help(self) -> None:
         self.query_one("#chat", ChatWidget).add_info(self._commands.help_text())
+
+    # -- /model: runtime model switching --------------------------------------
+
+    def _switch_model(self, arg: str) -> None:
+        """Handle /model: open the picker, or switch directly with an arg."""
+        chat = self.query_one("#chat", ChatWidget)
+        if self._agent_busy:
+            # Same discipline as /compact: swapping the client mid-stream
+            # would corrupt the in-flight turn.
+            chat.add_info("当前任务进行中，请等待完成后再切换模型")
+            return
+        self._reload_llm_config()
+        if arg:
+            self._apply_model_switch(arg)
+            return
+        self.app.push_screen(
+            ModelPicker(self.config, self.config.llm.model),
+            self._on_model_picked,
+        )
+
+    def _on_model_picked(self, model_id: str | None) -> None:
+        if model_id is not None:
+            self._apply_model_switch(model_id)
+
+    def _reload_llm_config(self) -> None:
+        """Hot-reload llm/providers settings from config.toml.
+
+        Only the LLM-relevant fields are replaced in place (the agent holds
+        a reference to this Config), so edits made while Limbo is running —
+        e.g. a newly added [providers.<id>] key — apply without a restart.
+        """
+        fresh = load_config()
+        self.config.llm = fresh.llm
+        self.config.providers = fresh.providers
+
+    def _apply_model_switch(self, model_id: str) -> None:
+        chat = self.query_one("#chat", ChatWidget)
+        if model_id == self.config.llm.model:
+            chat.add_info(f"当前已是 {model_id}")
+            return
+        spec = resolve_model(model_id)
+        if resolve_api_key(spec, self.config) is None:
+            env = resolve_api_key_env(spec, self.config)
+            hint = f"（${env}）" if env else ""
+            chat.add_info(
+                f"未配置 {spec.provider.id} 的 API key{hint}，无法切换到 {model_id}"
+            )
+            return
+        effort = self.config.llm.thinking_effort
+        if effort and spec.thinking_levels and effort not in spec.thinking_levels:
+            self.config.llm.thinking_effort = None
+            chat.add_info("当前 thinking_effort 不受新模型支持，已重置")
+        if spec.provider is GENERIC_OPENAI:
+            chat.add_info("未知模型，按 OpenAI 兼容默认参数接入")
+        # Order matters: set the model on config first — the swap worker and
+        # agent.update_llm re-resolve everything from config.llm.model.
+        self.config.llm.model = model_id
+        self.run_worker(self._swap_llm_client())
+
+    async def _swap_llm_client(self) -> None:
+        """Swap the client for the *current* config model.
+
+        Reads config.llm.model at run time rather than the value captured
+        when the command fired, so two rapid /model commands converge: the
+        last worker to run leaves the runtime client, status bar, and
+        config file all pointing at the same (latest) model.
+        """
+        chat = self.query_one("#chat", ChatWidget)
+        model_id = self.config.llm.model
+        close = getattr(self.llm_client, "close", None)
+        if close is not None:
+            await close()
+        self.llm_client = create_llm_client(self.config)
+        self.agent.update_llm(self.llm_client)
+        self.query_one("#statusbar", StatusBar).set_model(model_id)
+        spec = resolve_model(model_id)
+        chat.add_info(f"已切换模型 {model_id} ({spec.provider.id})")
+        if not save_model_to_config(model_id):
+            chat.add_info("配置写回失败，本次切换仅当前会话生效")
 
     def _start_new_session(self) -> None:
         chat = self.query_one("#chat", ChatWidget)

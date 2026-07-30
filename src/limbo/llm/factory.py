@@ -14,16 +14,19 @@ from limbo.llm.anthropic_client import AnthropicMessagesClient
 from limbo.llm.catalog import (
     API_ANTHROPIC_MESSAGES,
     API_OPENAI_COMPLETIONS,
+    API_OPENAI_RESPONSES,
     resolve_model,
 )
 from limbo.llm.client import LLMClient
 from limbo.llm.openai_client import OpenAICompatibleClient
+from limbo.llm.responses_client import OpenAIResponsesClient
 
 ClientFactory = Callable[[Config], LLMClient]
 
 _FACTORIES: dict[str, ClientFactory] = {
     API_OPENAI_COMPLETIONS: OpenAICompatibleClient,
     API_ANTHROPIC_MESSAGES: AnthropicMessagesClient,
+    API_OPENAI_RESPONSES: OpenAIResponsesClient,
 }
 
 
