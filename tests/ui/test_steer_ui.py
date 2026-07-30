@@ -484,3 +484,49 @@ async def test_skill_queued_cancel(tmp_path):
             assert not any(
                 m.role == "user" and "TDD rules" in (m.content or "") for m in call
             )
+
+
+# -- interaction with LIM-19 path grants ----------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_queued_steer_message_grants_paths(tmp_path):
+    """A busy submission is genuine user input too: paths it references are
+    granted (LIM-19) even though the message itself is only queued."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "data.txt").write_text("external")
+    workdir = tmp_path / "workdir"
+    workdir.mkdir()
+
+    gate = asyncio.Event()
+    client = GatedClient()
+    client.add([TextChunk(text="mid")], gate=gate)
+    client.add([TextChunk(text="done")])
+
+    cfg = Config()
+    cfg.llm.api_key = "test"
+    app = LimboApp(
+        workdir=workdir,
+        config=cfg,
+        llm_client=client,
+        session_dir=tmp_path / "sessions",
+    )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = get_screen(pilot)
+        chat = screen.query_one("#chat", ChatWidget)
+        input_widget = screen.query_one("#input", InputWidget)
+
+        screen.run_worker(screen._handle_turn("go"))
+        await wait_until(pilot, lambda: len(client.calls) == 1)
+
+        await type_and_submit(pilot, input_widget, f"顺便看看 {outside}")
+        assert screen.agent.queued_count == 1
+        # The grant applies immediately, while the message is still queued.
+        assert outside.resolve() in screen.agent.registry.allowed_roots
+        assert "已允许访问" in chat.transcript_text()
+
+        gate.set()
+        await wait_until(pilot, lambda: len(client.calls) == 2 and "done" in chat.transcript_text())
+        assert client.calls[1][-1].content == f"顺便看看 {outside}"
