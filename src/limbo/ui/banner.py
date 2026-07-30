@@ -1,51 +1,117 @@
-"""Startup ASCII-art banner shown on the main screen.
+"""Startup banner shown on fresh sessions.
 
-Compact 7-row version downsampled from the original 33-row cartoon art
-(red shirt / yellow pants on blue). Characters keep the original palette
-colors; spaces carry **no style** so the banner blends into the active
-theme background instead of painting a hardcoded blue rectangle (RFC
-LIM-16 v1.1 P0-5).
+Half-block truecolor rendering (RFC LIM-16 v1.1 P0-5 successor):
+``STARTUP_ART`` is a pixel map classified from the 640x640 mascot image
+by ``scripts/gen_banner.py`` (BOX downscale -> nearest-palette color ->
+despeckle -> crop). Each pair of pixel rows renders as one terminal row
+using half-block glyphs, doubling vertical resolution versus
+one-character-per-pixel art and keeping anti-aliased edges via
+foreground/background color mixing.
 
-Palette sampled from the source image (RGB):
+Palette keys (colors sampled from the source image):
 
-- ``@`` dark outline #41415E
-- ``o`` red shirt #ED5853
-- ``.`` yellow pants #FDE75C
+- ``D`` outline
+- ``R`` red shirt
+- ``Y`` yellow pants
+- space: transparent — carries **no style**, so the banner blends into
+  the active theme background instead of painting a hardcoded blue
+  rectangle.
+
+Regenerate after replacing the mascot:
+
+    python scripts/gen_banner.py /path/to/image.jpg --width 40
 """
 
 from rich.text import Text
 
-BLUE = (48, 105, 169)  # original background; kept for reference/tests
+BLUE = (48, 105, 169)  # original background; transparent at render time
 YELLOW = (253, 231, 92)  # pants
 RED = (237, 88, 83)  # shirt
-DARK = (65, 64, 94)  # outline
+DARK = (65, 64, 94)  # outline (brightened vs. source for dark themes)
 
-_FG = {"@": DARK, "o": RED, ".": YELLOW}
+_PALETTE = {"R": RED, "Y": YELLOW, "D": DARK}
+
+UPPER = "▀"  # top pixel as foreground
+LOWER = "▄"  # bottom pixel as foreground
+FULL = "█"  # both pixels share one color
 
 STARTUP_ART = """\
-   @oo@@oooooooooooooo@ooooo@
-   @@o@ooooooooooooooo@ooooo@
-   o@@@@.@@@@@@@oooooo@@@@@@@
- oo oo@@..@@@@@.........@@@@@@
-ooo@@ @@@@@..@@@........@@ooo
-   o    o@.....@........@@
-         @.....@........@"""
+DRRRDRRRRRRRRRRRRRRRRRRRRRRRRRRD
+DRRRDRRRRRRRRRRRRRRRRRRRRRRRRRRD
+DRRRDRRRRRRRRRRRRRRRRRRRRRRRRRRD
+ RRRDRRRRRRRRRRRRRRRRRRRRRRRRRRD
+ RRRDRRRRRRRRRRRRRRRRRRRRRRRRRRD
+ RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRD
+ RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRD
+ RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRD
+ RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRD
+ RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR
+ RRRRRRRRRRRRRRRRRRRRRRRRRRRRRRR
+ DRRDRRRRRRRRRRRRRRRRRRRRRRRRRRR
+ DRRDDRRRRRRRRRRRRRRRRRRDRRRRRRD
+ DRRDDRDDRRRRRRRRRRRRRRRDRRRRRRD
+  DRDRYYYYRRRDDDDDDDDDRYYRRRRRRD
+   DDYYYYYYYYYYYYYYYYYYYYDRRRDDD
+   D YYYYYDYYYYYYYYYYYYYYYDRRRDD
+    DYYYYYYDYYYYYYYYYYYYYYDDDDR
+    DRYYYYYDYYYYYYYYYYYYYYYYYYYR
+    DRYYYYYDYYYYYYYYYYYYYYDYYYYRD
+     DYYYYRYYYYYYYYYYYYYYYDYYRR D
+     DYYYYRDYYYYYYYYYYYYYYRRRR DD
+     DYYYRYYDDYYYYYYYYYYYYRRRRDD
+     DDYYYYYYRRYYYYYYYYYYYR  RDD
+     DDYYYYYDYYYYYYYYYYYYYYDDDD
+      DYRYYYDYYYYYYYYYYYYYYD
+       RYYYYYYDYYYYYYYYYYYYD
+       RYYYYYYYDYYYYYYYYYYYD
+       DYYYYYYYDYYYYYYYYYYYD
+       DYYYYYYYDYYYYYYYYYYYD
+       DYYYYYYYRYYYYYYYYYYYD
+       DYYYYYYYRYYYYYYYYYYYD
+       DYYYYYYYDYYYYYYYYYYYD
+       DYYYYYYYDYYYYYYYYYYY
+       DYYYYYYYDYYYYYYYYYYR
+       DYYYYYYYDYYYYYYYYYYR
+       DYYYYYYYDYYYYYYYYYYR
+       DYYYYYYYDYYYYYYYYYYD
+       DYYYYYYYRYYYYYYYYYYD
+       DYYYYYYYRYYYYYYYYYYD"""
+
+
+def _rgb(c: tuple[int, int, int]) -> str:
+    return f"rgb({c[0]},{c[1]},{c[2]})"
 
 
 def startup_art_text() -> Text:
-    """STARTUP_ART as a Rich Text colored with the original palette.
+    """STARTUP_ART pixel map as a Rich Text of half-block cells.
 
-    Space characters are appended unstyled (transparent), so the art sits
-    on the theme background rather than a solid blue block.
+    Each pair of pixel rows becomes one terminal row: ``▀`` (top pixel as
+    foreground), ``▄`` (bottom pixel as foreground), ``█`` (both pixels
+    share a color), or ``▀`` with a foreground/background style when the
+    two pixels differ. Fully transparent pairs stay unstyled spaces, so
+    the art sits on the theme background rather than a solid blue block.
     """
+    rows = STARTUP_ART.splitlines()
+    if len(rows) % 2:
+        rows.append("")
+    width = max(len(r) for r in rows)
     text = Text()
-    for i, line in enumerate(STARTUP_ART.splitlines()):
+    for i in range(0, len(rows), 2):
         if i:
             text.append("\n")
-        for ch in line:
-            color = _FG.get(ch)
-            if color is None:
-                text.append(ch)
-            else:
-                text.append(ch, style=f"rgb({color[0]},{color[1]},{color[2]})")
+        top, bottom = rows[i], rows[i + 1]
+        for x in range(width):
+            ct = _PALETTE.get(top[x]) if x < len(top) else None
+            cb = _PALETTE.get(bottom[x]) if x < len(bottom) else None
+            if ct is None and cb is None:
+                text.append(" ")
+            elif ct is not None and cb is not None:
+                if ct == cb:
+                    text.append(FULL, style=_rgb(ct))
+                else:
+                    text.append(UPPER, style=f"{_rgb(ct)} on {_rgb(cb)}")
+            elif ct is not None:
+                text.append(UPPER, style=_rgb(ct))
+            elif cb is not None:
+                text.append(LOWER, style=_rgb(cb))
     return text
