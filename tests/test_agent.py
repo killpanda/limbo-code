@@ -838,6 +838,58 @@ async def test_agent_friendly_error_on_rate_limit(workdir):
 
 
 @pytest.mark.asyncio
+async def test_agent_trace_marks_cancelled_turn_as_interrupted(workdir):
+    """A turn killed mid-stream (app quit cancels the worker) must not be
+    traced as "completed": no llm_response/llm_error is logged in that
+    case, so the turn_end status is the only record of what happened."""
+
+    class HangingLLMClient:
+        async def chat(self, messages, tools, on_request=None):
+            yield TextChunk(text="working")
+            await asyncio.Event().wait()  # never released
+            if False:
+                yield TextChunk(text="")
+
+    agent = Agent(
+        config=Config(),
+        llm_client=HangingLLMClient(),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    async def consume():
+        async for _ in agent.run("hi"):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.sleep(0.1)  # let the stream start
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    records = read_trace(agent.trace.path)
+    turn_ends = [r for r in records if r["type"] == "turn_end"]
+    assert len(turn_ends) == 1
+    assert turn_ends[0]["status"] == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_agent_trace_marks_finished_turn_as_completed(workdir):
+    agent = Agent(
+        config=Config(),
+        llm_client=FakeLLMClient([[TextChunk(text="done")]]),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    await _collect(agent.run("hi"))
+
+    records = read_trace(agent.trace.path)
+    turn_ends = [r for r in records if r["type"] == "turn_end"]
+    assert len(turn_ends) == 1
+    assert turn_ends[0]["status"] == "completed"
+
+
+@pytest.mark.asyncio
 async def test_agent_friendly_message_fallback_for_unknown_error(workdir):
     """friendly_message returns None for unclassified errors -> raw text kept."""
 

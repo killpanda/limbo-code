@@ -610,7 +610,10 @@ class MainScreen(Screen[None]):
             card = chat.add_tool_card(event.id, event.name, event.arguments)
             if result.success:
                 card.set_success(result.output or "")
-                statusbar.set_state("thinking…", "thinking")
             else:
                 card.set_error(result.error or "Tool failed.")
-                statusbar.set_state("idle")
+            # Success or failure, the turn continues with another LLM call
+            # that reacts to the result — the bar must stay busy. (Showing
+            # idle here made mid-turn submissions look like the agent was
+            # stuck: they steer-queued while the bar claimed idle.)
+            statusbar.set_state("thinking…", "thinking")

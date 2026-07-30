@@ -402,7 +402,7 @@ class Agent:
         """Combine text with attachments (policy lives in limbo.attachments)."""
         return build_user_content(user_input, attachments, vision=self._vision)
 
-    def _log_turn_end(self) -> None:
+    def _log_turn_end(self, status: str = "completed") -> None:
         if self._turn_start is None:
             return
         self.trace.log(
@@ -410,7 +410,7 @@ class Agent:
             turn=self._turn_count,
             duration=time.monotonic() - self._turn_start,
             iterations=self._iteration_count,
-            status="completed",
+            status=status,
         )
         self._turn_start = None
 
@@ -438,11 +438,17 @@ class Agent:
             "user_message", turn=self._turn_count, content=content
         )
 
+        completed = False
         try:
             async for event in self._conversation_loop():
                 yield event
+            completed = True
         finally:
-            self._log_turn_end()
+            # A turn killed mid-stream (worker cancelled on app quit, or the
+            # generator closed) never logs llm_response/llm_error — the
+            # turn_end status is the only trace of what happened, so it
+            # must not claim "completed".
+            self._log_turn_end("completed" if completed else "interrupted")
             try:
                 await self._save_session()
             except Exception as e:  # noqa: BLE001
