@@ -142,6 +142,9 @@ show_banner = true       # startup ASCII art on fresh sessions
 [safety]
 dangerous_commands = ["rm", "git reset --hard"]
 sensitive_files = [".env", "id_rsa", "id_ed25519", ".ssh"]
+
+[providers.glm]      # optional per-provider override (base_url / api_key /
+base_url = "..."     # api_key_env / headers); beats the global [llm] values
 ```
 
 ## UI Layout

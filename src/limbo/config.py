@@ -112,6 +112,25 @@ class LLMConfig(BaseModel):
         return value
 
 
+class ProviderOverride(BaseModel):
+    """[providers.<id>] section: per-provider overrides.
+
+    Every field is optional; an unset field falls back to the catalog's
+    built-in value for that provider (see limbo.llm.catalog). Overrides take
+    precedence over the global [llm] settings — see resolve_base_url /
+    resolve_api_key for the full resolution order.
+    """
+
+    base_url: str | None = None
+    api_key: str | None = None
+    # Rename the credential env var (e.g. CODEX_API_KEY instead of the
+    # catalog default). Ignored when api_key is set directly.
+    api_key_env: str | None = None
+    # Extra HTTP headers sent on every request to this provider (merged over
+    # the provider's built-in headers, e.g. relay-specific auth headers).
+    headers: dict[str, str] = Field(default_factory=dict)
+
+
 class UIConfig(BaseModel):
     # Theme name: built-in "limbo-dark" (default) / "limbo-light", or any
     # Textual built-in theme (e.g. "textual-dark", "dracula", "nord").
@@ -172,6 +191,9 @@ class Config(BaseModel):
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     compaction: CompactionSettings = Field(default_factory=CompactionSettings)
+    # [providers.<id>] per-provider overrides, keyed by catalog provider id
+    # (e.g. [providers.glm], [providers.codex]).
+    providers: dict[str, ProviderOverride] = Field(default_factory=dict)
 
 
 def load_config(path: Path | None = None) -> Config:

@@ -31,6 +31,7 @@ from limbo.llm.catalog import (
     ModelSpec,
     resolve_api_key,
     resolve_base_url,
+    resolve_headers,
     resolve_model,
 )
 from limbo.llm.client import RequestHook
@@ -64,7 +65,7 @@ class AnthropicMessagesClient:
     @property
     def client(self) -> httpx.AsyncClient:
         if self._client is None:
-            api_key = resolve_api_key(self.spec, self.config.llm.api_key)
+            api_key = resolve_api_key(self.spec, self.config)
             if not api_key:
                 env = self.spec.provider.api_key_env
                 raise ValueError(
@@ -73,12 +74,12 @@ class AnthropicMessagesClient:
                     + (f" or the ${env} environment variable." if env else ".")
                 )
             self._client = httpx.AsyncClient(
-                base_url=resolve_base_url(self.spec, self.config.llm.base_url).rstrip("/"),
+                base_url=resolve_base_url(self.spec, self.config).rstrip("/"),
                 headers={
                     "x-api-key": api_key,
                     "anthropic-version": ANTHROPIC_VERSION,
                     "accept": "application/json",
-                    **self.spec.provider.headers,
+                    **resolve_headers(self.spec, self.config),
                 },
                 timeout=httpx.Timeout(
                     self.config.llm.timeout,

@@ -18,6 +18,7 @@ from limbo.llm.catalog import (
     ModelSpec,
     resolve_api_key,
     resolve_base_url,
+    resolve_headers,
     resolve_model,
 )
 from limbo.llm.client import RequestHook
@@ -52,7 +53,7 @@ class OpenAICompatibleClient:
     @property
     def client(self) -> AsyncOpenAI:
         if self._client is None:
-            api_key = resolve_api_key(self.spec, self.config.llm.api_key)
+            api_key = resolve_api_key(self.spec, self.config)
             if not api_key:
                 env = self.spec.provider.api_key_env
                 raise ValueError(
@@ -62,7 +63,8 @@ class OpenAICompatibleClient:
                 )
             self._client = AsyncOpenAI(
                 api_key=api_key,
-                base_url=resolve_base_url(self.spec, self.config.llm.base_url),
+                base_url=resolve_base_url(self.spec, self.config),
+                default_headers=resolve_headers(self.spec, self.config) or None,
                 # SDK built-in retries are disabled: stream_with_retry owns
                 # retrying so every attempt is trace-visible via on_request.
                 max_retries=0,
@@ -79,14 +81,19 @@ class OpenAICompatibleClient:
             await self._client.close()
             self._client = None
 
-    def _thinking_params(self) -> dict[str, Any]:
-        """Build thinking-control parameters for the model's dialect."""
+    def _thinking_params(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Build thinking-control parameters for the model's dialect.
+
+        Returns ``(params, extra_body)``: SDK-typed parameters (e.g.
+        ``reasoning_effort``) versus raw body fields the SDK does not model
+        (``thinking`` for the deepseek/zai dialects).
+        """
         spec = self.spec
         if not spec.reasoning or spec.thinking_format is None:
-            return {}
+            return {}, {}
         effort = self.config.llm.thinking_effort
         if effort is None:
-            return {}
+            return {}, {}
         if spec.thinking_format == "openai":
             value = spec.thinking_levels.get(effort)
             if value is None:
@@ -95,19 +102,36 @@ class OpenAICompatibleClient:
                     f"(supported: {sorted(spec.thinking_levels)}); ignoring.",
                     stacklevel=2,
                 )
-                return {}
-            return {"reasoning_effort": value}
-        if spec.thinking_format == "deepseek":
+                return {}, {}
+            return {"reasoning_effort": value}, {}
+        if spec.thinking_format in ("deepseek", "zai"):
             if effort == "off":
                 if not spec.thinking_can_disable:
                     warnings.warn(
                         f"{spec.id} does not support disabling thinking; ignoring.",
                         stacklevel=2,
                     )
-                    return {}
-                return {"thinking": {"type": "disabled"}}
-            return {"thinking": {"type": "enabled"}}
-        return {}
+                    return {}, {}
+                return {}, {"thinking": {"type": "disabled"}}
+            thinking: dict[str, Any] = {"type": "enabled"}
+            if spec.thinking_format == "zai":
+                # z.ai/GLM dialect: clear_thinking:false keeps thinking across
+                # turns (pi's zai thinkingFormat).
+                thinking["clear_thinking"] = False
+            params: dict[str, Any] = {}
+            if spec.thinking_format == "zai" and spec.thinking_levels:
+                # glm-5.2 additionally takes reasoning_effort (pi sends both).
+                value = spec.thinking_levels.get(effort)
+                if value is None:
+                    warnings.warn(
+                        f"thinking_effort={effort!r} is not supported by {spec.id} "
+                        f"(supported: {sorted(spec.thinking_levels)}); ignoring.",
+                        stacklevel=2,
+                    )
+                else:
+                    params["reasoning_effort"] = value
+            return params, {"thinking": thinking}
+        return {}, {}
 
     def chat(
         self,
@@ -140,15 +164,17 @@ class OpenAICompatibleClient:
             "max_tokens": self.config.llm.max_tokens or self.spec.max_tokens,
             "stream": True,
         }
-        thinking = self._thinking_params()
-        if self.spec.thinking_format == "deepseek" and thinking:
-            # `thinking` is not an OpenAI SDK parameter; pass it through the
-            # request body untouched (Kimi K2 thinking dialect).
-            kwargs["extra_body"] = thinking
-        else:
-            kwargs.update(thinking)
+        thinking_params, thinking_extra = self._thinking_params()
+        kwargs.update(thinking_params)
+        # Provider extra-body fields (quirks the SDK doesn't type); thinking
+        # extras win on conflict, tool-scoped extras apply with tools only.
+        extra_body: dict[str, Any] = dict(self.spec.provider.extra_body)
+        extra_body.update(thinking_extra)
         if tools:
             kwargs["tools"] = tools
+            extra_body.update(self.spec.provider.tool_extra_body)
+        if extra_body:
+            kwargs["extra_body"] = extra_body
         if self._include_usage:
             kwargs["stream_options"] = {"include_usage": True}
 

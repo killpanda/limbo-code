@@ -2,17 +2,19 @@
 
 import pytest
 
-from limbo.config import Config
+from limbo.config import Config, ProviderOverride
 from limbo.llm.anthropic_client import AnthropicMessagesClient
 from limbo.llm.catalog import (
     DEFAULT_BASE_URL,
     GENERIC_OPENAI,
+    GLM_CODING,
     KIMI_CODING,
     MOONSHOT,
     ModelSpec,
     ProviderSpec,
     resolve_api_key,
     resolve_base_url,
+    resolve_headers,
     resolve_model,
 )
 from limbo.llm.factory import create_llm_client, register_client
@@ -50,41 +52,144 @@ def test_unknown_model_falls_back_to_generic_provider():
     assert spec.reasoning is False
 
 
+def _config(**kwargs) -> Config:
+    """Build a Config with the given llm/providers fields pre-set."""
+    cfg = Config()
+    for key, value in kwargs.items():
+        if key == "providers":
+            cfg.providers = value
+        else:
+            setattr(cfg.llm, key, value)
+    return cfg
+
+
 def test_base_url_follows_provider_when_config_left_at_default():
     spec = resolve_model("kimi-k3")
-    assert (
-        resolve_base_url(spec, DEFAULT_BASE_URL) == "https://api.moonshot.ai/v1"
-    )
+    assert resolve_base_url(spec, Config()) == "https://api.moonshot.ai/v1"
 
 
 def test_configured_base_url_always_wins():
     spec = resolve_model("kimi-k3")
-    assert resolve_base_url(spec, "https://proxy.example.com/v1") == (
-        "https://proxy.example.com/v1"
+    cfg = _config(base_url="https://proxy.example.com/v1")
+    assert resolve_base_url(spec, cfg) == "https://proxy.example.com/v1"
+
+
+def test_provider_override_base_url_beats_explicit_llm_base_url():
+    # [providers.<id>] is more specific than the global [llm] setting and
+    # wins even over an explicitly configured [llm] base_url (documented
+    # exception to "explicit always wins").
+    spec = resolve_model("glm-4.7")
+    cfg = _config(
+        base_url="https://proxy.example.com/v1",
+        providers={
+            "glm": ProviderOverride(base_url="https://relay.example.com/v4")
+        },
     )
+    assert resolve_base_url(spec, cfg) == "https://relay.example.com/v4"
 
 
 def test_base_url_default_for_unknown_model():
     spec = resolve_model("my-local-model")
-    assert resolve_base_url(spec, DEFAULT_BASE_URL) == DEFAULT_BASE_URL
+    assert resolve_base_url(spec, Config()) == DEFAULT_BASE_URL
 
 
 def test_api_key_prefers_config(monkeypatch):
     monkeypatch.setenv("MOONSHOT_API_KEY", "env-key")
     spec = resolve_model("kimi-k3")
-    assert resolve_api_key(spec, "config-key") == "config-key"
+    assert resolve_api_key(spec, _config(api_key="config-key")) == "config-key"
 
 
 def test_api_key_falls_back_to_provider_env(monkeypatch):
     monkeypatch.setenv("MOONSHOT_API_KEY", "env-key")
     spec = resolve_model("kimi-k3")
-    assert resolve_api_key(spec, None) == "env-key"
+    assert resolve_api_key(spec, Config()) == "env-key"
 
 
 def test_api_key_none_without_env(monkeypatch):
     monkeypatch.delenv("MOONSHOT_API_KEY", raising=False)
     spec = resolve_model("kimi-k3")
-    assert resolve_api_key(spec, None) is None
+    assert resolve_api_key(spec, Config()) is None
+
+
+def test_provider_override_api_key_beats_llm_and_env(monkeypatch):
+    monkeypatch.setenv("ZHIPUAI_API_KEY", "env-key")
+    spec = resolve_model("glm-4.7")
+    cfg = _config(
+        api_key="llm-key",
+        providers={"glm": ProviderOverride(api_key="override-key")},
+    )
+    assert resolve_api_key(spec, cfg) == "override-key"
+
+
+def test_provider_override_api_key_env_renames_env_var(monkeypatch):
+    monkeypatch.delenv("ZHIPUAI_API_KEY", raising=False)
+    monkeypatch.setenv("MY_GLM_KEY", "renamed-env-key")
+    spec = resolve_model("glm-4.7")
+    cfg = _config(providers={"glm": ProviderOverride(api_key_env="MY_GLM_KEY")})
+    assert resolve_api_key(spec, cfg) == "renamed-env-key"
+
+
+def test_resolve_headers_merges_provider_and_override():
+    spec = resolve_model("k3")
+    assert resolve_headers(spec, Config()) == {"User-Agent": "KimiCLI/1.5"}
+    cfg = _config(
+        providers={
+            "kimi-coding": ProviderOverride(
+                headers={"User-Agent": "custom/1.0", "x-relay": "on"}
+            )
+        }
+    )
+    assert resolve_headers(spec, cfg) == {
+        "User-Agent": "custom/1.0",
+        "x-relay": "on",
+    }
+
+
+def test_glm_coding_plan_catalog():
+    spec = resolve_model("glm-4.7")
+    assert spec.provider is GLM_CODING
+    assert spec.provider.api == "openai-completions"
+    assert spec.provider.base_url == "https://open.bigmodel.cn/api/coding/paas/v4"
+    assert spec.provider.api_key_env == "ZHIPUAI_API_KEY"
+    assert spec.provider.tool_extra_body == {"tool_stream": True}
+    assert spec.context_window == 204_800
+    assert spec.max_tokens == 131_072
+    assert spec.reasoning is True
+    assert spec.thinking_format == "zai"
+    assert spec.thinking_levels == {}
+
+
+def test_glm_model_whitelist():
+    # Coding Plan subscription whitelist (mirrors pi's zai-coding-cn.json).
+    expected = {
+        "glm-4.5-air": (131_072, 98_304),
+        "glm-4.7": (204_800, 131_072),
+        "glm-5-turbo": (200_000, 131_072),
+        "glm-5.1": (200_000, 131_072),
+        "glm-5.2": (1_000_000, 131_072),
+        "glm-5v-turbo": (200_000, 131_072),
+    }
+    for model_id, (ctx, max_tokens) in expected.items():
+        spec = resolve_model(model_id)
+        assert spec.provider is GLM_CODING, model_id
+        assert spec.context_window == ctx, model_id
+        assert spec.max_tokens == max_tokens, model_id
+        assert spec.thinking_format == "zai", model_id
+    assert resolve_model("glm-5v-turbo").vision is True
+    assert resolve_model("glm-4.7").vision is False
+
+
+def test_glm_5_2_reasoning_effort_levels():
+    spec = resolve_model("glm-5.2")
+    # pi's thinkingLevelMap: minimal unsupported, low/medium clamp to high.
+    assert spec.thinking_levels == {"low": "high", "high": "high", "max": "max"}
+
+
+def test_glm_base_url_follows_coding_endpoint_by_default():
+    spec = resolve_model("glm-4.7")
+    assert resolve_base_url(spec, Config()) == (
+        "https://open.bigmodel.cn/api/coding/paas/v4"
+    )
 
 
 def test_factory_creates_openai_client_for_kimi():

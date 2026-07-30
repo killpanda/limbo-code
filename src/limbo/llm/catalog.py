@@ -20,6 +20,10 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from limbo.config import Config
 
 DEFAULT_BASE_URL = "https://api.deepseek.com/v1"
 DEFAULT_CONTEXT_WINDOW = 128_000
@@ -46,6 +50,12 @@ class ProviderSpec:
     # Extra headers sent on every request (e.g. Kimi For Coding requires a
     # specific User-Agent).
     headers: dict[str, str] = field(default_factory=dict)
+    # Extra request-body fields sent on every request (provider quirks not
+    # covered by the OpenAI SDK's typed parameters).
+    extra_body: dict[str, Any] = field(default_factory=dict)
+    # Extra request-body fields sent only when the request carries tools
+    # (GLM Coding Plan expects tool_stream for streamed tool calls).
+    tool_extra_body: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -62,10 +72,13 @@ class ModelSpec:
     # attachments degrade to path references instead of breaking the call.
     vision: bool = False
     # How thinking is controlled: "openai" (reasoning_effort parameter),
-    # "deepseek" (thinking: {type: enabled|disabled}), or None (the model
-    # reasons but the API exposes no switch, e.g. deepseek-reasoner).
+    # "deepseek" (thinking: {type: enabled|disabled}), "zai" (deepseek shape
+    # plus clear_thinking: false, with optional reasoning_effort passthrough
+    # for models that declare thinking_levels), or None (the model reasons
+    # but the API exposes no switch, e.g. deepseek-reasoner).
     thinking_format: str | None = None
-    # Supported thinking levels mapped to provider values (openai format).
+    # Supported thinking levels mapped to provider values (openai format;
+    # also drives reasoning_effort passthrough for the zai format).
     # A level absent from the map is unsupported by the model.
     thinking_levels: dict[str, str] = field(default_factory=dict)
     # Whether thinking can be turned off at all (deepseek format).
@@ -100,6 +113,21 @@ KIMI_CODING = ProviderSpec(
     base_url="https://api.kimi.com/coding",
     api_key_env="KIMI_API_KEY",
     headers={"User-Agent": "KimiCLI/1.5"},
+)
+
+# GLM Coding Plan (subscription): OpenAI-compatible dialect on a dedicated
+# coding endpoint. Model metadata mirrors pi's zai-coding-cn provider
+# (providers/data/zai-coding-cn.json); coding-plan keys only work on the
+# coding endpoint (not the pay-per-token /api/paas/v4 one) and vice versa.
+# International endpoint: https://api.z.ai/api/coding/paas/v4 — select via a
+# [providers.glm] base_url override.
+GLM_CODING = ProviderSpec(
+    id="glm",
+    api=API_OPENAI_COMPLETIONS,
+    base_url="https://open.bigmodel.cn/api/coding/paas/v4",
+    api_key_env="ZHIPUAI_API_KEY",
+    # pi sets tool_stream on all zai-coding tool requests (zaiToolStream).
+    tool_extra_body={"tool_stream": True},
 )
 
 
@@ -147,6 +175,29 @@ def _moonshot(
         thinking_levels=thinking_levels or {},
         thinking_can_disable=thinking_can_disable,
         requires_reasoning_content=requires_reasoning_content,
+    )
+
+
+def _glm(
+    model_id: str,
+    *,
+    context_window: int,
+    max_tokens: int = 131_072,
+    vision: bool = False,
+    thinking_levels: dict[str, str] | None = None,
+) -> ModelSpec:
+    # All GLM Coding Plan models reason with the zai thinking dialect
+    # (thinking: {type: enabled, clear_thinking: false}); glm-5.2 also
+    # accepts reasoning_effort (declared via thinking_levels).
+    return ModelSpec(
+        id=model_id,
+        provider=GLM_CODING,
+        context_window=context_window,
+        max_tokens=max_tokens,
+        reasoning=True,
+        vision=vision,
+        thinking_format="zai",
+        thinking_levels=thinking_levels or {},
     )
 
 
@@ -210,6 +261,19 @@ CATALOG: dict[str, ModelSpec] = {
     ),
     "kimi-for-coding": _kimi_coding("kimi-for-coding"),
     "kimi-for-coding-highspeed": _kimi_coding("kimi-for-coding-highspeed"),
+    # -- GLM Coding Plan (subscription whitelist) ----------------------------
+    "glm-4.5-air": _glm("glm-4.5-air", context_window=131_072, max_tokens=98_304),
+    "glm-4.7": _glm("glm-4.7", context_window=204_800),
+    "glm-5-turbo": _glm("glm-5-turbo", context_window=200_000),
+    "glm-5.1": _glm("glm-5.1", context_window=200_000),
+    # glm-5.2: 1M context; reasoning_effort supported — pi's thinkingLevelMap
+    # maps low/medium→high (minimal unsupported).
+    "glm-5.2": _glm(
+        "glm-5.2",
+        context_window=1_000_000,
+        thinking_levels={"low": "high", "high": "high", "max": "max"},
+    ),
+    "glm-5v-turbo": _glm("glm-5v-turbo", context_window=200_000, vision=True),
 }
 
 
@@ -218,24 +282,52 @@ def resolve_model(model_id: str) -> ModelSpec:
     return CATALOG.get(model_id) or ModelSpec(id=model_id, provider=GENERIC_OPENAI)
 
 
-def resolve_base_url(spec: ModelSpec, configured: str) -> str:
+def resolve_base_url(spec: ModelSpec, config: Config) -> str:
     """Resolve the effective base URL for a model.
 
-    An explicitly configured ``base_url`` always wins. When it is left at the
-    global DeepSeek default but the catalog knows a different endpoint for the
-    model's provider (e.g. switching to ``kimi-k3`` without editing
-    ``base_url``), the provider endpoint is used so model switching works out
-    of the box.
+    Resolution order (first hit wins):
+
+    1. ``[providers.<id>] base_url`` — per-provider override. This is the
+       one exception to "explicit [llm] base_url always wins": a provider
+       override is more specific than the global setting.
+    2. ``[llm] base_url`` when explicitly changed from the DeepSeek default.
+    3. The catalog provider's built-in endpoint, so switching to a catalog
+       model (e.g. ``kimi-k3``, ``glm-4.7``) works without editing base_url.
+    4. The configured value (DeepSeek default) as the final fallback.
     """
+    override = config.providers.get(spec.provider.id)
+    if override and override.base_url:
+        return override.base_url
+    configured = config.llm.base_url
     if configured != DEFAULT_BASE_URL or not spec.provider.base_url:
         return configured
     return spec.provider.base_url
 
 
-def resolve_api_key(spec: ModelSpec, configured: str | None) -> str | None:
-    """Resolve the API key: config first, then the provider's env var."""
-    if configured:
-        return configured
-    if spec.provider.api_key_env:
-        return os.environ.get(spec.provider.api_key_env)
+def resolve_api_key(spec: ModelSpec, config: Config) -> str | None:
+    """Resolve the API key for a model.
+
+    Resolution order (first hit wins): ``[providers.<id>] api_key``, then
+    ``[llm] api_key``, then the environment variable named by
+    ``[providers.<id>] api_key_env`` (rename) or the catalog provider's
+    built-in ``api_key_env``.
+    """
+    override = config.providers.get(spec.provider.id)
+    if override and override.api_key:
+        return override.api_key
+    if config.llm.api_key:
+        return config.llm.api_key
+    env = spec.provider.api_key_env
+    if override and override.api_key_env:
+        env = override.api_key_env
+    if env:
+        return os.environ.get(env)
     return None
+
+
+def resolve_headers(spec: ModelSpec, config: Config) -> dict[str, str]:
+    """Provider headers merged with ``[providers.<id>] headers`` (override wins)."""
+    override = config.providers.get(spec.provider.id)
+    if override:
+        return {**spec.provider.headers, **override.headers}
+    return dict(spec.provider.headers)
