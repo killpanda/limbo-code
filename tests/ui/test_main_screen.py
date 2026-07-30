@@ -114,7 +114,9 @@ async def test_tool_error_is_shown(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_input_disabled_during_streaming(tmp_path):
+async def test_input_stays_enabled_during_streaming(tmp_path):
+    """RFC LIM-20: the input is NOT disabled while a turn streams, so the
+    user can queue steer messages mid-turn."""
     cfg = Config()
     cfg.llm.api_key = "test"
 
@@ -141,12 +143,14 @@ async def test_input_disabled_during_streaming(tmp_path):
         await pilot.pause()
 
         input_widget = main_screen.query_one("#input", InputWidget)
-        assert input_widget.disabled is True
+        assert main_screen._agent_busy is True
+        assert input_widget.disabled is False
 
         hold.set()
         await pilot.pause()
         await pilot.pause()
 
+        assert main_screen._agent_busy is False
         assert input_widget.disabled is False
 
 

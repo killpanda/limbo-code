@@ -14,6 +14,7 @@ from limbo.agent import (
     AgentEvent,
     CompactionEvent,
     ErrorEvent,
+    SteerEvent,
     TextDelta,
     ThinkingDelta,
     ToolCallRequest,
@@ -38,7 +39,7 @@ from limbo.ui.commands import SlashCommand, SlashCommandRegistry
 from limbo.ui.screens.game2048 import Game2048Screen
 from limbo.ui.screens.model_picker import ModelPicker
 from limbo.ui.screens.session_picker import SessionPicker
-from limbo.ui.widgets.chat import ChatWidget
+from limbo.ui.widgets.chat import ChatWidget, QueuedMessage
 from limbo.ui.widgets.command_menu import SlashCommandMenu
 from limbo.ui.widgets.input import InputWidget, PasteMarkersInvalid, UserSubmitted
 from limbo.ui.widgets.status_bar import StatusBar
@@ -221,12 +222,18 @@ class MainScreen(Screen[None]):
             )
         )
         self._commands.register(
-            SlashCommand("/help", "显示帮助", handler=lambda arg: self._show_help())
+            SlashCommand(
+                "/help",
+                "显示帮助",
+                allow_when_busy=True,
+                handler=lambda arg: self._show_help(),
+            )
         )
         self._commands.register(
             SlashCommand(
                 "/2048",
                 "玩一局 2048（不打断当前任务）",
+                allow_when_busy=True,
                 handler=lambda arg: self._open_game2048(),
             )
         )
@@ -238,6 +245,12 @@ class MainScreen(Screen[None]):
 
         command = self._commands.get(name.lower())
         if command is not None and command.handler is not None:
+            # Busy guard (RFC LIM-20): history-rewriting commands are
+            # rejected mid-turn. Centralized here so both entry points
+            # (on_user_submitted and slash_menu_complete) are covered.
+            if self._agent_busy and not command.allow_when_busy:
+                self._reject_busy_command(command)
+                return
             command.handler(arg)
             return
         skill = self._find_skill(name.removeprefix("/"))
@@ -246,14 +259,17 @@ class MainScreen(Screen[None]):
         else:
             chat.add_info(f"未知命令 {name}，{self._commands.help_text()}")
 
-    def _compact_now(self) -> None:
-        """Run /compact: refuse while a turn is streaming (the compaction
-        worker would race the turn worker on self.messages), otherwise pump
-        the agent's compaction events like a mini-turn."""
+    def _reject_busy_command(self, command: SlashCommand) -> None:
         chat = self.query_one("#chat", ChatWidget)
-        if self._agent_busy:
+        if command.name == "/compact":
+            # Keep the pre-existing wording for /compact.
             chat.add_info("当前任务进行中，请等待完成后再压缩")
-            return
+        else:
+            chat.add_info(f"当前任务进行中，请等待完成后再执行 {command.name}")
+
+    def _compact_now(self) -> None:
+        """Run /compact: the busy guard lives in _handle_command (RFC LIM-20);
+        here we just pump the agent's compaction events like a mini-turn."""
         self.run_worker(self._run_compact())
 
     async def _run_compact(self) -> None:
@@ -371,15 +387,25 @@ class MainScreen(Screen[None]):
         return None
 
     def _invoke_skill(self, skill: Skill, arg: str) -> None:
-        """Invoke a skill: its body becomes the turn's instruction."""
-        chat = self.query_one("#chat", ChatWidget)
-        chat.add_user_message(f"/{skill.name}" + (f" {arg}" if arg else ""))
+        """Invoke a skill: its body becomes the turn's instruction.
+
+        Busy (RFC LIM-20): the assembled prompt joins the steer queue
+        instead of starting a second concurrent turn worker.
+        """
+        display = f"/{skill.name}" + (f" {arg}" if arg else "")
         prompt = (
             f"# Skill: {skill.name}\n\n{skill.body.strip()}\n\n"
             f"(Skill 文件位于 {skill.path}，其中引用的相对路径基于其所在目录解析。)"
         )
         if arg:
             prompt += f"\n\n## 用户输入\n\n{arg}"
+        chat = self.query_one("#chat", ChatWidget)
+        if self._agent_busy:
+            item_id = self.agent.steer(prompt)
+            chat.add_queued_message(item_id, display)
+            self._update_queue_status()
+            return
+        chat.add_user_message(display)
         self.run_worker(self._handle_turn(prompt))
 
     def _open_session_picker(self) -> None:
@@ -475,6 +501,17 @@ class MainScreen(Screen[None]):
             self._handle_command(text)
             return
         chat = self.query_one("#chat", ChatWidget)
+        if self._agent_busy:
+            # Mid-turn submission (RFC LIM-20): queue for steer injection,
+            # render optimistically — never start a second turn worker.
+            # Queued steer messages are genuine user input too: grant the
+            # paths they reference (LIM-19), since the model will see them
+            # at injection time just like a normal submission.
+            self._grant_user_paths(text, event.attachments)
+            item_id = self.agent.steer(text, event.attachments)
+            chat.add_queued_message(item_id, text, event.attachments)
+            self._update_queue_status()
+            return
         chat.add_user_message(text, event.attachments)
         self._grant_user_paths(text, event.attachments)
         self.run_worker(self._handle_turn(text, event.attachments))
@@ -501,20 +538,72 @@ class MainScreen(Screen[None]):
             chat.add_info(f"↳ 已允许访问：{root}（本会话有效）")
             self.agent.trace.log("path_grant", root=str(root), source="user_message")
 
+    # -- steer queue UI (LIM-20) ---------------------------------------------
+
+    def _update_queue_status(self) -> None:
+        self.query_one("#statusbar", StatusBar).set_queued(self.agent.queued_count)
+
+    def cancel_queued(self, item_id: str) -> None:
+        """Cancel one queued steer message (the card's ✕ affordance)."""
+        chat = self.query_one("#chat", ChatWidget)
+        if self.agent.cancel_steer(item_id):
+            chat.mark_steer_cancelled(item_id)
+        else:
+            # Already drained past the injection boundary (or unknown id).
+            chat.add_info("该消息已注入，无法撤回")
+        self._update_queue_status()
+
+    def cancel_latest_queued(self) -> None:
+        """Esc with no menu open: cancel the newest queued steer message."""
+        item_id = self.agent.cancel_latest_steer()
+        if item_id is None:
+            return
+        self.query_one("#chat", ChatWidget).mark_steer_cancelled(item_id)
+        self._update_queue_status()
+
+    def on_click(self, event) -> None:
+        """Clicks on a queued card's ✕ cancel that steer message."""
+        widget = event.widget
+        if not isinstance(widget, Static) or not widget.has_class("queued-cancel"):
+            return
+        node = widget.parent
+        while node is not None and not isinstance(node, QueuedMessage):
+            node = node.parent
+        if node is not None:
+            self.cancel_queued(node.item_id)
+
     async def _handle_turn(
         self, user_input: str, attachments: list[Attachment] | None = None
     ) -> None:
         input_widget = self.query_one("#input", InputWidget)
         statusbar = self.query_one("#statusbar", StatusBar)
-        input_widget.disabled = True
+        # The input stays enabled during the turn (RFC LIM-20): submissions
+        # go to the steer queue instead of being blocked.
         self._agent_busy = True
         statusbar.set_state("thinking…", "thinking")
         try:
             async for event in self.agent.run(user_input, attachments):
                 await self._process_agent_event(event)
         finally:
+            chat = self.query_one("#chat", ChatWidget)
+            # Automatic follow-up turn (RFC LIM-20): drain + hand off BEFORE
+            # releasing the busy flag, so no user submission can slip into
+            # the gap and start a second concurrent turn worker. Leftovers
+            # happen on error / max-iterations exits (the loop's own
+            # consumption points never leave the queue non-empty otherwise).
+            pending = self.agent.drain_steer()
+            if pending:
+                for item in pending:
+                    chat.mark_steer_delivered(item.id)
+                joined = "\n\n".join(item.text for item in pending)
+                followup_attachments = [
+                    a for item in pending for a in item.attachments
+                ]
+                self._update_queue_status()
+                self.run_worker(self._handle_turn(joined, followup_attachments))
+                return
             self._agent_busy = False
-            input_widget.disabled = False
+            self._update_queue_status()
             # Disabling the input mid-turn moves focus away; give it back so
             # the user can keep typing without clicking.
             input_widget.focus()
@@ -543,6 +632,9 @@ class MainScreen(Screen[None]):
                 chat.add_info(event.warning)
         elif isinstance(event, UsageUpdate):
             statusbar.set_tokens(event.total_tokens)
+        elif isinstance(event, SteerEvent):
+            chat.mark_steer_delivered(event.id)
+            self._update_queue_status()
         elif isinstance(event, ToolCallRequest):
             chat.add_tool_card(event.id, event.name, event.arguments)
             statusbar.set_state(f"running {event.name}…", "tool")

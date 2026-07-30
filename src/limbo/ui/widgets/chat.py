@@ -11,12 +11,80 @@ from typing import Any
 
 from rich.text import Text
 from textual.app import ComposeResult
-from textual.containers import VerticalScroll
+from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
 from textual.widgets import Markdown, Static
 
 from limbo.models import Attachment
 from limbo.ui.widgets.tool_card import ToolCard
+
+
+class QueuedMessage(Vertical):
+    """A user message waiting in the agent's steer queue (RFC LIM-20).
+
+    States: queued (⏳ status line with a ✕ cancel affordance) → delivered
+    (status line removed, looks like a normal user message) or cancelled
+    (dimmed, 「已取消」, kept in the flow as a record; never reaches the
+    session history).
+    """
+
+    def __init__(
+        self,
+        item_id: str,
+        text: str,
+        attachments: list[Attachment] | None = None,
+    ) -> None:
+        super().__init__(classes="queued-message")
+        self.item_id = item_id
+        self._text = text
+        self._attachments = attachments or []
+        self.state = "queued"  # queued | delivered | cancelled
+
+    def compose(self) -> ComposeResult:
+        yield Static(f"❯ {self._text}", classes="user-message", markup=False)
+        if self._attachments:
+            chips = []
+            for attachment in self._attachments:
+                label = "图片" if attachment.kind == "image" else "文件"
+                chips.append(f"{label}: {attachment.name}")
+            yield Static(
+                "📎 " + " · ".join(chips), classes="attachment-chips", markup=False
+            )
+        status = Horizontal(classes="queued-status")
+        yield status
+
+    def on_mount(self) -> None:
+        status = self.query_one(".queued-status", Horizontal)
+        status.mount(Static("⏳ 排队中", classes="queued-hint", markup=False))
+        status.mount(Static("✕ 取消", classes="queued-cancel", markup=False))
+
+    def transcript(self) -> str:
+        suffix = {"queued": "（排队中）", "cancelled": "（已取消）"}.get(self.state, "")
+        text = f"❯ {self._text}{suffix}"
+        if self._attachments:
+            chips = []
+            for attachment in self._attachments:
+                label = "图片" if attachment.kind == "image" else "文件"
+                chips.append(f"{label}: {attachment.name}")
+            text += "\n📎 " + " · ".join(chips)
+        return text
+
+    def mark_delivered(self) -> None:
+        """Flip to a normal user message (the agent injected it)."""
+        if self.state != "queued":
+            return
+        self.state = "delivered"
+        self.query_one(".queued-status", Horizontal).remove()
+
+    def mark_cancelled(self) -> None:
+        """Flip to the cancelled record state (dimmed, no longer cancellable)."""
+        if self.state != "queued":
+            return
+        self.state = "cancelled"
+        self.add_class("cancelled")
+        status = self.query_one(".queued-status", Horizontal)
+        status.query_one(".queued-cancel", Static).remove()
+        status.query_one(".queued-hint", Static).update("已取消")
 
 
 class ChatWidget(VerticalScroll):
@@ -25,10 +93,12 @@ class ChatWidget(VerticalScroll):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
         # Text-like messages (user/assistant/error/info) in display order.
-        self.messages: list[Static | Markdown] = []
+        self.messages: list[Static | Markdown | QueuedMessage] = []
         # Tool cards keyed by tool-call id; ToolCallRequest events may arrive
         # twice for the same call (once streamed, once before execution).
         self.tool_cards: dict[str, ToolCard] = {}
+        # Queued steer messages keyed by steer-item id (RFC LIM-20).
+        self.queued_cards: dict[str, QueuedMessage] = {}
         self._current_assistant: Markdown | None = None
         self._current_thinking: Static | None = None
         # Scroll-follow state: when the user scrolls up, new content no longer
@@ -66,6 +136,32 @@ class ChatWidget(VerticalScroll):
             )
             self.messages.append(chip_msg)
             self._mount_and_scroll(chip_msg)
+
+    # -- queued steer messages (LIM-20) --------------------------------------
+
+    def add_queued_message(
+        self, item_id: str, text: str, attachments: list[Attachment] | None = None
+    ) -> QueuedMessage:
+        """Optimistically render a message queued for steer injection."""
+        self._current_assistant = None
+        self._current_thinking = None
+        card = QueuedMessage(item_id, text, attachments)
+        self.queued_cards[item_id] = card
+        self.messages.append(card)
+        self._mount_and_scroll(card)
+        return card
+
+    def mark_steer_delivered(self, item_id: str) -> None:
+        """Flip the queued card bound to ``item_id`` to a normal message."""
+        card = self.queued_cards.pop(item_id, None)
+        if card is not None:
+            card.mark_delivered()
+
+    def mark_steer_cancelled(self, item_id: str) -> None:
+        """Flip the queued card bound to ``item_id`` to the cancelled state."""
+        card = self.queued_cards.pop(item_id, None)
+        if card is not None:
+            card.mark_cancelled()
 
     def add_info(self, text: str) -> None:
         msg = Static(text, classes="info-message", markup=False)
@@ -143,6 +239,7 @@ class ChatWidget(VerticalScroll):
                 child.remove()
         self.messages.clear()
         self.tool_cards.clear()
+        self.queued_cards.clear()
         self._current_assistant = None
         self._current_thinking = None
         self._pending_count = 0
@@ -179,6 +276,8 @@ class ChatWidget(VerticalScroll):
         for msg in self.messages:
             if isinstance(msg, Markdown):
                 parts.append(msg.source)
+            elif isinstance(msg, QueuedMessage):
+                parts.append(msg.transcript())
             else:
                 parts.append(str(msg.content))
         return "\n".join(parts)
