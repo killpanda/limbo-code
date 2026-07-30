@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import collections
 import os
 import platform
 import secrets
@@ -11,16 +10,16 @@ import time
 import traceback
 import warnings
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from limbo import __version__
+from limbo.attachments import build_user_content
 from limbo.compaction import (
     CompactionConfig,
     build_summary_prompt,
-    estimate_tokens,
     find_split_point,
     make_summary_message,
     should_compact,
@@ -31,6 +30,7 @@ from limbo.history import repair as repair_history
 from limbo.llm.catalog import resolve_base_url, resolve_model
 from limbo.llm.client import LLMClient
 from limbo.llm.retry import friendly_message
+from limbo.llm.usage import PromptSizeEstimator, estimate_tokens, normalize_usage
 from limbo.models import (
     Attachment,
     CompletionMeta,
@@ -40,6 +40,7 @@ from limbo.models import (
     ToolCallEvent,
     ToolResult,
 )
+from limbo.prompt import build_system_prompt
 from limbo.sessions import (
     CompactionRecord,
     SessionMeta,
@@ -47,7 +48,7 @@ from limbo.sessions import (
     load_session,
     save_session,
 )
-from limbo.skills import discover_skills, format_skills_for_prompt
+from limbo.steer import SteerItem, SteerQueue
 from limbo.tools.registry import ToolRegistry
 from limbo.trace import TraceLogger, trace_path_for
 
@@ -55,21 +56,6 @@ from limbo.trace import TraceLogger, trace_path_for
 @dataclass(frozen=True)
 class TextDelta:
     text: str
-
-
-# File attachments at or below this size are inlined into the user message
-# (UTF-8 decodable); larger or binary files are referenced by path.
-ATTACHMENT_INLINE_MAX_BYTES = 50_000
-
-
-def _read_inline_text(path: Path) -> str | None:
-    """The file's text if it qualifies for inline embedding, else None."""
-    try:
-        if not path.is_file() or path.stat().st_size > ATTACHMENT_INLINE_MAX_BYTES:
-            return None
-        return path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return None
 
 
 @dataclass(frozen=True)
@@ -122,15 +108,6 @@ class UsageUpdate:
 
 
 @dataclass(frozen=True)
-class SteerItem:
-    """A user message queued while the agent is mid-turn (RFC LIM-20)."""
-
-    id: str
-    text: str
-    attachments: list[Attachment] = field(default_factory=list)
-
-
-@dataclass(frozen=True)
 class SteerEvent:
     """A queued steer message was injected into the conversation history.
 
@@ -152,82 +129,6 @@ AgentEvent = (
     | UsageUpdate
     | SteerEvent
 )
-
-
-def _extract_prompt_tokens(usage: dict[str, Any] | None) -> int | None:
-    """Normalize provider-specific prompt-size counters.
-
-    OpenAI reports ``prompt_tokens``; Anthropic reports ``input_tokens``
-    (which excludes cache reads/creation, so those are added back).
-    """
-    if not usage:
-        return None
-    prompt = usage.get("prompt_tokens")
-    if isinstance(prompt, int):
-        return prompt
-    input_tokens = usage.get("input_tokens")
-    if isinstance(input_tokens, int):
-        total = input_tokens
-        for key in ("cache_read_input_tokens", "cache_creation_input_tokens"):
-            extra = usage.get(key)
-            if isinstance(extra, int):
-                total += extra
-        return total
-    return None
-
-
-def _extract_cached_tokens(usage: dict[str, Any] | None) -> int | None:
-    """Normalize provider-specific prompt cache-hit counters.
-
-    DeepSeek reports ``prompt_cache_hit_tokens``, OpenAI nests
-    ``prompt_tokens_details.cached_tokens``, the Responses API nests
-    ``input_tokens_details.cached_tokens``, Anthropic reports
-    ``cache_read_input_tokens``.
-    """
-    if not usage:
-        return None
-    hit = usage.get("prompt_cache_hit_tokens")
-    if isinstance(hit, int):
-        return hit
-    details = usage.get("prompt_tokens_details")
-    if isinstance(details, dict):
-        cached = details.get("cached_tokens")
-        if isinstance(cached, int):
-            return cached
-    input_details = usage.get("input_tokens_details")
-    if isinstance(input_details, dict):
-        cached = input_details.get("cached_tokens")
-        if isinstance(cached, int):
-            return cached
-    read = usage.get("cache_read_input_tokens")
-    return read if isinstance(read, int) else None
-
-
-def _extract_total_tokens(usage: dict[str, Any] | None) -> int | None:
-    """Normalize provider-specific total-token counters.
-
-    OpenAI-compatible providers report ``total_tokens`` (its
-    ``prompt_tokens`` already includes cached tokens). Anthropic reports
-    separate ``input_tokens`` / ``output_tokens``, with cache traffic
-    reported apart — cache reads/creations are real processed (and billed)
-    tokens, so they are added back; otherwise the cumulative counter
-    massively undercounts cache-heavy sessions.
-    """
-    if not usage:
-        return None
-    total = usage.get("total_tokens")
-    if isinstance(total, int):
-        return total
-    input_tokens = usage.get("input_tokens")
-    output_tokens = usage.get("output_tokens")
-    if isinstance(input_tokens, int) or isinstance(output_tokens, int):
-        result = (input_tokens or 0) + (output_tokens or 0)
-        for key in ("cache_read_input_tokens", "cache_creation_input_tokens"):
-            extra = usage.get(key)
-            if isinstance(extra, int):
-                result += extra
-        return result
-    return None
 
 
 def _resolved_llm_trace_fields(config: Config) -> dict[str, Any]:
@@ -265,28 +166,25 @@ class Agent:
         self.workdir = workdir
         self.registry = ToolRegistry(workdir=workdir, config=config)
         self._history = ToolHistory([])
-        # Steer queue (RFC LIM-20): user messages submitted mid-turn. A deque
-        # (not asyncio.Queue) so individual items can be cancelled by id;
-        # producers/consumers only ever use non-blocking ops on the single
-        # Textual event loop.
-        self._steer_queue: collections.deque[SteerItem] = collections.deque()
+        # Steer queue (RFC LIM-20): user messages submitted mid-turn. The
+        # queue owns queueing semantics; this loop owns drain timing.
+        self._steer_queue = SteerQueue()
         self._iteration_count = 0
         self._last_finish_reason: str | None = None
         self._session_total_tokens = 0
         self._init_system_message()
 
-        # Auto-compaction state (LIM-14). ``_last_prompt_tokens`` is the
-        # real prompt size reported by the last response; ``_usage_watermark``
-        # is len(messages) at that moment, so the next prompt can be
-        # estimated as last + estimate(messages appended since).
+        # Auto-compaction state (LIM-14). The estimator holds the real
+        # prompt size reported by the last response plus a watermark over
+        # the message list, so the next prompt can be estimated as
+        # last + estimate(messages appended since).
         self._context_window = resolve_model(config.llm.model).context_window
         # Vision gate for image attachments (RFC LIM-17): only models
         # flagged vision=True in the catalog receive image blocks; others
         # get a path-reference degradation instead.
         self._vision = resolve_model(config.llm.model).vision
         self._compaction_config = self._build_compaction_config(config)
-        self._last_prompt_tokens: int | None = None
-        self._usage_watermark: int = 0
+        self._prompt_estimator = PromptSizeEstimator()
         self._compactions: list[CompactionRecord] = []
         self._previous_summary: str | None = None
         self._auto_compaction_failed_this_turn = False
@@ -413,63 +311,10 @@ class Agent:
         return self._meta
 
     def _init_system_message(self) -> None:
-        content_parts = [
-            (
-                "You are an expert coding assistant operating inside limbo, "
-                "a coding agent harness. You help users by reading files, "
-                "executing commands, editing code, and writing new files.\n\n"
-                "Available tools:\n"
-                "- read: Read file contents\n"
-                "- bash: Execute bash commands\n"
-                "- edit: Make surgical edits to files (find exact text and replace)\n"
-                "- write: Create or overwrite files\n"
-                "- grep: Search file contents for patterns (respects root .gitignore)\n"
-                "- find: Find files by glob pattern (respects root .gitignore only)\n"
-                "- ls: List directory contents\n\n"
-                "Guidelines:\n"
-                "- Prefer grep/find/ls tools over bash for file exploration\n"
-                "- Use read to examine files before editing\n"
-                "- Use edit for precise changes (old_text must match exactly)\n"
-                "- Use write only for new files or complete rewrites\n"
-                "- Be concise in your responses\n"
-                "- Show file paths clearly when working with files"
-            ),
-        ]
-        # Load optional context files (project AGENTS.md, global
-        # ~/.limbo/AGENTS.md) wrapped in XML boundary tags.
-        context_files: list[tuple[str, str]] = []
-        project_md = self.workdir / "AGENTS.md"
-        if project_md.is_file():
-            try:
-                context_files.append((str(project_md), project_md.read_text(encoding="utf-8")))
-            except OSError:
-                pass
-        global_md = Path.home() / ".limbo" / "AGENTS.md"
-        if global_md.is_file():
-            try:
-                context_files.append((str(global_md), global_md.read_text(encoding="utf-8")))
-            except OSError:
-                pass
-        if context_files:
-            block = "\n\n<project_context>\n\nProject-specific instructions and guidelines:\n\n"
-            for file_path, content in context_files:
-                block += (
-                    f'<project_instructions path="{file_path}">\n\n'
-                    f"{content}\n\n</project_instructions>\n\n"
-                )
-            block += "</project_context>\n"
-            content_parts.append(block)
-        # Skills catalog (progressive disclosure): name/description/location
-        # only; the model loads full SKILL.md files with read on demand.
-        # Only injected when the read tool is available.
-        if self.registry.get("read") is not None:
-            skills_block = format_skills_for_prompt(discover_skills(self.workdir))
-            if skills_block:
-                content_parts.append(skills_block)
         self.messages.append(
             Message(
                 role="system",
-                content="".join(content_parts),
+                content=build_system_prompt(self.registry, self.workdir),
             )
         )
 
@@ -490,11 +335,7 @@ class Agent:
         Non-blocking; safe to call from the UI at any time. Returns the
         queued item's id (the UI binds its queued card to it).
         """
-        item = SteerItem(
-            id=secrets.token_hex(4), text=text, attachments=attachments or []
-        )
-        self._steer_queue.append(item)
-        return item.id
+        return self._steer_queue.offer(text, attachments).id
 
     def cancel_steer(self, item_id: str) -> bool:
         """Cancel a still-queued steer message.
@@ -503,23 +344,22 @@ class Agent:
         injected — past the boundary it is part of history and cannot be
         retracted) or the id is unknown.
         """
-        for item in self._steer_queue:
-            if item.id == item_id:
-                self._steer_queue.remove(item)
-                self.trace.log(
-                    "steer_cancelled",
-                    turn=self._turn_count,
-                    id=item_id,
-                    text=item.text,
-                )
-                return True
-        return False
+        item = self._steer_queue.cancel(item_id)
+        if item is None:
+            return False
+        self.trace.log(
+            "steer_cancelled",
+            turn=self._turn_count,
+            id=item.id,
+            text=item.text,
+        )
+        return True
 
     def cancel_latest_steer(self) -> str | None:
         """Cancel the newest queued steer message (Esc path)."""
-        if not self._steer_queue:
+        item = self._steer_queue.cancel_latest()
+        if item is None:
             return None
-        item = self._steer_queue.pop()
         self.trace.log(
             "steer_cancelled", turn=self._turn_count, id=item.id, text=item.text
         )
@@ -527,12 +367,10 @@ class Agent:
 
     def drain_steer(self) -> list[SteerItem]:
         """Remove and return all queued items in FIFO order."""
-        items = list(self._steer_queue)
-        self._steer_queue.clear()
-        return items
+        return self._steer_queue.drain()
 
     def has_pending_steer(self) -> bool:
-        return bool(self._steer_queue)
+        return len(self._steer_queue) > 0
 
     @property
     def queued_count(self) -> int:
@@ -561,38 +399,8 @@ class Agent:
     def _build_user_content(
         self, user_input: str, attachments: list[Attachment]
     ) -> tuple[str, list[Attachment]]:
-        """Combine the typed text with attachments into message content.
-
-        Returns ``(content, images)``: images only when the current model
-        supports vision (they become multimodal blocks in the clients);
-        everything else degrades to text notes — small text files inline,
-        the rest as path references the model can open with read. Nothing
-        is silently dropped.
-        """
-        images: list[Attachment] = []
-        notes: list[str] = []
-        for attachment in attachments:
-            path = Path(attachment.path)
-            if attachment.kind == "image":
-                if self._vision and path.exists():
-                    images.append(attachment)
-                elif self._vision:
-                    notes.append(f"[图片 {attachment.name} 文件已不存在：{path}]")
-                else:
-                    notes.append(
-                        f"[图片 {attachment.name} 已保存到 {path}；"
-                        f"当前模型不支持图像输入，无法直接查看]"
-                    )
-                continue
-            # File attachment: inline small text files, reference the rest.
-            text = _read_inline_text(path)
-            if text is not None:
-                notes.append(f"文件 {attachment.name} 的内容：\n```\n{text}\n```")
-            else:
-                notes.append(f"[文件 {attachment.name} 位于 {path}，可用 read 工具查看]")
-        if not notes:
-            return user_input, images
-        return user_input + "\n\n" + "\n".join(notes), images
+        """Combine text with attachments (policy lives in limbo.attachments)."""
+        return build_user_content(user_input, attachments, vision=self._vision)
 
     def _log_turn_end(self) -> None:
         if self._turn_start is None:
@@ -940,10 +748,10 @@ class Agent:
                 meta = event
 
         usage = meta.usage if meta else None
+        totals = normalize_usage(usage)
         self._last_finish_reason = meta.finish_reason if meta else None
-        total = _extract_total_tokens(usage)
-        if total:
-            self._session_total_tokens += total
+        if totals.total_tokens:
+            self._session_total_tokens += totals.total_tokens
             yield UsageUpdate(total_tokens=self._session_total_tokens)
         self.trace.log(
             "llm_response",
@@ -953,7 +761,7 @@ class Agent:
             ttft=meta.ttft if meta else None,
             finish_reason=meta.finish_reason if meta else None,
             usage=usage,
-            cached_tokens=_extract_cached_tokens(usage),
+            cached_tokens=totals.cached_tokens,
             content_chars=len(assistant_content),
             reasoning_chars=len(assistant_reasoning),
             tool_calls=[
@@ -973,27 +781,14 @@ class Agent:
         )
         # Record the real prompt size for the compaction trigger, with the
         # watermark past the assistant message just appended.
-        prompt_tokens = _extract_prompt_tokens(usage)
-        if prompt_tokens is not None:
-            self._last_prompt_tokens = prompt_tokens
-            self._usage_watermark = len(self.messages)
+        if totals.prompt_tokens is not None:
+            self._prompt_estimator.record(totals.prompt_tokens, len(self.messages))
 
     # -- auto-compaction (LIM-14) --------------------------------------------
 
     def _estimated_next_prompt_tokens(self) -> int:
-        """Estimate the size of the *next* request's prompt.
-
-        With real usage: last prompt + estimated tokens of everything
-        appended since (new user input, assistant messages, tool results).
-        This catches the classic overflow case — a huge paste between turns
-        — that a stale last-response figure alone would miss. Without usage
-        (first iteration, or a provider that reports none): full estimate.
-        """
-        if self._last_prompt_tokens is None:
-            return estimate_tokens(self.messages)
-        return self._last_prompt_tokens + estimate_tokens(
-            self.messages[self._usage_watermark :]
-        )
+        """Estimated size of the *next* request's prompt (see llm.usage)."""
+        return self._prompt_estimator.estimate_next(self.messages)
 
     async def _generate_summary(self, prompt: list[Message]) -> str:
         """One-shot summarization call on the current client (no tools)."""
@@ -1108,8 +903,7 @@ class Agent:
         self._previous_summary = summary.strip()
         # Usage figures predate the rewrite; fall back to full estimation
         # until the next response reports real prompt tokens.
-        self._last_prompt_tokens = None
-        self._usage_watermark = len(self.messages)
+        self._prompt_estimator.reset(len(self.messages))
         warning = None
         if should_compact(after, self._context_window, cfg):
             # No re-loop: one warning, the turn continues.

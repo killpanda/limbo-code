@@ -19,14 +19,20 @@ src/limbo/
 ├── config.py         # Pydantic config: llm/ui/safety/tools/compaction/providers
 ├── models.py         # Message, Attachment, ToolResult, LLMEvent
 ├── agent.py          # Conversation loop (see below)
+├── attachments.py    # Attachment policy: vision gate, inline vs path-reference degrade
 ├── compaction.py     # Context compaction decision/prompt logic (LIM-14)
 ├── history.py        # tool_call↔result pairing + resume repair
+├── model_switch.py   # /model domain logic: validate, swap client, persist (UI is an adapter)
+├── prompt.py         # System-prompt assembly (tools section derived from the registry)
+├── steer.py          # Mid-turn steer queue (LIM-20): queueing semantics, cancel boundary
 ├── sessions.py       # Session JSONL save/load/list/export
 ├── trace.py          # Append-only JSONL run log (sessions/traces/)
 ├── skills.py         # SKILL.md discovery (user + project dirs)
 ├── user_paths.py     # Fence grants from paths in user messages
 ├── llm/              # catalog.py (provider/model specs), factory.py (dialect→client),
-│                     # openai_client.py, anthropic_client.py, responses_client.py, retry.py, sse.py
+│                     # openai_client.py, anthropic_client.py, responses_client.py, retry.py, sse.py,
+│                     # usage.py (token accounting: usage normalization + prompt-size estimation),
+│                     # scaffold.py (plumbing shared by dialect clients: credentials, retry, images)
 ├── tools/            # base.py (BaseTool + fence + truncation), registry.py (dispatch, grants),
 │                     # mutation_queue.py (per-file locks), ignore.py (.gitignore),
 │                     # read/bash/edit/write/grep/find/ls.py
@@ -44,7 +50,7 @@ src/limbo/
 - `finish_reason` `length`/`max_tokens` → whole batch failed without execution, model re-issues
 - Mid-turn user input queues as *steer* (LIM-20): injected at loop top, or as turn-end follow-up
 - Reasoning is stored on assistant messages and replayed per dialect (Anthropic thinking signatures, Kimi `reasoning_content`, Responses encrypted items)
-- Usage counters normalize across providers (`input_tokens`+`cache_read`, `prompt_tokens`, DeepSeek cache hits) and feed the compaction trigger
+- Usage counters normalize in `llm/usage.py` (`input_tokens`+`cache_read`, `prompt_tokens`, DeepSeek cache hits) and feed the compaction trigger via `PromptSizeEstimator`
 
 ## LLM & Config
 

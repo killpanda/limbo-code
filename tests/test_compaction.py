@@ -6,12 +6,12 @@ from limbo.compaction import (
     SUMMARY_SECTIONS,
     CompactionConfig,
     build_summary_prompt,
-    estimate_tokens,
     find_split_point,
     is_summary_message,
     make_summary_message,
     should_compact,
 )
+from limbo.llm.usage import estimate_tokens
 from limbo.models import Message
 
 WINDOW = 128_000
@@ -58,24 +58,6 @@ def test_should_compact_below_threshold():
 def test_should_compact_disabled():
     cfg = CompactionConfig(enabled=False)
     assert not should_compact(WINDOW, WINDOW, cfg)
-
-
-# -- estimate_tokens ----------------------------------------------------------
-
-
-def test_estimate_tokens_empty():
-    assert estimate_tokens([]) == 0
-
-
-def test_estimate_tokens_counts_content_and_overhead():
-    # 400 chars -> 100 tokens + 4 overhead.
-    assert estimate_tokens([_user("x" * 400)]) == 104
-
-
-def test_estimate_tokens_includes_tool_calls_json():
-    msg = _assistant(None, tool_calls=[_tool_call("c1")])
-    plain = _assistant(None)
-    assert estimate_tokens([msg]) > estimate_tokens([plain])
 
 
 # -- find_split_point ---------------------------------------------------------

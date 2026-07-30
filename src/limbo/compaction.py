@@ -4,16 +4,17 @@ No UI or agent dependencies (same layering as ``sessions.py``). The agent
 loop consults :func:`should_compact` before each LLM call, and when it fires,
 :func:`find_split_point` picks a safe cut, :func:`build_summary_prompt`
 builds the summarization request, and :func:`make_summary_message` turns the
-LLM's answer into a message that survives session repair.
+LLM's answer into a message that survives session repair. Token accounting
+(normalization + estimation) lives in ``limbo.llm.usage``.
 
 Design reference: RFC v2 on LIM-14 (pi-style compaction).
 """
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 
+from limbo.llm.usage import estimate_tokens
 from limbo.models import Message
 
 SUMMARY_TAG = "conversation-summary"
@@ -52,23 +53,6 @@ def should_compact(
     if not cfg.enabled:
         return False
     return estimated_prompt_tokens > context_window - cfg.reserve_tokens
-
-
-def estimate_tokens(messages: list[Message]) -> int:
-    """Rough token estimate: chars / 4 plus a small per-message overhead.
-
-    Conservative for Chinese text (~1.5–2 chars/token), so triggers may
-    fire late on estimation alone; real usage figures are the primary path
-    and ``reserve_tokens`` absorbs the slack. Used only for triggering and
-    split-point selection, never recorded as measured usage.
-    """
-    total = 0
-    for msg in messages:
-        chars = len(msg.content or "") + len(msg.reasoning or "")
-        if msg.tool_calls:
-            chars += len(json.dumps(msg.tool_calls, ensure_ascii=False))
-        total += chars // 4 + 4
-    return total
 
 
 def find_split_point(messages: list[Message], keep_recent_tokens: int) -> int | None:

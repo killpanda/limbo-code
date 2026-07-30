@@ -22,15 +22,14 @@ from limbo.agent import (
     UsageUpdate,
 )
 from limbo.compaction import is_summary_message
-from limbo.config import Config, load_config, save_model_to_config
-from limbo.llm.catalog import (
-    GENERIC_OPENAI,
-    resolve_api_key,
-    resolve_api_key_env,
-    resolve_model,
-)
+from limbo.config import Config
 from limbo.llm.client import LLMClient
 from limbo.llm.factory import create_llm_client
+from limbo.model_switch import (
+    prepare_model_switch,
+    reload_llm_config,
+    swap_llm_client,
+)
 from limbo.models import Attachment
 from limbo.sessions import derive_title, export_jsonl, export_markdown, list_sessions
 from limbo.skills import Skill, discover_skills
@@ -317,60 +316,28 @@ class MainScreen(Screen[None]):
             self._apply_model_switch(model_id)
 
     def _reload_llm_config(self) -> None:
-        """Hot-reload llm/providers settings from config.toml.
-
-        Only the LLM-relevant fields are replaced in place (the agent holds
-        a reference to this Config), so edits made while Limbo is running —
-        e.g. a newly added [providers.<id>] key — apply without a restart.
-        """
-        fresh = load_config()
-        self.config.llm = fresh.llm
-        self.config.providers = fresh.providers
+        """Hot-reload llm/providers settings (see limbo.model_switch)."""
+        reload_llm_config(self.config)
 
     def _apply_model_switch(self, model_id: str) -> None:
         chat = self.query_one("#chat", ChatWidget)
-        if model_id == self.config.llm.model:
-            chat.add_info(f"当前已是 {model_id}")
-            return
-        spec = resolve_model(model_id)
-        if resolve_api_key(spec, self.config) is None:
-            env = resolve_api_key_env(spec, self.config)
-            hint = f"（${env}）" if env else ""
-            chat.add_info(
-                f"未配置 {spec.provider.id} 的 API key{hint}，无法切换到 {model_id}"
-            )
-            return
-        effort = self.config.llm.thinking_effort
-        if effort and spec.thinking_levels and effort not in spec.thinking_levels:
-            self.config.llm.thinking_effort = None
-            chat.add_info("当前 thinking_effort 不受新模型支持，已重置")
-        if spec.provider is GENERIC_OPENAI:
-            chat.add_info("未知模型，按 OpenAI 兼容默认参数接入")
-        # Order matters: set the model on config first — the swap worker and
-        # agent.update_llm re-resolve everything from config.llm.model.
-        self.config.llm.model = model_id
-        self.run_worker(self._swap_llm_client())
+        verdict = prepare_model_switch(model_id, self.config)
+        for notice in verdict.notices:
+            chat.add_info(notice)
+        if verdict.switched:
+            self.run_worker(self._swap_llm_client())
 
     async def _swap_llm_client(self) -> None:
-        """Swap the client for the *current* config model.
-
-        Reads config.llm.model at run time rather than the value captured
-        when the command fired, so two rapid /model commands converge: the
-        last worker to run leaves the runtime client, status bar, and
-        config file all pointing at the same (latest) model.
-        """
+        """Swap the client for the *current* config model (converges on
+        the latest model when /model fires rapidly — see model_switch)."""
         chat = self.query_one("#chat", ChatWidget)
         model_id = self.config.llm.model
-        close = getattr(self.llm_client, "close", None)
-        if close is not None:
-            await close()
-        self.llm_client = create_llm_client(self.config)
-        self.agent.update_llm(self.llm_client)
+        self.llm_client, notices = await swap_llm_client(
+            self.config, self.llm_client, self.agent
+        )
         self.query_one("#statusbar", StatusBar).set_model(model_id)
-        spec = resolve_model(model_id)
-        chat.add_info(f"已切换模型 {model_id} ({spec.provider.id})")
-        if not save_model_to_config(model_id):
-            chat.add_info("配置写回失败，本次切换仅当前会话生效")
+        for notice in notices:
+            chat.add_info(notice)
 
     def _start_new_session(self) -> None:
         chat = self.query_one("#chat", ChatWidget)

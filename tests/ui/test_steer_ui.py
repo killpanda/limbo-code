@@ -201,7 +201,7 @@ async def test_skill_invocation_while_busy_enqueues_full_prompt(tmp_path):
 
         # The assembled prompt (not the raw input) is queued; no worker, no call.
         assert screen.agent.queued_count == 1
-        item = screen.agent._steer_queue[0]
+        item = next(iter(screen.agent._steer_queue))
         assert "# TDD rules" in item.text
         assert "Red first." in item.text
         assert "implement login" in item.text
@@ -282,7 +282,7 @@ async def test_queued_message_with_attachment(tmp_path):
         await pilot.pause()
 
         assert screen.agent.queued_count == 1
-        assert screen.agent._steer_queue[0].attachments == [attachment]
+        assert next(iter(screen.agent._steer_queue)).attachments == [attachment]
         assert "📎 文件: note.txt" in chat.transcript_text()
 
         gate.set()

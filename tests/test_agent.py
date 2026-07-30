@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 
 from limbo.agent import (
-    ATTACHMENT_INLINE_MAX_BYTES,
     Agent,
     CompactionEvent,
     ErrorEvent,
@@ -19,9 +18,8 @@ from limbo.agent import (
     TextDelta,
     ToolCallRequest,
     ToolResultEvent,
-    _extract_cached_tokens,
-    _extract_total_tokens,
 )
+from limbo.attachments import ATTACHMENT_INLINE_MAX_BYTES
 from limbo.compaction import SUMMARY_TAG
 from limbo.config import CompactionSettings, Config
 from limbo.llm.retry import LLMHttpError
@@ -103,7 +101,7 @@ def test_system_prompt_includes_skills_catalog(workdir):
 def test_system_prompt_skips_catalog_when_no_skills(workdir, monkeypatch):
     # Point the user skills dir at an empty location so only the (empty)
     # project dir is scanned.
-    monkeypatch.setattr("limbo.agent.discover_skills", lambda workdir: [])
+    monkeypatch.setattr("limbo.prompt.discover_skills", lambda workdir: [])
     agent = Agent(
         config=Config(),
         llm_client=FakeLLMClient([]),
@@ -1588,60 +1586,6 @@ async def test_agent_persists_and_restores_allowed_roots(workdir):
     ls_tool = agent2.registry.get("ls")
     assert ls_tool is not None
     assert ls_tool.is_within_scope(granted.resolve())
-
-
-# -- usage counter normalization ----------------------------------------------
-
-
-def test_extract_cached_tokens_responses_dialect():
-    # The Responses API nests cache hits under input_tokens_details.
-    usage = {
-        "input_tokens": 164,
-        "output_tokens": 20,
-        "total_tokens": 184,
-        "input_tokens_details": {"cached_tokens": 64},
-    }
-    assert _extract_cached_tokens(usage) == 64
-
-
-def test_extract_cached_tokens_existing_branches_win_first():
-    assert _extract_cached_tokens({"prompt_cache_hit_tokens": 10}) == 10
-    assert (
-        _extract_cached_tokens({"prompt_tokens_details": {"cached_tokens": 20}})
-        == 20
-    )
-    assert _extract_cached_tokens({"cache_read_input_tokens": 30}) == 30
-    assert _extract_cached_tokens({"input_tokens": 5}) is None
-    assert _extract_cached_tokens(None) is None
-
-
-def test_extract_total_tokens_openai_total_wins():
-    # OpenAI's total_tokens already includes cached prompt tokens.
-    assert (
-        _extract_total_tokens(
-            {"prompt_tokens": 100, "completion_tokens": 10, "total_tokens": 110}
-        )
-        == 110
-    )
-
-
-def test_extract_total_tokens_anthropic_counts_cache_traffic():
-    # Anthropic reports cache reads/creations apart from input_tokens; they
-    # are real processed tokens and must count toward the session total.
-    usage = {
-        "input_tokens": 871,
-        "output_tokens": 900,
-        "cache_read_input_tokens": 10240,
-        "cache_creation_input_tokens": 0,
-    }
-    assert _extract_total_tokens(usage) == 871 + 900 + 10240
-
-
-def test_extract_total_tokens_anthropic_without_cache_keys():
-    assert _extract_total_tokens({"input_tokens": 5, "output_tokens": 7}) == 12
-    assert _extract_total_tokens({"output_tokens": 3}) == 3
-    assert _extract_total_tokens({}) is None
-    assert _extract_total_tokens(None) is None
 
 
 # -- steer queue (RFC LIM-20) --------------------------------------------------
