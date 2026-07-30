@@ -44,9 +44,12 @@ class ReadTool(BaseTool):
     }
 
     def __init__(
-        self, workdir: Path, sensitive_files: list[str] | None = None
+        self,
+        workdir: Path,
+        sensitive_files: list[str] | None = None,
+        allowed_roots: set[Path] | None = None,
     ):
-        super().__init__(workdir)
+        super().__init__(workdir, allowed_roots=allowed_roots)
         self.sensitive_files = set(sensitive_files or DEFAULT_SENSITIVE_FILES)
 
     @staticmethod

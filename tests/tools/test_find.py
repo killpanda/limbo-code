@@ -101,3 +101,23 @@ def test_find_broken_symlink_search_path_returns_invalid_path(workdir):
     result = tool.execute({"pattern": "*.py", "path": "broken_link"})
     assert result.success is False
     assert "invalid path" in result.error.lower()
+
+
+def test_find_in_granted_root_outside_workdir(workdir, tmp_path):
+    outside = tmp_path / "outside"
+    (outside / "pkg").mkdir(parents=True)
+    (outside / "pkg" / "mod.py").write_text("x")
+    shared: set[Path] = {outside.resolve()}
+    tool = FindTool(workdir=workdir, allowed_roots=shared)
+    result = tool.execute({"pattern": "**/*.py", "path": str(outside)})
+    assert result.success is True
+    assert str((outside / "pkg" / "mod.py").resolve()) in result.output
+
+
+def test_find_outside_workdir_without_grant_fails(workdir, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    tool = FindTool(workdir=workdir)
+    result = tool.execute({"pattern": "**/*.py", "path": str(outside)})
+    assert result.success is False
+    assert "outside working directory" in result.error

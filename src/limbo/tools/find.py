@@ -7,7 +7,6 @@ from typing import Any
 from limbo.models import ToolResult
 from limbo.tools.base import (
     BaseTool,
-    is_within_workdir,
     truncate_output,
 )
 from limbo.tools.ignore import GitignoreMatcher
@@ -56,12 +55,19 @@ class FindTool(BaseTool):
                 continue
             if not resolved.is_file():
                 continue
-            if not is_within_workdir(resolved, self.workdir):
+            if not self.is_within_scope(resolved):
                 continue
-            rel = str(p.relative_to(self.workdir))
-            if matcher.is_ignored(rel):
-                continue
-            results.append(rel)
+            try:
+                rel = str(p.relative_to(self.workdir))
+            except ValueError:
+                # Inside a granted root outside the workdir: show the
+                # absolute path (gitignore matching only applies under the
+                # workdir).
+                results.append(str(resolved))
+            else:
+                if matcher.is_ignored(rel):
+                    continue
+                results.append(rel)
             if len(results) >= limit:
                 break
 

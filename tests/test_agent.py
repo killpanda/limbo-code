@@ -1506,3 +1506,35 @@ async def test_large_or_binary_file_referenced_by_path(workdir, tmp_path):
     user_msg = _last_user_message(agent)
     assert str(big) in user_msg.content
     assert "read 工具" in user_msg.content
+
+
+@pytest.mark.asyncio
+async def test_agent_persists_and_restores_allowed_roots(workdir):
+    """Grants made mid-session are saved to the meta and restored on resume."""
+    from limbo.sessions import latest_session
+
+    session_dir = workdir / "sessions"
+    cfg = Config()
+    agent1 = Agent(
+        config=cfg,
+        llm_client=FakeLLMClient([[TextChunk(text="one")]]),
+        workdir=workdir,
+        session_dir=session_dir,
+    )
+    granted = workdir.parent / f"{workdir.name}-granted"
+    granted.mkdir(exist_ok=True)
+    agent1.registry.add_allowed_roots([granted])
+    await _collect(agent1.run("look outside"))
+
+    agent2 = Agent(
+        config=cfg,
+        llm_client=FakeLLMClient([[TextChunk(text="two")]]),
+        workdir=workdir,
+        session_dir=session_dir,
+        resume=latest_session(session_dir),
+    )
+    assert granted.resolve() in agent2.registry.allowed_roots
+    # The restored fence actually lets tools through.
+    ls_tool = agent2.registry.get("ls")
+    assert ls_tool is not None
+    assert ls_tool.is_within_scope(granted.resolve())

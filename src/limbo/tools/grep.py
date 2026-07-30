@@ -11,7 +11,6 @@ from typing import Any
 from limbo.models import ToolResult
 from limbo.tools.base import (
     BaseTool,
-    is_within_workdir,
     truncate_output,
 )
 from limbo.tools.ignore import GitignoreMatcher
@@ -94,8 +93,13 @@ class GrepTool(BaseTool):
             cmd.extend(["-C", str(context)])
         if glob:
             cmd.extend(["-g", glob])
-        # Emit workdir-relative paths, consistent with the Python fallback and find.
-        rel_target = target.relative_to(self.workdir)
+        # Emit workdir-relative paths, consistent with the Python fallback and
+        # find. A granted root outside the workdir is passed as an absolute
+        # path (rg accepts both).
+        try:
+            rel_target = target.relative_to(self.workdir)
+        except ValueError:
+            rel_target = target
         cmd.extend(["--max-count", str(limit), "--", pattern, str(rel_target)])
 
         try:
@@ -149,18 +153,22 @@ class GrepTool(BaseTool):
         files = [target] if target.is_file() else target.rglob("*")
         count = 0
         for f in files:
-            # Resolve symlinks and enforce the workdir boundary before reading.
+            # Resolve symlinks and enforce the boundary before reading.
             resolved = f.resolve()
-            if not is_within_workdir(resolved, self.workdir):
+            if not self.is_within_scope(resolved):
                 continue
             if not resolved.is_file():
                 continue
             try:
-                rel = resolved.relative_to(self.workdir)
+                rel_str = str(resolved.relative_to(self.workdir))
             except ValueError:
-                continue
-            rel_str = str(rel)
-            if matcher.is_ignored(rel_str):
+                # Granted root outside the workdir: match by absolute path
+                # (gitignore matching only applies under the workdir).
+                rel_str = str(resolved)
+                in_workdir = False
+            else:
+                in_workdir = True
+            if in_workdir and matcher.is_ignored(rel_str):
                 continue
             if glob is not None and not fnmatch.fnmatch(rel_str, glob):
                 continue
@@ -170,7 +178,7 @@ class GrepTool(BaseTool):
                 continue
             for lineno, line in enumerate(text.splitlines(), start=1):
                 if compiled.search(line):
-                    matches.append(f"{rel}:{lineno}:{line}")
+                    matches.append(f"{rel_str}:{lineno}:{line}")
                     count += 1
                     if count >= limit:
                         break
