@@ -139,3 +139,26 @@ async def test_submit_drops_attachments_whose_marker_was_deleted(monkeypatch):
         widget.action_submit()
         await pilot.pause()
         assert submitted[0].attachments == []
+
+
+@pytest.mark.asyncio
+async def test_ctrl_v_attachment_marker_replaces_selection(
+    monkeypatch, tmp_path: Path
+):
+    monkeypatch.setattr(
+        clipboard,
+        "read_clipboard",
+        lambda: clipboard.ClipboardImage(b"png-bytes", "png"),
+    )
+    monkeypatch.setattr(clipboard, "ATTACHMENTS_DIR", tmp_path)
+    app = make_app()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(InputWidget)
+        widget.focus()
+        widget.text = "hello world"
+        widget.selection = ((0, 6), (0, 11))
+        await pilot.press("ctrl+v")
+        await pilot.pause()
+        await pilot.pause()
+        assert widget.text == "hello [图片 #1]"
+        assert "world" not in widget.text

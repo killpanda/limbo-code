@@ -284,3 +284,31 @@ async def test_placeholder_does_not_grow_input_height():
         await pilot.pause()
         # A single placeholder line keeps the widget at minimum height.
         assert widget._visual_rows() == 1
+
+
+@pytest.mark.asyncio
+async def test_small_paste_replaces_selection():
+    """Native Textual semantics: pasting over a selection replaces it."""
+    app = make_app()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(InputWidget)
+        widget.focus()
+        widget.text = "hello world"
+        widget.selection = ((0, 6), (0, 11))
+        await paste(pilot, widget, "SMALL")
+        assert widget.text == "hello SMALL"
+
+
+@pytest.mark.asyncio
+async def test_large_paste_marker_replaces_selection():
+    app = make_app()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(InputWidget)
+        widget.focus()
+        widget.text = "hello world"
+        widget.selection = ((0, 6), (0, 11))
+        original = big_lines()
+        await paste(pilot, widget, original)
+        assert widget.text == "hello [粘贴的文本 #1，共 11 行]"
+        assert "world" not in widget.text
+        assert widget._pastes == {1: original}

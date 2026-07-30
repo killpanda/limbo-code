@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 from typing import Any
 
@@ -161,6 +162,19 @@ class InputWidget(TextArea):
         text = text.replace("\r\n", "\n").replace("\r", "\n")
         return "".join(c for c in text if c in "\n\t" or ord(c) >= 32)
 
+    def _insert_replacing_selection(self, text: str) -> None:
+        """Insert at the cursor, replacing any active selection.
+
+        Matches Textual's native paste semantics (``_replace_via_keyboard``):
+        pasting with an active selection replaces it, at every insertion
+        point (raw text, paste markers, attachment markers alike).
+        """
+        start, end = self.selection
+        if start == end:
+            self.insert(text)
+        else:
+            self.replace(text, start, end, maintain_selection_offset=False)
+
     def on_paste(self, event: events.Paste) -> None:
         """Collapse large pastes into a one-line placeholder (pi-style).
 
@@ -179,9 +193,9 @@ class InputWidget(TextArea):
                 marker = f"[粘贴的文本 #{paste_id}，共 {len(lines)} 行]"
             else:
                 marker = f"[粘贴的文本 #{paste_id}，{len(text)} 字符]"
-            self.insert(marker)
+            self._insert_replacing_selection(marker)
             return
-        self.insert(text)
+        self._insert_replacing_selection(text)
 
     def _expand_paste_markers(self, text: str) -> tuple[str, list[int]]:
         """Replace placeholders with their stored content.
@@ -245,11 +259,19 @@ class InputWidget(TextArea):
     def action_paste_attachment(self) -> None:
         """Ctrl+V: attach clipboard images/files, else defer to text paste.
 
+        The clipboard probe shells out to platform tools (on macOS several
+        osascript calls, each with its own timeout), so it runs off the
+        event loop via ``asyncio.to_thread``; results are applied back on
+        the main thread.
+
         Degradation chain (RFC v2 §4.3.1): image/files → attachment markers;
         text/empty/unreadable → TextArea's original ``action_paste`` (the
         App-clipboard text path), never a silent no-op.
         """
-        content = clipboard.read_clipboard()
+        self.run_worker(self._paste_os_clipboard())
+
+    async def _paste_os_clipboard(self) -> None:
+        content = await asyncio.to_thread(clipboard.read_clipboard)
         if isinstance(content, clipboard.ClipboardImage):
             path = clipboard.save_clipboard_image(content.data, content.ext)
             self._attachment_counter += 1
@@ -262,7 +284,7 @@ class InputWidget(TextArea):
             )
             marker = f"[图片 #{n}]"
             self._attachments.append((marker, attachment))
-            self.insert(marker)
+            self._insert_replacing_selection(marker)
             return
         if isinstance(content, clipboard.ClipboardFiles):
             for path in content.paths:
@@ -273,7 +295,7 @@ class InputWidget(TextArea):
                 )
                 marker = f"[文件 #{n}: {path.name}]"
                 self._attachments.append((marker, attachment))
-                self.insert(marker)
+                self._insert_replacing_selection(marker)
             return
         # Text/empty/failure: keep the built-in text paste behavior.
         super().action_paste()

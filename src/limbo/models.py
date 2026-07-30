@@ -18,6 +18,12 @@ class Attachment(BaseModel):
     so restored sessions may reference files that no longer exist; readers
     must tolerate that (clients skip missing images, the UI marks them
     expired).
+
+    Persistence trade-off (deliberate, LIM-17 review): only image
+    attachments that pass the vision gate are stored on ``Message`` — file
+    attachments are folded into ``content`` (inline text or path
+    reference), so after a session resume the model loses nothing but the
+    chat no longer renders a chip for them.
     """
 
     kind: str  # "image" | "file"

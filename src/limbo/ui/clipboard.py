@@ -157,6 +157,9 @@ def _macos_image() -> ClipboardImage | None:
 
 
 def _macos_files() -> ClipboardFiles | None:
+    # Limitation (deliberate for now): the «class furl» coercion returns a
+    # single file reference, so a Finder multi-select copy only yields the
+    # first file; the rest are dropped. Documented per LIM-17 review.
     out = _run_text(
         [
             "osascript",
