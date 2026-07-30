@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import time
 import warnings
 from collections.abc import AsyncIterator
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -256,6 +258,30 @@ def _message_to_openai(
     m: dict[str, Any] = {"role": message.role}
     # OpenAI requires `content` on assistant and tool messages, even when empty.
     m["content"] = message.content or ""
+    if message.role == "user" and message.attachments:
+        # Multimodal user message: image_url blocks + text. Missing files
+        # (expired session attachments) are skipped; if none survive, the
+        # message stays a plain string.
+        blocks: list[dict[str, Any]] = []
+        for attachment in message.attachments:
+            if attachment.kind != "image":
+                continue
+            try:
+                data = base64.standard_b64encode(
+                    Path(attachment.path).read_bytes()
+                ).decode("ascii")
+            except OSError:
+                continue
+            mime = attachment.mime or "image/png"
+            blocks.append(
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime};base64,{data}"},
+                }
+            )
+        if blocks:
+            blocks.append({"type": "text", "text": message.content or ""})
+            m["content"] = blocks
     if include_reasoning and message.role == "assistant":
         # Kimi K3 requires reasoning_content on replayed assistant messages;
         # send the stored thinking or an empty string.

@@ -59,6 +59,11 @@ ChatWidget {
 .info-message {
     color: $text-secondary;
 }
+.attachment-chips {
+    color: $text-secondary;
+    padding: 0 1;
+    margin-left: 2;
+}
 .ascii-art {
     color: $text-secondary;
     margin-top: 1;

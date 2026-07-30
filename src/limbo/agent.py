@@ -31,6 +31,7 @@ from limbo.llm.catalog import resolve_model
 from limbo.llm.client import LLMClient
 from limbo.llm.retry import friendly_message
 from limbo.models import (
+    Attachment,
     CompletionMeta,
     Message,
     TextChunk,
@@ -53,6 +54,21 @@ from limbo.trace import TraceLogger, trace_path_for
 @dataclass(frozen=True)
 class TextDelta:
     text: str
+
+
+# File attachments at or below this size are inlined into the user message
+# (UTF-8 decodable); larger or binary files are referenced by path.
+ATTACHMENT_INLINE_MAX_BYTES = 50_000
+
+
+def _read_inline_text(path: Path) -> str | None:
+    """The file's text if it qualifies for inline embedding, else None."""
+    try:
+        if not path.is_file() or path.stat().st_size > ATTACHMENT_INLINE_MAX_BYTES:
+            return None
+        return path.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
 
 
 @dataclass(frozen=True)
@@ -202,6 +218,10 @@ class Agent:
         # is len(messages) at that moment, so the next prompt can be
         # estimated as last + estimate(messages appended since).
         self._context_window = resolve_model(config.llm.model).context_window
+        # Vision gate for image attachments (RFC LIM-17): only models
+        # flagged vision=True in the catalog receive image blocks; others
+        # get a path-reference degradation instead.
+        self._vision = resolve_model(config.llm.model).vision
         self._compaction_config = self._build_compaction_config(config)
         self._last_prompt_tokens: int | None = None
         self._usage_watermark: int = 0
@@ -377,6 +397,42 @@ class Agent:
     def messages(self, value: list[Message]) -> None:
         self._history.messages = value
 
+    def _build_user_content(
+        self, user_input: str, attachments: list[Attachment]
+    ) -> tuple[str, list[Attachment]]:
+        """Combine the typed text with attachments into message content.
+
+        Returns ``(content, images)``: images only when the current model
+        supports vision (they become multimodal blocks in the clients);
+        everything else degrades to text notes — small text files inline,
+        the rest as path references the model can open with read. Nothing
+        is silently dropped.
+        """
+        images: list[Attachment] = []
+        notes: list[str] = []
+        for attachment in attachments:
+            path = Path(attachment.path)
+            if attachment.kind == "image":
+                if self._vision and path.exists():
+                    images.append(attachment)
+                elif self._vision:
+                    notes.append(f"[图片 {attachment.name} 文件已不存在：{path}]")
+                else:
+                    notes.append(
+                        f"[图片 {attachment.name} 已保存到 {path}；"
+                        f"当前模型不支持图像输入，无法直接查看]"
+                    )
+                continue
+            # File attachment: inline small text files, reference the rest.
+            text = _read_inline_text(path)
+            if text is not None:
+                notes.append(f"文件 {attachment.name} 的内容：\n```\n{text}\n```")
+            else:
+                notes.append(f"[文件 {attachment.name} 位于 {path}，可用 read 工具查看]")
+        if not notes:
+            return user_input, images
+        return user_input + "\n\n" + "\n".join(notes), images
+
     def _log_turn_end(self) -> None:
         if self._turn_start is None:
             return
@@ -389,7 +445,9 @@ class Agent:
         )
         self._turn_start = None
 
-    async def run(self, user_input: str) -> AsyncIterator[AgentEvent]:
+    async def run(
+        self, user_input: str, attachments: list[Attachment] | None = None
+    ) -> AsyncIterator[AgentEvent]:
         # Reset per-user-turn state.
         self._iteration_count = 0
         self._auto_compaction_failed_this_turn = False
@@ -397,9 +455,12 @@ class Agent:
         self._turn_count += 1
         self._turn_start = time.monotonic()
 
-        self.messages.append(Message(role="user", content=user_input))
+        content, images = self._build_user_content(user_input, attachments or [])
+        self.messages.append(
+            Message(role="user", content=content, attachments=images or None)
+        )
         self.trace.log(
-            "user_message", turn=self._turn_count, content=user_input
+            "user_message", turn=self._turn_count, content=content
         )
 
         try:

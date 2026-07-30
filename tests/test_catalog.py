@@ -158,3 +158,19 @@ def test_register_client_adds_dialect():
     finally:
         factory_module._FACTORIES.pop("dummy-api", None)
         catalog.CATALOG.pop("dummy-model", None)
+
+
+def test_vision_defaults_to_false():
+    # Text-only catalog entries stay non-vision (conservative default).
+    assert resolve_model("deepseek-chat").vision is False
+    assert resolve_model("kimi-k3").vision is False
+
+
+def test_kimi_k2_5_is_vision_capable():
+    assert resolve_model("kimi-k2.5").vision is True
+
+
+def test_unknown_model_vision_defaults_to_false():
+    # GENERIC_OPENAI fallback: image attachments degrade to path references
+    # rather than breaking an unrecognized endpoint with base64 payloads.
+    assert resolve_model("my-local-model").vision is False

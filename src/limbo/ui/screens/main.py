@@ -24,6 +24,7 @@ from limbo.compaction import is_summary_message
 from limbo.config import Config
 from limbo.llm.client import LLMClient
 from limbo.llm.factory import create_llm_client
+from limbo.models import Attachment
 from limbo.sessions import derive_title, export_jsonl, export_markdown, list_sessions
 from limbo.skills import Skill, discover_skills
 from limbo.ui.banner import startup_art_text
@@ -32,7 +33,7 @@ from limbo.ui.screens.game2048 import Game2048Screen
 from limbo.ui.screens.session_picker import SessionPicker
 from limbo.ui.widgets.chat import ChatWidget
 from limbo.ui.widgets.command_menu import SlashCommandMenu
-from limbo.ui.widgets.input import InputWidget, UserSubmitted
+from limbo.ui.widgets.input import InputWidget, PasteMarkersInvalid, UserSubmitted
 from limbo.ui.widgets.status_bar import StatusBar
 
 
@@ -316,7 +317,7 @@ class MainScreen(Screen[None]):
             if is_summary_message(msg):
                 chat.add_info("（此前对话已压缩为摘要）")
             elif msg.role == "user" and msg.content:
-                chat.add_user_message(msg.content)
+                chat.add_user_message(msg.content, msg.attachments)
             elif msg.role == "assistant" and msg.content:
                 chat.add_assistant_message(msg.content)
             elif msg.role == "tool":
@@ -363,23 +364,35 @@ class MainScreen(Screen[None]):
         if close is not None:
             await close()
 
+    def on_paste_markers_invalid(self, event: PasteMarkersInvalid) -> None:
+        """Warn when a paste placeholder lost its content (undo / lookalike).
+
+        The marker is submitted as literal text; surface the loss instead
+        of letting the paste vanish silently.
+        """
+        ids = "、".join(f"#{i}" for i in event.paste_ids)
+        chat = self.query_one("#chat", ChatWidget)
+        chat.add_info(f"⚠ 粘贴 {ids} 内容已失效，将以字面文本发送")
+
     def on_user_submitted(self, event: UserSubmitted) -> None:
         text = event.message
         if text.startswith("/"):
             self._handle_command(text)
             return
         chat = self.query_one("#chat", ChatWidget)
-        chat.add_user_message(text)
-        self.run_worker(self._handle_turn(text))
+        chat.add_user_message(text, event.attachments)
+        self.run_worker(self._handle_turn(text, event.attachments))
 
-    async def _handle_turn(self, user_input: str) -> None:
+    async def _handle_turn(
+        self, user_input: str, attachments: list[Attachment] | None = None
+    ) -> None:
         input_widget = self.query_one("#input", InputWidget)
         statusbar = self.query_one("#statusbar", StatusBar)
         input_widget.disabled = True
         self._agent_busy = True
         statusbar.set_state("thinking…", "thinking")
         try:
-            async for event in self.agent.run(user_input):
+            async for event in self.agent.run(user_input, attachments):
                 await self._process_agent_event(event)
         finally:
             self._agent_busy = False

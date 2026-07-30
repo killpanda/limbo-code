@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from limbo.agent import (
+    ATTACHMENT_INLINE_MAX_BYTES,
     Agent,
     CompactionEvent,
     ErrorEvent,
@@ -21,7 +22,14 @@ from limbo.agent import (
 from limbo.compaction import SUMMARY_TAG
 from limbo.config import CompactionSettings, Config
 from limbo.llm.retry import LLMHttpError
-from limbo.models import CompletionMeta, Message, TextChunk, ToolCallEvent, ToolResult
+from limbo.models import (
+    Attachment,
+    CompletionMeta,
+    Message,
+    TextChunk,
+    ToolCallEvent,
+    ToolResult,
+)
 from limbo.trace import read_trace
 
 
@@ -1415,3 +1423,86 @@ def test_compaction_config_cross_checked_against_window(workdir, monkeypatch):
     )
     assert agent._compaction_config.enabled
     assert agent._compaction_config.reserve_tokens == 16_384
+
+
+def _make_agent(workdir, model: str):
+    cfg = Config()
+    cfg.llm.model = model
+    fake_llm = FakeLLMClient([[TextChunk(text="ok")]])
+    return Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+
+def _last_user_message(agent) -> Message:
+    return next(m for m in reversed(agent.messages) if m.role == "user")
+
+
+@pytest.mark.asyncio
+async def test_image_attachment_sent_as_blocks_for_vision_model(workdir, tmp_path):
+    image = tmp_path / "shot.png"
+    image.write_bytes(b"png")
+    agent = _make_agent(workdir, "kimi-k2.5")
+    attachment = Attachment(
+        kind="image", name="shot.png", path=str(image), mime="image/png"
+    )
+    await _collect(agent.run("看图 [图片 #1]", attachments=[attachment]))
+    user_msg = _last_user_message(agent)
+    assert user_msg.content == "看图 [图片 #1]"
+    assert user_msg.attachments == [attachment]
+
+
+@pytest.mark.asyncio
+async def test_image_attachment_degrades_for_non_vision_model(workdir, tmp_path):
+    image = tmp_path / "shot.png"
+    image.write_bytes(b"png")
+    agent = _make_agent(workdir, "deepseek-chat")
+    attachment = Attachment(
+        kind="image", name="shot.png", path=str(image), mime="image/png"
+    )
+    await _collect(agent.run("看图 [图片 #1]", attachments=[attachment]))
+    user_msg = _last_user_message(agent)
+    # No image blocks for non-vision models; a path reference is appended
+    # instead so the paste is never silently dropped.
+    assert user_msg.attachments is None
+    assert str(image) in user_msg.content
+    assert "不支持图像输入" in user_msg.content
+
+
+@pytest.mark.asyncio
+async def test_missing_image_noted_but_not_dropped(workdir, tmp_path):
+    agent = _make_agent(workdir, "kimi-k2.5")
+    attachment = Attachment(
+        kind="image", name="gone.png", path=str(tmp_path / "gone.png")
+    )
+    await _collect(agent.run("看图", attachments=[attachment]))
+    user_msg = _last_user_message(agent)
+    assert user_msg.attachments is None
+    assert "文件已不存在" in user_msg.content
+
+
+@pytest.mark.asyncio
+async def test_small_text_file_attachment_inlined(workdir, tmp_path):
+    note = tmp_path / "note.txt"
+    note.write_text("remember the milk")
+    agent = _make_agent(workdir, "deepseek-chat")
+    attachment = Attachment(kind="file", name="note.txt", path=str(note))
+    await _collect(agent.run("总结这个文件", attachments=[attachment]))
+    user_msg = _last_user_message(agent)
+    assert "remember the milk" in user_msg.content
+    assert user_msg.attachments is None
+
+
+@pytest.mark.asyncio
+async def test_large_or_binary_file_referenced_by_path(workdir, tmp_path):
+    big = tmp_path / "big.bin"
+    big.write_bytes(b"\x00" * (ATTACHMENT_INLINE_MAX_BYTES + 1))
+    agent = _make_agent(workdir, "deepseek-chat")
+    attachment = Attachment(kind="file", name="big.bin", path=str(big))
+    await _collect(agent.run("分析这个文件", attachments=[attachment]))
+    user_msg = _last_user_message(agent)
+    assert str(big) in user_msg.content
+    assert "read 工具" in user_msg.content

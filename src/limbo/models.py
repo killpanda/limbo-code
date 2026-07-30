@@ -9,6 +9,29 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 
+class Attachment(BaseModel):
+    """A file/image attached to a user message (paste of clipboard content).
+
+    ``path`` points at the stored content (clipboard images are saved under
+    ``~/.limbo/attachments/`` at paste time; file attachments reference the
+    original file). Only the path is persisted in sessions — never bytes —
+    so restored sessions may reference files that no longer exist; readers
+    must tolerate that (clients skip missing images, the UI marks them
+    expired).
+
+    Persistence trade-off (deliberate, LIM-17 review): only image
+    attachments that pass the vision gate are stored on ``Message`` — file
+    attachments are folded into ``content`` (inline text or path
+    reference), so after a session resume the model loses nothing but the
+    chat no longer renders a chip for them.
+    """
+
+    kind: str  # "image" | "file"
+    name: str
+    path: str
+    mime: str | None = None
+
+
 class Message(BaseModel):
     """A chat message in the conversation.
 
@@ -22,6 +45,10 @@ class Message(BaseModel):
     content: str | None = None
     tool_calls: list[dict[str, Any]] | None = None
     tool_call_id: str | None = None
+    # Image attachments to send as multimodal content blocks (only set when
+    # the current model supports vision; otherwise agent.py degrades them
+    # to path references in ``content`` and leaves this None).
+    attachments: list[Attachment] | None = None
     # Reasoning/thinking text produced by reasoning models. Stored so it can
     # be replayed to APIs that require it (e.g. Kimi K3) on later turns.
     reasoning: str | None = None
