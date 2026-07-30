@@ -32,7 +32,7 @@ from limbo.ui.screens.game2048 import Game2048Screen
 from limbo.ui.screens.session_picker import SessionPicker
 from limbo.ui.widgets.chat import ChatWidget
 from limbo.ui.widgets.command_menu import SlashCommandMenu
-from limbo.ui.widgets.input import InputWidget, UserSubmitted
+from limbo.ui.widgets.input import InputWidget, PasteMarkersInvalid, UserSubmitted
 from limbo.ui.widgets.status_bar import StatusBar
 
 
@@ -362,6 +362,16 @@ class MainScreen(Screen[None]):
         close = getattr(self.llm_client, "close", None)
         if close is not None:
             await close()
+
+    def on_paste_markers_invalid(self, event: PasteMarkersInvalid) -> None:
+        """Warn when a paste placeholder lost its content (undo / lookalike).
+
+        The marker is submitted as literal text; surface the loss instead
+        of letting the paste vanish silently.
+        """
+        ids = "、".join(f"#{i}" for i in event.paste_ids)
+        chat = self.query_one("#chat", ChatWidget)
+        chat.add_info(f"⚠ 粘贴 {ids} 内容已失效，将以字面文本发送")
 
     def on_user_submitted(self, event: UserSubmitted) -> None:
         text = event.message

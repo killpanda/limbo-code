@@ -2,17 +2,32 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from rich.cells import cell_len
+from textual import events
 from textual.binding import Binding
 from textual.message import Message
 from textual.widgets import TextArea
+from textual.widgets._text_area import EditResult
 
 # Widget height is text rows + 2 rows of round border. The input starts at
 # one text row (height 3) and grows up to MAX_TEXT_ROWS before scrolling.
 MIN_TEXT_ROWS = 1
 MAX_TEXT_ROWS = 8
+
+# Large pastes (above either threshold, pi-style) are collapsed into a
+# one-line placeholder; the real content lives in InputWidget._pastes and
+# is expanded back at submit time.
+PASTE_COLLAPSE_LINES = 10
+PASTE_COLLAPSE_CHARS = 1000
+
+# Matches paste placeholders like ``[粘贴的文本 #1，共 123 行]`` or
+# ``[粘贴的文本 #1，1234 字符]``. Anchored to the exact formats the widget
+# inserts (no newlines, no free-form middle) so similar-looking pasted
+# content is not misdetected.
+PASTE_MARKER_RE = re.compile(r"\[粘贴的文本 #(\d+)(?:，共 \d+ 行|，\d+ 字符)\]")
 
 
 class UserSubmitted(Message):
@@ -20,6 +35,20 @@ class UserSubmitted(Message):
 
     def __init__(self, message: str):
         self.message = message
+        super().__init__()
+
+
+class PasteMarkersInvalid(Message):
+    """Posted on submit when placeholder markers have no stored content.
+
+    This happens when a paste placeholder was deleted (removing its stored
+    content) and then restored via undo, or when the user hand-types text
+    that exactly matches the placeholder format. The marker is submitted
+    as literal text; the screen surfaces a warning so the loss is visible.
+    """
+
+    def __init__(self, paste_ids: list[int]):
+        self.paste_ids = paste_ids
         super().__init__()
 
 
@@ -45,6 +74,10 @@ class InputWidget(TextArea):
         Binding("down", "menu_down", show=False, priority=True),
         Binding("tab", "menu_complete", show=False, priority=True),
         Binding("escape", "menu_cancel", show=False, priority=True),
+        # Shadow TextArea's delete_left/delete_right so paste placeholders
+        # are removed atomically (plain text deletions fall through).
+        Binding("backspace", "paste_aware_delete_left", show=False, priority=True),
+        Binding("delete", "paste_aware_delete_right", show=False, priority=True),
     ]
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -57,6 +90,11 @@ class InputWidget(TextArea):
         # Last value applied via history recall; used to tell recall edits
         # apart from manual edits in the (async) Changed handler.
         self._history_value: str | None = None
+        # Collapsed-paste storage: paste id -> original pasted text. Only
+        # ids present here are expanded at submit time (cf. pi's
+        # validPasteIds), so lookalike text is never expanded by accident.
+        self._pastes: dict[int, str] = {}
+        self._paste_counter = 0
 
     def _menu_screen(self):
         """The screen, but only when its slash-command menu is open."""
@@ -102,13 +140,101 @@ class InputWidget(TextArea):
         # Terminal width changes affect soft-wrapping, hence the row count.
         self._auto_resize()
 
+    # -- paste collapse ----------------------------------------------------------
+
+    @staticmethod
+    def _clean_pasted_text(text: str) -> str:
+        """Normalize line endings and strip control chars (keep \\n and \\t)."""
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+        return "".join(c for c in text if c in "\n\t" or ord(c) >= 32)
+
+    def on_paste(self, event: events.Paste) -> None:
+        """Collapse large pastes into a one-line placeholder (pi-style).
+
+        ``TextArea._on_paste`` (private) would insert the raw text after
+        this handler via MRO dispatch; ``prevent_default()`` stops that so
+        the widget fully controls what gets inserted.
+        """
+        event.prevent_default()
+        text = self._clean_pasted_text(event.text)
+        lines = text.split("\n")
+        if len(lines) > PASTE_COLLAPSE_LINES or len(text) > PASTE_COLLAPSE_CHARS:
+            self._paste_counter += 1
+            paste_id = self._paste_counter
+            self._pastes[paste_id] = text
+            if len(lines) > PASTE_COLLAPSE_LINES:
+                marker = f"[粘贴的文本 #{paste_id}，共 {len(lines)} 行]"
+            else:
+                marker = f"[粘贴的文本 #{paste_id}，{len(text)} 字符]"
+            self.insert(marker)
+            return
+        self.insert(text)
+
+    def _expand_paste_markers(self, text: str) -> tuple[str, list[int]]:
+        """Replace placeholders with their stored content.
+
+        Returns the expanded text plus the ids of markers whose content is
+        no longer stored (deleted then restored via undo, or hand-typed
+        lookalikes); those stay as literal text and are reported so the
+        screen can warn the user instead of silently losing the paste.
+        """
+        invalid: list[int] = []
+
+        def repl(match: re.Match[str]) -> str:
+            paste_id = int(match.group(1))
+            if paste_id in self._pastes:
+                return self._pastes[paste_id]
+            invalid.append(paste_id)
+            return match.group(0)
+
+        return PASTE_MARKER_RE.sub(repl, text), invalid
+
+    def _valid_marker_ending_at(self, line: str, col: int) -> re.Match[str] | None:
+        """A stored-content marker whose text ends exactly at ``col``."""
+        for match in PASTE_MARKER_RE.finditer(line):
+            if match.end() == col and int(match.group(1)) in self._pastes:
+                return match
+        return None
+
+    def action_paste_aware_delete_left(self) -> None:
+        """Backspace: delete an adjacent paste placeholder atomically."""
+        if self.selection[0] == self.selection[1]:
+            row, col = self.cursor_location
+            match = self._valid_marker_ending_at(self.document.get_line(row), col)
+            if match is not None:
+                self.delete((row, match.start()), (row, match.end()))
+                del self._pastes[int(match.group(1))]
+                return
+        self.action_delete_left()
+
+    def action_paste_aware_delete_right(self) -> None:
+        """Delete: remove an adjacent paste placeholder atomically."""
+        if self.selection[0] == self.selection[1]:
+            row, col = self.cursor_location
+            match = PASTE_MARKER_RE.match(self.document.get_line(row), col)
+            if match is not None and int(match.group(1)) in self._pastes:
+                self.delete((row, match.start()), (row, match.end()))
+                del self._pastes[int(match.group(1))]
+                return
+        self.action_delete_right()
+
+    def clear(self) -> EditResult:
+        result = super().clear()
+        # Paste state is per-message; reset it on the same clear() path
+        # (regular and slash-command submits alike) so stale ids can't
+        # leak into the next message.
+        self._pastes.clear()
+        return result
+
     # -- submission ------------------------------------------------------------
 
     def action_submit(self) -> None:
         screen = self._menu_screen()
         if screen is not None and screen.slash_menu_complete(execute=True):
             return
-        text = self.text.strip()
+        text, invalid_ids = self._expand_paste_markers(self.text.strip())
+        if invalid_ids:
+            self.post_message(PasteMarkersInvalid(invalid_ids))
         if text:
             if not self._history or self._history[-1] != text:
                 self._history.append(text)
