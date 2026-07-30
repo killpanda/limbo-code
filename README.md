@@ -182,7 +182,24 @@ you no longer need them.
 
 ```bash
 limbo --workdir /path/to/project
+limbo --model glm-4.7        # override the configured model for this run
 ```
+
+### Switching models at runtime
+
+Use `/model` in the TUI: without an argument it opens a picker that lists
+catalog models grouped by provider (context window, reasoning capability,
+and the current model are annotated; providers without a resolvable API key
+are dimmed with a hint). `/model <name>` switches directly — unknown names
+fall back to generic OpenAI-compatible defaults. The picker re-reads
+`config.toml` every time it opens, so edits (e.g. a newly added
+`[providers.<id>]`) apply without a restart.
+
+A switch takes effect immediately (no restart): the LLM client is rebuilt,
+and the new model is written back to `config.toml` (comments preserved via
+tomlkit) so the next launch keeps it. If the write fails, the switch still
+applies for the current session. Switching is refused while a turn is in
+flight.
 
 ## Safety
 

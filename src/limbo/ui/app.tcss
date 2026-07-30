@@ -195,6 +195,44 @@ SessionPicker ListView:focus > ListItem.-highlight {
     color: $accent;
 }
 
+/* ---- 模型选择弹窗 ---- */
+ModelPicker {
+    align: center middle;
+}
+ModelPicker #model-picker {
+    width: 80%;
+    max-width: 110;
+    height: auto;
+    max-height: 80%;
+    border: round $accent;
+    background: $surface;
+    padding: 1 2;
+}
+ModelPicker #picker-title {
+    text-style: bold;
+    margin-bottom: 1;
+}
+ModelPicker ListView {
+    height: auto;
+    max-height: 24;
+}
+ModelPicker ListView:focus > ListItem.-highlight {
+    background: $panel;
+    color: $accent;
+}
+ModelPicker .provider-header {
+    color: $text-secondary;
+    text-style: bold;
+}
+ModelPicker .unavailable {
+    color: $text-tertiary;
+}
+ModelPicker #picker-hint {
+    color: $warning;
+    margin-top: 1;
+    height: auto;
+}
+
 /* ---- 2048 游戏弹窗 ---- */
 Game2048Screen {
     align: center middle;
