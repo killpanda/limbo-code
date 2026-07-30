@@ -270,6 +270,30 @@ async def test_switch_unknown_model_uses_generic_fallback(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_rapid_switches_converge_to_last_model(
+    tmp_path, isolated_config_path
+):
+    """Two rapid /model commands must not leave client/status bar/config
+    pointing at different models (review nit: the swap worker reads the
+    live config.llm.model, not the value captured at command time)."""
+    app = make_app(tmp_path)
+    async with app.run_test() as pilot:
+        screen = pilot.app.screen_stack[-1]
+        await submit(pilot, "/model glm-4.7")
+        await submit(pilot, "/model glm-5.2")
+        await wait_for_chat(pilot, "已切换模型 glm-5.2 (glm)")
+        for _ in range(50):
+            await pilot.pause()
+
+        assert screen.config.llm.model == "glm-5.2"
+        assert screen.llm_client.spec.id == "glm-5.2"
+        assert screen.agent._context_window == 1_000_000
+        statusbar = screen.query_one("#statusbar", StatusBar)
+        assert statusbar._model == "glm-5.2"
+        assert 'model = "glm-5.2"' in isolated_config_path.read_text()
+
+
+@pytest.mark.asyncio
 async def test_busy_guard_blocks_switch(tmp_path):
     app = make_app(tmp_path)
     async with app.run_test() as pilot:

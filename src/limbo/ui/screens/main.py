@@ -324,21 +324,26 @@ class MainScreen(Screen[None]):
             )
             return
         effort = self.config.llm.thinking_effort
-        reset_effort = bool(
-            effort and spec.thinking_levels and effort not in spec.thinking_levels
-        )
-        unknown = spec.provider is GENERIC_OPENAI
-        # Order matters: set the model on config first — agent.update_llm
-        # re-resolves the spec from config.llm.model.
-        self.config.llm.model = model_id
-        if reset_effort:
+        if effort and spec.thinking_levels and effort not in spec.thinking_levels:
             self.config.llm.thinking_effort = None
-        self.run_worker(self._swap_llm_client(model_id, reset_effort, unknown))
+            chat.add_info("当前 thinking_effort 不受新模型支持，已重置")
+        if spec.provider is GENERIC_OPENAI:
+            chat.add_info("未知模型，按 OpenAI 兼容默认参数接入")
+        # Order matters: set the model on config first — the swap worker and
+        # agent.update_llm re-resolve everything from config.llm.model.
+        self.config.llm.model = model_id
+        self.run_worker(self._swap_llm_client())
 
-    async def _swap_llm_client(
-        self, model_id: str, reset_effort: bool, unknown: bool
-    ) -> None:
+    async def _swap_llm_client(self) -> None:
+        """Swap the client for the *current* config model.
+
+        Reads config.llm.model at run time rather than the value captured
+        when the command fired, so two rapid /model commands converge: the
+        last worker to run leaves the runtime client, status bar, and
+        config file all pointing at the same (latest) model.
+        """
         chat = self.query_one("#chat", ChatWidget)
+        model_id = self.config.llm.model
         close = getattr(self.llm_client, "close", None)
         if close is not None:
             await close()
@@ -347,10 +352,6 @@ class MainScreen(Screen[None]):
         self.query_one("#statusbar", StatusBar).set_model(model_id)
         spec = resolve_model(model_id)
         chat.add_info(f"已切换模型 {model_id} ({spec.provider.id})")
-        if unknown:
-            chat.add_info("未知模型，按 OpenAI 兼容默认参数接入")
-        if reset_effort:
-            chat.add_info("当前 thinking_effort 不受新模型支持，已重置")
         if not save_model_to_config(model_id):
             chat.add_info("配置写回失败，本次切换仅当前会话生效")
 
