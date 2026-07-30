@@ -97,6 +97,13 @@ class CompactionEvent:
     warning: str | None = None
 
 
+@dataclass(frozen=True)
+class UsageUpdate:
+    """Cumulative token usage for the session, emitted after each LLM call."""
+
+    total_tokens: int
+
+
 AgentEvent = (
     TextDelta
     | ThinkingDelta
@@ -104,6 +111,7 @@ AgentEvent = (
     | ToolResultEvent
     | ErrorEvent
     | CompactionEvent
+    | UsageUpdate
 )
 
 
@@ -150,6 +158,24 @@ def _extract_cached_tokens(usage: dict[str, Any] | None) -> int | None:
     return read if isinstance(read, int) else None
 
 
+def _extract_total_tokens(usage: dict[str, Any] | None) -> int | None:
+    """Normalize provider-specific total-token counters.
+
+    OpenAI-compatible providers report ``total_tokens``; Anthropic reports
+    separate ``input_tokens`` / ``output_tokens``.
+    """
+    if not usage:
+        return None
+    total = usage.get("total_tokens")
+    if isinstance(total, int):
+        return total
+    input_tokens = usage.get("input_tokens")
+    output_tokens = usage.get("output_tokens")
+    if isinstance(input_tokens, int) or isinstance(output_tokens, int):
+        return (input_tokens or 0) + (output_tokens or 0)
+    return None
+
+
 class Agent:
     """Orchestrates the conversation between user, LLM, and tools."""
 
@@ -168,6 +194,7 @@ class Agent:
         self._history = ToolHistory([])
         self._iteration_count = 0
         self._last_finish_reason: str | None = None
+        self._session_total_tokens = 0
         self._init_system_message()
 
         # Auto-compaction state (LIM-14). ``_last_prompt_tokens`` is the
@@ -671,6 +698,10 @@ class Agent:
 
         usage = meta.usage if meta else None
         self._last_finish_reason = meta.finish_reason if meta else None
+        total = _extract_total_tokens(usage)
+        if total:
+            self._session_total_tokens += total
+            yield UsageUpdate(total_tokens=self._session_total_tokens)
         self.trace.log(
             "llm_response",
             turn=self._turn_count,

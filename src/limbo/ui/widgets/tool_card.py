@@ -126,10 +126,24 @@ class ToolCard(Vertical):
             try:
                 from rich.syntax import Syntax
 
-                renderable = Syntax(content, lexer, theme="ansi_dark")
+                renderable = Syntax(content, lexer, theme=self._syntax_theme())
             except Exception:  # noqa: BLE001 - fall back to plain text
                 renderable = Text(content)
         self.body.write(renderable)
+
+    def _syntax_theme(self) -> Any:
+        """Match the syntax-highlighting palette to the active UI theme.
+
+        Returns a Pygments ``Style`` subclass; rich accepts it at runtime
+        though its type hints only declare ``str | SyntaxTheme``.
+        """
+        from limbo.ui.syntax import LimboDarkStyle, LimboLightStyle
+
+        try:
+            dark = self.app.current_theme.dark
+        except Exception:  # noqa: BLE001 - no app/theme context (tests)
+            dark = True
+        return LimboDarkStyle if dark else LimboLightStyle
 
     def _lexer_for_body(self) -> str | None:
         """Pick a syntax-highlighting lexer based on the tool and its target."""
@@ -139,15 +153,11 @@ class ToolCard(Vertical):
             path = self.arguments.get("path")
             if isinstance(path, str) and path:
                 try:
-                    from pygments.lexers import (  # type: ignore[import-untyped]
-                        get_lexer_for_filename,
-                    )
-                    from pygments.util import (  # type: ignore[import-untyped]
-                        ClassNotFound,
-                    )
+                    from pygments.lexers import get_lexer_for_filename
+                    from pygments.util import ClassNotFound
 
                     try:
-                        aliases: list[str] = get_lexer_for_filename(path).aliases
+                        aliases = get_lexer_for_filename(path).aliases
                         return aliases[0] if aliases else None
                     except ClassNotFound:
                         return None

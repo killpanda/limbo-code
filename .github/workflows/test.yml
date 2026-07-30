@@ -17,14 +17,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-          cache: pip
 
+      # Install from uv.lock so CI renders snapshots with the exact same
+      # textual/rich/syrupy versions the baselines were generated with.
       - name: Install dependencies
-        run: pip install -e ".[dev]"
+        run: uv sync --frozen --extra dev
+        env:
+          UV_PYTHON: ${{ matrix.python-version }}
 
       - name: Run tests
-        run: python -m pytest -v
+        run: uv run python -m pytest -v
