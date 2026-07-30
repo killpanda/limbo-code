@@ -147,6 +147,10 @@ class SafetyConfig(BaseModel):
     sensitive_files: list[str] = Field(
         default_factory=lambda: list(DEFAULT_SENSITIVE_FILES)
     )
+    # Implicit grants: paths a real user mentions in a submitted message
+    # widen the file-tool fence for the session (directories grant their
+    # subtree, files grant themselves; only existing paths count).
+    auto_grant_user_paths: bool = True
 
 
 class ToolsConfig(BaseModel):

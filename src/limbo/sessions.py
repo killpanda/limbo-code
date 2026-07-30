@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from limbo.compaction import is_summary_message, make_summary_message
 from limbo.models import Message
@@ -54,6 +54,9 @@ class SessionMeta(BaseModel):
     title: str = ""
     created_at: str = ""
     updated_at: str = ""
+    # Session-scoped granted roots beyond the workdir (implicit user
+    # grants); restored on resume so the fence stays consistent.
+    allowed_roots: list[str] = Field(default_factory=list)
     # Populated by list/load; not written to disk.
     path: Path | None = None
 

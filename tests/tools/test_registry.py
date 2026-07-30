@@ -61,3 +61,35 @@ def test_registry_bash_disabled(workdir):
     reg = ToolRegistry(workdir=workdir, config=cfg)
     assert reg.get("bash") is None
     assert "bash" not in {d["function"]["name"] for d in reg.definitions()}
+
+
+def test_add_allowed_roots_dedupes_and_skips_workdir(workdir):
+    reg = ToolRegistry(workdir=workdir)
+    inside = workdir / "sub"
+    inside.mkdir()
+    assert reg.add_allowed_roots([inside]) == []
+
+    outside = workdir.parent / f"{workdir.name}-outside"
+    outside.mkdir(exist_ok=True)
+    try:
+        added = reg.add_allowed_roots([outside])
+        assert added == [outside.resolve()]
+        # Subsumed path is not a new grant.
+        child = outside / "child"
+        assert reg.add_allowed_roots([child]) == []
+        # Re-adding the same root is a no-op.
+        assert reg.add_allowed_roots([outside]) == []
+        # Grants reach every file tool through the shared set.
+        ls_tool = reg.get("ls")
+        assert ls_tool is not None
+        assert ls_tool.is_within_scope(outside.resolve())
+    finally:
+        outside.rmdir()
+
+
+def test_add_allowed_roots_never_grants_root_or_home(workdir, monkeypatch):
+    reg = ToolRegistry(workdir=workdir)
+    monkeypatch.setenv("HOME", str(workdir.parent))
+    assert reg.add_allowed_roots([Path("/")]) == []
+    assert reg.add_allowed_roots([Path("~/")]) == []
+    assert reg.allowed_roots == set()

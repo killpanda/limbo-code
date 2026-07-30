@@ -37,8 +37,14 @@ class BaseTool(ABC):
     description: str
     parameters: dict[str, Any]
 
-    def __init__(self, workdir: Path):
+    def __init__(self, workdir: Path, allowed_roots: set[Path] | None = None):
         self.workdir = workdir.resolve()
+        # Session-scoped extra roots the fence also accepts (e.g. paths a
+        # real user mentioned in a submitted message). Shared by reference
+        # with the ToolRegistry so late grants take effect immediately.
+        self.allowed_roots: set[Path] = (
+            allowed_roots if allowed_roots is not None else set()
+        )
 
     def execute(self, arguments: dict[str, Any]) -> ToolResult:
         try:
@@ -53,24 +59,45 @@ class BaseTool(ABC):
     # -- path resolution -------------------------------------------------------
 
     def resolve(self, raw_path: str, *, strict: bool = True) -> Path:
-        """Resolve ``raw_path`` under the workdir, enforcing the boundary.
+        """Resolve ``raw_path``, enforcing the workdir/allowed-roots boundary.
 
-        Raises ``ToolError`` for paths outside the workdir, unresolvable
-        paths, and (when ``strict``) broken symlinks.
+        ``~`` is expanded and absolute paths are honored as-is; relative
+        paths resolve under the workdir. Raises ``ToolError`` for paths
+        outside the boundary, unresolvable paths, and (when ``strict``)
+        broken symlinks.
         """
-        raw = self.workdir / raw_path
         try:
-            target = raw.resolve(strict=False)
+            candidate = Path(raw_path).expanduser()
+        except RuntimeError as e:  # home directory undeterminable
+            raise ToolError(f"Invalid path: {e}") from e
+        if not candidate.is_absolute():
+            candidate = self.workdir / candidate
+        try:
+            target = candidate.resolve(strict=False)
         except (OSError, RuntimeError) as e:
             raise ToolError(f"Invalid path: {e}") from e
 
-        if not is_within_workdir(target, self.workdir):
-            raise ToolError("Path is outside working directory.")
+        if not self.is_within_scope(target):
+            raise ToolError(
+                f"Path is outside working directory ({self.workdir}). "
+                "Use bash to access paths outside the working directory."
+            )
 
-        if strict and raw.is_symlink() and not target.exists():
+        if strict and candidate.is_symlink() and not target.exists():
             raise ToolError("Invalid path: broken symlink")
 
         return target
+
+    def is_within_scope(self, path: Path) -> bool:
+        """True if a resolved path is inside the workdir or an allowed root."""
+        if is_within_workdir(path, self.workdir):
+            return True
+        # Snapshot: tools run in worker threads while the UI thread may add
+        # grants; iterating the live set could raise "changed size during
+        # iteration".
+        return any(
+            is_within_workdir(path, root) for root in tuple(self.allowed_roots)
+        )
 
     def resolve_existing(
         self, raw_path: str, *, noun: str = "Path", kind: str = "any"

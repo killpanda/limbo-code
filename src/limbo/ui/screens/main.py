@@ -42,6 +42,7 @@ from limbo.ui.widgets.chat import ChatWidget
 from limbo.ui.widgets.command_menu import SlashCommandMenu
 from limbo.ui.widgets.input import InputWidget, PasteMarkersInvalid, UserSubmitted
 from limbo.ui.widgets.status_bar import StatusBar
+from limbo.user_paths import extract_grantable_paths
 
 
 class MainScreen(Screen[None]):
@@ -475,7 +476,30 @@ class MainScreen(Screen[None]):
             return
         chat = self.query_one("#chat", ChatWidget)
         chat.add_user_message(text, event.attachments)
+        self._grant_user_paths(text, event.attachments)
         self.run_worker(self._handle_turn(text, event.attachments))
+
+    def _grant_user_paths(self, text: str, attachments: list[Attachment]) -> None:
+        """Implicit grants: existing paths in a human-submitted message (and
+        its attachments) widen the file-tool fence for this session.
+
+        Runs only on the real user-submit event — never on model text — so
+        the grant source is always genuine user input. Grants are visible
+        in the chat and traced; they persist in the session meta.
+        """
+        if not self.config.safety.auto_grant_user_paths:
+            return
+        candidates = extract_grantable_paths(text)
+        candidates.extend(
+            path
+            for attachment in attachments
+            if (path := Path(attachment.path)).exists()
+        )
+        new_roots = self.agent.registry.add_allowed_roots(candidates)
+        chat = self.query_one("#chat", ChatWidget)
+        for root in new_roots:
+            chat.add_info(f"↳ 已允许访问：{root}（本会话有效）")
+            self.agent.trace.log("path_grant", root=str(root), source="user_message")
 
     async def _handle_turn(
         self, user_input: str, attachments: list[Attachment] | None = None

@@ -430,3 +430,24 @@ def test_attachments_roundtrip(tmp_path: Path):
     assert restored.attachments[0].kind == "image"
     assert restored.attachments[0].path == "/tmp/limbo-test/shot.png"
     assert [m.model_dump() for m in loaded] == [m.model_dump() for m in messages]
+
+
+def test_allowed_roots_roundtrip_and_default(tmp_path: Path):
+    path = tmp_path / "grants.jsonl"
+    meta = make_meta()
+    meta.allowed_roots = ["/granted/dir", "/granted/file.txt"]
+    save_session(path, meta, make_messages())
+
+    loaded_meta, _, _ = load_session(path)
+    assert loaded_meta.allowed_roots == ["/granted/dir", "/granted/file.txt"]
+
+    # Legacy sessions without the field default to no grants.
+    legacy = tmp_path / "legacy.jsonl"
+    save_session(legacy, make_meta(), make_messages())
+    first_line = json.loads(legacy.read_text().splitlines()[0])
+    del first_line["allowed_roots"]
+    legacy.write_text(
+        json.dumps(first_line) + "\n" + "\n".join(legacy.read_text().splitlines()[1:])
+    )
+    loaded_meta, _, _ = load_session(legacy)
+    assert loaded_meta.allowed_roots == []

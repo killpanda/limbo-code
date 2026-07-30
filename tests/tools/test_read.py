@@ -216,3 +216,28 @@ def test_read_rejects_files_above_max_size(workdir):
     result = tool.execute({"path": "huge.txt"})
     assert result.success is False
     assert "too large" in result.error.lower()
+
+
+def test_granted_root_allows_read_outside_workdir(workdir, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "data.txt").write_text("external")
+    shared: set[Path] = set()
+    tool = ReadTool(workdir=workdir, allowed_roots=shared)
+    result = tool.execute({"path": str(outside / "data.txt")})
+    assert result.success is False
+    shared.add(outside.resolve())
+    result = tool.execute({"path": str(outside / "data.txt")})
+    assert result.success is True
+    assert result.output == "external"
+
+
+def test_sensitive_blacklist_wins_over_granted_root(workdir, tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / ".env").write_text("SECRET=1")
+    shared: set[Path] = {outside.resolve()}
+    tool = ReadTool(workdir=workdir, allowed_roots=shared)
+    result = tool.execute({"path": str(outside / ".env")})
+    assert result.success is False
+    assert "sensitive" in result.error
