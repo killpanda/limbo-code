@@ -10,7 +10,17 @@ from limbo.config import Config
 from limbo.models import Message
 from limbo.sessions import SessionMeta, save_session
 from limbo.ui.app import LimboApp
-from limbo.ui.banner import DARK, RED, STARTUP_ART, YELLOW, startup_art_text
+from limbo.ui.banner import (
+    BLUE,
+    DARK,
+    FULL,
+    LOWER,
+    RED,
+    STARTUP_ART,
+    UPPER,
+    YELLOW,
+    startup_art_text,
+)
 from limbo.ui.widgets.chat import ChatWidget
 
 
@@ -40,7 +50,8 @@ async def test_startup_art_shown_on_fresh_start(tmp_path):
         chat = pilot.app.screen.query_one("#chat", ChatWidget)
         transcript = chat.transcript_text()
         # A distinctive mid-art line proves the banner was rendered verbatim.
-        assert STARTUP_ART.splitlines()[len(STARTUP_ART.splitlines()) // 2] in transcript
+        art_lines = startup_art_text().plain.splitlines()
+        assert art_lines[len(art_lines) // 2] in transcript
 
 
 @pytest.mark.asyncio
@@ -59,7 +70,7 @@ async def test_startup_art_hidden_when_resuming(tmp_path):
         await pilot.pause()
         chat = pilot.app.screen.query_one("#chat", ChatWidget)
         transcript = chat.transcript_text()
-        assert STARTUP_ART.splitlines()[0] not in transcript
+        assert UPPER not in transcript  # half-block banner not rendered
         assert "已恢复会话" in transcript
 
 
@@ -73,37 +84,54 @@ async def test_startup_art_hidden_when_show_banner_false(tmp_path):
         await pilot.pause()
         chat = pilot.app.screen.query_one("#chat", ChatWidget)
         transcript = chat.transcript_text()
-        assert STARTUP_ART.splitlines()[0] not in transcript
+        assert UPPER not in transcript  # half-block banner not rendered
         assert "Limbo ready" in transcript
 
 
-def test_startup_art_is_pure_ascii():
+def test_startup_art_pixel_map_charset():
+    """The pixel map stays pure ASCII: palette keys + transparent space."""
     assert STARTUP_ART.isascii()
-    assert set(STARTUP_ART) <= {"@", "o", ".", " ", "\n"}
+    assert set(STARTUP_ART) <= {"R", "Y", "D", " ", "\n"}
 
 
 def test_startup_art_is_compact():
-    """P0-5: the banner must not dominate the first screen (<= 8 rows)."""
-    assert len(STARTUP_ART.splitlines()) <= 8
+    """P0-5: the banner must not dominate the first screen (<= 20 rows).
+
+    Half-block rendering packs two pixel rows per terminal row, so the
+    40-row pixel map occupies 20 terminal rows.
+    """
+    assert len(startup_art_text().plain.splitlines()) <= 20
 
 
-def test_startup_art_text_uses_palette_foreground_only():
-    """Characters carry their palette color; spaces stay unstyled so the art
-    blends into the theme background instead of painting a blue rectangle."""
+def test_startup_art_text_uses_palette_colors_only():
+    """Colored half-block cells carry palette colors; fully transparent
+    cells stay unstyled so the art blends into the theme background
+    instead of painting a blue rectangle."""
     text = startup_art_text()
-    lines = text.plain.splitlines()
-    assert lines == STARTUP_ART.splitlines()
 
     def rgb(c: tuple[int, int, int]) -> str:
         return f"rgb({c[0]},{c[1]},{c[2]})"
 
-    expected_fg = {"@": rgb(DARK), "o": rgb(RED), ".": rgb(YELLOW)}
+    palette_styles = {rgb(c) for c in (DARK, RED, YELLOW)}
+
+    covered: set[int] = set()
     spans = list(text.spans)
     assert spans, "expected styled spans"
-    covered = text.plain
     for span in spans:
-        segment = covered[span.start : span.end]
+        segment = text.plain[span.start : span.end]
+        assert set(segment) <= {UPPER, LOWER, FULL}
         style = str(span.style)
-        assert "on rgb" not in style  # no hardcoded background
-        for ch in set(segment) - {"\n", " "}:
-            assert expected_fg[ch] in style
+        # Every color in the style (fg, and bg for mixed pixel pairs)
+        # comes from the palette — never the hardcoded background blue.
+        assert rgb(BLUE) not in style
+        colors = {part for part in style.split(" on ") if part.startswith("rgb(")}
+        assert colors and colors <= palette_styles
+        covered.update(range(span.start, span.end))
+
+    # Coverage invariant: every half-block glyph is styled, every
+    # space/newline is unstyled (transparent).
+    for i, ch in enumerate(text.plain):
+        if ch in {UPPER, LOWER, FULL}:
+            assert i in covered
+        else:
+            assert i not in covered
