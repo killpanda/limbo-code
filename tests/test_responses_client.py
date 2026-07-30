@@ -547,18 +547,17 @@ def test_catalog_resolves_codex_models():
     spec = resolve_model("gpt-5.5")
     assert spec.provider.id == "codex"
     assert spec.provider.api == "openai-responses"
-    assert spec.context_window == 272_000
+    # Relay-reported metadata (verified live): 1M context, vision, 128K out.
+    assert spec.context_window == 1_000_000
+    assert spec.max_tokens == 128_000
+    assert spec.vision is True
     assert spec.thinking_format == "openai-responses"
-    assert "xhigh" in spec.thinking_levels
-    assert "max" not in spec.thinking_levels
-
-    sol = resolve_model("gpt-5.6-sol")
-    assert sol.thinking_levels["max"] == "max"
-    assert sol.vision is True
-
-    spark = resolve_model("gpt-5.3-codex-spark")
-    assert spark.context_window == 128_000
-    assert spark.vision is False
+    assert spec.thinking_levels == {
+        "low": "low",
+        "medium": "medium",
+        "high": "high",
+        "xhigh": "xhigh",
+    }
 
 
 @pytest.mark.asyncio

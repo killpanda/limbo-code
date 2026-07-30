@@ -132,11 +132,9 @@ GLM_CODING = ProviderSpec(
     tool_extra_body={"tool_stream": True},
 )
 
-# OpenAI Codex via the Responses API. Model metadata mirrors pi's
-# openai-codex provider (providers/data/openai-codex.json) — note pi targets
-# the ChatGPT subscription backend (OAuth); limbo targets API-key relays, so
-# point [providers.codex] base_url at your relay and make sure the model IDs
-# below match what the relay actually exposes.
+# OpenAI Codex via the Responses API. Limbo targets API-key relays (not
+# the ChatGPT subscription backend, which needs OAuth) — point
+# [providers.codex] base_url at your relay.
 CODEX = ProviderSpec(
     id="codex",
     api=API_OPENAI_RESPONSES,
@@ -148,18 +146,14 @@ CODEX = ProviderSpec(
 def _codex(
     model_id: str,
     *,
-    context_window: int = 272_000,
+    context_window: int,
     max_tokens: int = 128_000,
     vision: bool = True,
-    supports_max: bool = False,
 ) -> ModelSpec:
     # Codex models reason with Responses reasoning effort. pi's
     # thinkingLevelMap: standard levels through "high" pass through by the
     # provider default mapping, "minimal" maps to "low", "xhigh" is
-    # explicit, and 5.6-generation models add "max".
-    levels = {"low": "low", "medium": "medium", "high": "high", "xhigh": "xhigh"}
-    if supports_max:
-        levels["max"] = "max"
+    # explicit.
     return ModelSpec(
         id=model_id,
         provider=CODEX,
@@ -168,7 +162,12 @@ def _codex(
         reasoning=True,
         vision=vision,
         thinking_format="openai-responses",
-        thinking_levels=levels,
+        thinking_levels={
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+        },
     )
 
 
@@ -316,15 +315,12 @@ CATALOG: dict[str, ModelSpec] = {
     ),
     "glm-5v-turbo": _glm("glm-5v-turbo", context_window=200_000, vision=True),
     # -- OpenAI Codex (Responses API dialect) --------------------------------
-    "gpt-5.3-codex-spark": _codex(
-        "gpt-5.3-codex-spark", context_window=128_000, vision=False
-    ),
-    "gpt-5.4": _codex("gpt-5.4"),
-    "gpt-5.4-mini": _codex("gpt-5.4-mini"),
-    "gpt-5.5": _codex("gpt-5.5"),
-    "gpt-5.6-sol": _codex("gpt-5.6-sol", supports_max=True),
-    "gpt-5.6-terra": _codex("gpt-5.6-terra", supports_max=True),
-    "gpt-5.6-luna": _codex("gpt-5.6-luna", supports_max=True),
+    # Verified by live test against the target relay (2026-07-30): full
+    # tool-call round trip passed, reasoning/include fields tolerated.
+    # Context window / vision are as reported by the relay's /models (pi's
+    # official-backend data says 272K — the relay exposes 1M). The effort
+    # map follows pi's thinkingLevelMap ("high" verified live).
+    "gpt-5.5": _codex("gpt-5.5", context_window=1_000_000),
 }
 
 
