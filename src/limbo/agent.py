@@ -52,6 +52,12 @@ from limbo.steer import SteerItem, SteerQueue
 from limbo.tools.registry import ToolRegistry
 from limbo.trace import TraceLogger, trace_path_for
 
+# Consecutive length-stop rejections tolerated before the turn is aborted.
+# A truncated response whose tool calls were refused is almost always the
+# model re-issuing the same oversized arguments (LIM-32): without a guard
+# it burns the whole iteration budget re-sending what can never fit.
+_MAX_CONSECUTIVE_LENGTH_STOPS = 3
+
 
 @dataclass(frozen=True)
 class TextDelta:
@@ -171,6 +177,7 @@ class Agent:
         self._steer_queue = SteerQueue()
         self._iteration_count = 0
         self._last_finish_reason: str | None = None
+        self._consecutive_length_stops = 0
         self._session_total_tokens = 0
         self._init_system_message()
 
@@ -429,6 +436,7 @@ class Agent:
     ) -> AsyncIterator[AgentEvent]:
         # Reset per-user-turn state.
         self._iteration_count = 0
+        self._consecutive_length_stops = 0
         self._auto_compaction_failed_this_turn = False
         self._auto_compact_noop_notified = False
         self._turn_count += 1
@@ -568,6 +576,16 @@ class Agent:
 
             last = self.messages[-1]
             if not last.tool_calls:
+                # A text response cut off by the output limit must not look
+                # like a complete answer (pi shows the same warning).
+                if self._last_finish_reason in ("length", "max_tokens"):
+                    yield ErrorEvent(
+                        message=(
+                            "Model stopped because it reached the output token "
+                            f"limit (max_tokens={self._effective_max_tokens()}); "
+                            "the response above may be incomplete."
+                        )
+                    )
                 # Turn-end follow-up drain (RFC LIM-20): messages that arrived
                 # as the final response streamed keep the turn alive as a
                 # follow-up — a fresh user input, so the iteration budget
@@ -576,6 +594,7 @@ class Agent:
                 if not pending:
                     break
                 self._iteration_count = 0
+                self._consecutive_length_stops = 0
                 for item in pending:
                     yield self._inject_steer(item, followup=True)
                 continue
@@ -586,8 +605,38 @@ class Agent:
             # "length"; Anthropic reports it as "max_tokens" (its
             # stop_reason is passed through verbatim by the client).
             if self._last_finish_reason in ("length", "max_tokens"):
+                self._consecutive_length_stops += 1
                 async for event in self._fail_truncated_tool_calls(last):
                     yield event
+                if self._consecutive_length_stops >= _MAX_CONSECUTIVE_LENGTH_STOPS:
+                    # Length-stop loop (LIM-32): the model keeps re-issuing a
+                    # call that can never fit one response. Break the turn
+                    # with actionable guidance instead of burning the whole
+                    # iteration budget (mirrors pi's one-shot overflow-recovery
+                    # guard: recoveries that keep failing stop early).
+                    self.trace.log(
+                        "error",
+                        turn=self._turn_count,
+                        iteration=self._iteration_count,
+                        kind="length_stop_loop",
+                        message=(
+                            f"{self._consecutive_length_stops} consecutive responses "
+                            "hit the output token limit; turn aborted."
+                        ),
+                    )
+                    yield ErrorEvent(
+                        message=(
+                            f"Stopped after {self._consecutive_length_stops} consecutive "
+                            "responses that hit the output token limit "
+                            f"(max_tokens={self._effective_max_tokens()}): the model "
+                            "keeps re-issuing a tool call that does not fit in one "
+                            "response. Ask it to write the script to a file with the "
+                            "write tool and run it via bash, split the task into "
+                            "smaller steps, or switch to a model with a higher "
+                            "output limit."
+                        )
+                    )
+                    break
                 continue
 
             # If we've reached the iteration limit on an assistant message that
@@ -615,6 +664,9 @@ class Agent:
                 )
                 break
 
+            # A batch that is about to execute proves the conversation is
+            # making progress; reset the length-stop loop counter.
+            self._consecutive_length_stops = 0
             for idx, tc in enumerate(last.tool_calls):
                 name = tc["function"]["name"]
                 arguments = tc["function"]["arguments"]
@@ -712,6 +764,12 @@ class Agent:
         except Exception as e:  # noqa: BLE001
             return ToolResult(success=False, error=f"Tool error: {e}")
 
+    def _effective_max_tokens(self) -> int:
+        """The output token cap in effect for the configured model."""
+        return self.config.llm.max_tokens or resolve_model(
+            self.config.llm.model
+        ).max_tokens
+
     async def _fail_truncated_tool_calls(
         self, assistant: Message
     ) -> AsyncIterator[AgentEvent]:
@@ -721,11 +779,18 @@ class Agent:
         token limit, so any tool call in it may carry truncated arguments
         that still parse. None of them are safe to execute; return an error
         result for each so the model can re-issue them (pi does the same).
+        The message must name an alternative strategy: told only to
+        "re-issue", the model re-sends the same oversized arguments and
+        loops until the iteration fuse (LIM-32).
         """
         message = (
             "Tool call was not executed: the response hit the output token "
-            "limit, so its arguments may be truncated. Re-issue the tool "
-            "call with complete arguments."
+            f"limit (max_tokens={self._effective_max_tokens()}), so its "
+            "arguments may be truncated. Do NOT re-issue the same call with "
+            "the same arguments — it will be truncated again. Instead: "
+            "write large scripts or content to a file with the write tool "
+            "(in several smaller pieces if needed), then run it via bash; "
+            "or split the work into multiple smaller tool calls."
         )
         self.trace.log(
             "error",

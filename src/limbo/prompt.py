@@ -50,6 +50,14 @@ def _guidelines(registry: ToolRegistry) -> str:
     lines = ["Guidelines:"]
     if registry.get("bash") is not None:
         lines.append("- Prefer grep/find/ls tools over bash for file exploration")
+        if registry.get("write") is not None:
+            # Pre-empt long heredoc one-liners: an inline script is a single
+            # tool-call argument, so a big one can exceed the model's output
+            # token limit mid-write (LIM-32).
+            lines.append(
+                "- Write multi-line scripts to a file with write, then run "
+                "them with bash — avoid long heredoc one-liners"
+            )
     lines.append(_GUIDELINES_TAIL)
     return "\n".join(lines)
 

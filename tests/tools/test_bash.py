@@ -248,6 +248,13 @@ def test_bash_description_does_not_teach_bypasses():
     assert "not sandboxed" in description
 
 
+def test_bash_description_steers_scripts_to_write_tool():
+    """S4: the description pre-empts long heredoc one-liners."""
+    description = BashTool.description.lower()
+    assert "heredoc" in description
+    assert "write" in description
+
+
 def test_bash_custom_dangerous_patterns(workdir):
     tool = BashTool(workdir=workdir, dangerous_patterns=["reboot"])
     result = tool.execute({"command": "reboot"})

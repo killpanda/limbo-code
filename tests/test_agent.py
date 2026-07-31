@@ -1115,6 +1115,177 @@ async def test_agent_length_stop_fails_whole_batch_without_executing(
 
 
 @pytest.mark.asyncio
+async def test_agent_length_stop_message_guides_alternative_strategy(workdir):
+    """The rejection message must break the re-issue loop (S1).
+
+    "Re-issue the tool call" alone makes the model re-send the same
+    oversized arguments; the message must name the current output limit
+    and point at a strategy that does not fit one response (write the
+    script to a file, split the work).
+    """
+    cfg = Config()
+    fake_llm = FakeLLMClient([
+        [
+            ToolCallEvent(
+                id="c1",
+                name="bash",
+                arguments={"command": "python - <<'EOF'\nprint(1)\nEOF"},
+            ),
+            CompletionMeta(finish_reason="length"),
+        ],
+        [TextChunk(text="done")],
+    ])
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    events = await _collect(agent.run("go"))
+    result_events = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert len(result_events) == 1
+    err = result_events[0].result.error or ""
+    assert "Do NOT re-issue" in err
+    assert "write" in err
+    # deepseek-chat (the default model) has an 8192 output cap in the catalog.
+    assert "8192" in err
+
+
+@pytest.mark.asyncio
+async def test_agent_length_stop_loop_aborts_after_threshold(workdir):
+    """Consecutive truncated batches terminate the turn with guidance (S2).
+
+    Without a guard the model re-issues the same oversized call until the
+    max_iterations fuse (50 wasted LLM round-trips). After 3 consecutive
+    length stops the turn must break with an actionable error.
+    """
+    cfg = Config()
+
+    def batch(i: int):
+        return [
+            ToolCallEvent(
+                id=f"c{i}",
+                name="bash",
+                arguments={"command": "python - <<'EOF'\nprint(1)\nEOF"},
+            ),
+            CompletionMeta(finish_reason="length"),
+        ]
+
+    fake_llm = FakeLLMClient([batch(1), batch(2), batch(3), [TextChunk(text="unreachable")]])
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    executed = []
+
+    async def spy_execute(name, arguments):
+        executed.append(name)
+        return ToolResult(success=True, output="ok")
+
+    agent.registry.execute = spy_execute
+
+    events = await _collect(agent.run("go"))
+
+    # Nothing ever executed; the loop stopped after 3 rejections and never
+    # consumed the 4th scripted response.
+    assert executed == []
+    assert len(fake_llm.calls) == 3
+
+    # Every rejected call still got a protocol-complete tool result.
+    tool_msgs = [m for m in agent.messages if m.role == "tool"]
+    assert [m.tool_call_id for m in tool_msgs] == ["c1", "c2", "c3"]
+
+    errors = [e for e in events if isinstance(e, ErrorEvent)]
+    assert any("output token limit" in e.message for e in errors)
+    assert any("write" in e.message for e in errors)
+
+    records = read_trace(agent.trace.path)
+    assert any(
+        r.get("kind") == "length_stop_loop" for r in records if r["type"] == "error"
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_length_stop_counter_resets_after_successful_batch(workdir):
+    """A successfully executed batch resets the consecutive counter (S2)."""
+    cfg = Config()
+
+    def truncated(i: int):
+        return [
+            ToolCallEvent(id=f"t{i}", name="bash", arguments={"command": "x"}),
+            CompletionMeta(finish_reason="length"),
+        ]
+
+    fake_llm = FakeLLMClient([
+        truncated(1),
+        [ToolCallEvent(id="ok1", name="read", arguments={"path": "x.txt"})],
+        truncated(2),
+        truncated(3),
+        [TextChunk(text="done")],
+    ])
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    (workdir / "x.txt").write_text("hi")
+
+    events = await _collect(agent.run("go"))
+
+    # Two consecutive truncations after one success must NOT trip the guard;
+    # the turn completes normally.
+    assert any(isinstance(e, TextDelta) and e.text == "done" for e in events)
+    records = read_trace(agent.trace.path)
+    assert not any(
+        r.get("kind") == "length_stop_loop" for r in records if r["type"] == "error"
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_text_response_truncated_by_length_warns(workdir):
+    """A text-only response cut off by the token limit warns the user (S3)."""
+    cfg = Config()
+    fake_llm = FakeLLMClient([
+        [TextChunk(text="half an answer"), CompletionMeta(finish_reason="length")],
+    ])
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    events = await _collect(agent.run("go"))
+    assert any(isinstance(e, TextDelta) and e.text == "half an answer" for e in events)
+    errors = [e for e in events if isinstance(e, ErrorEvent)]
+    assert any("output token limit" in e.message for e in errors)
+    assert any("incomplete" in e.message for e in errors)
+
+
+@pytest.mark.asyncio
+async def test_agent_text_response_complete_no_warning(workdir):
+    """A normally finished text response emits no truncation warning (S3)."""
+    cfg = Config()
+    fake_llm = FakeLLMClient([
+        [TextChunk(text="full answer"), CompletionMeta(finish_reason="stop")],
+    ])
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    events = await _collect(agent.run("go"))
+    assert not [e for e in events if isinstance(e, ErrorEvent)]
+
+
+@pytest.mark.asyncio
 async def test_agent_same_file_write_and_edit_do_not_interleave(workdir):
     """Concurrent write+edit on the same file serialize via the mutation queue."""
     cfg = Config()
