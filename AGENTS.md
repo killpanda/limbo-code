@@ -23,6 +23,7 @@ src/limbo/
 ├── config.py         # Pydantic config: llm/ui/safety/tools/compaction/providers
 ├── models.py         # Message, Attachment, ToolResult, LLMEvent
 ├── agent.py          # Conversation loop (see below)
+├── exec.py           # `limbo exec`: headless single-turn mode for batch drivers
 ├── attachments.py    # Attachment policy: vision gate, inline vs path-reference degrade
 ├── compaction.py     # Context compaction decision/prompt logic (LIM-14)
 ├── history.py        # tool_call↔result pairing + resume repair
