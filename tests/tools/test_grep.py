@@ -58,6 +58,51 @@ def test_grep_python_fallback_respects_gitignore(workdir):
     result = tool.execute({"pattern": "def ignored"})
     assert result.success is True
     assert "ignored.py" not in result.output
+
+
+def test_grep_skips_sensitive_files(workdir):
+    """Sensitive files are excluded from search results (aligned with read)."""
+    (workdir / ".env").write_text("SECRET=topsecret\n")
+    tool = GrepTool(workdir=workdir)
+    result = tool.execute({"pattern": "SECRET"})
+    assert result.success is True
+    assert ".env" not in result.output
+    assert "topsecret" not in result.output
+
+
+def test_grep_python_fallback_skips_sensitive_files(workdir):
+    (workdir / ".env").write_text("SECRET=topsecret\n")
+    tool = GrepTool(workdir=workdir)
+    tool._find_rg = lambda: None
+    result = tool.execute({"pattern": "SECRET"})
+    assert result.success is True
+    assert "topsecret" not in result.output
+
+
+def test_grep_skips_sensitive_directory(workdir):
+    ssh_dir = workdir / ".ssh"
+    ssh_dir.mkdir()
+    (ssh_dir / "config").write_text("Host secret-host\n")
+    tool = GrepTool(workdir=workdir)
+    result = tool.execute({"pattern": "secret-host"})
+    assert result.success is True
+    assert "secret-host" not in result.output
+
+
+def test_grep_refuses_sensitive_target(workdir):
+    (workdir / ".env").write_text("SECRET=topsecret\n")
+    tool = GrepTool(workdir=workdir)
+    result = tool.execute({"pattern": "SECRET", "path": ".env"})
+    assert result.success is False
+    assert "sensitive" in result.error.lower()
+
+
+def test_grep_custom_sensitive_files(workdir):
+    (workdir / "secret.txt").write_text("SECRET=topsecret\n")
+    tool = GrepTool(workdir=workdir, sensitive_files=["secret.txt"])
+    result = tool.execute({"pattern": "SECRET"})
+    assert result.success is True
+    assert "topsecret" not in result.output
     assert "a.py" not in result.output
 
 

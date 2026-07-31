@@ -41,13 +41,10 @@ class BashTool(BaseTool):
         f"Output is truncated to the last {DEFAULT_MAX_LINES} lines or "
         f"{DEFAULT_MAX_BYTES // 1024}KB (whichever is hit first). If truncated, "
         "the full output is saved to a temp file and its path is shown. "
-        "WARNING: bash is not sandboxed and can access files outside the workdir. "
-        "Commands matching dangerous patterns (e.g. rm, git reset --hard) are "
-        "rejected outright. The filter is heuristic only: "
-        "subshells, command substitution, variable indirection, options before the command "
-        "name, and variable assignments before the command name "
-        "(e.g. 'bash -c rm -rf /', '$(rm ...)', 'git -C /foo reset --hard', "
-        "or 'VAR=1 rm -rf /') can bypass it."
+        "Note: bash is not sandboxed — it can access files outside the working "
+        "directory, and the file tools' guardrails do not apply to it. "
+        "Destructive commands are blocked; if a command you need is blocked, "
+        "ask the user to run it manually."
     )
     parameters = {
         "type": "object",
@@ -146,8 +143,16 @@ _CONTROL_OPERATOR_RE = re.compile(r"(;|&&|&|\|\||\|)")
 
 
 def _tokenize_command(command: str) -> list[str]:
-    """Split a command into tokens, treating shell control operators as separate tokens."""
-    raw_tokens = shlex.split(command)
+    """Split a command into tokens, treating shell control operators as separate tokens.
+
+    Falls back to naive whitespace splitting when ``shlex`` cannot parse the
+    command (e.g. unbalanced quotes): the filter is a best-effort heuristic
+    and must never raise on malformed input.
+    """
+    try:
+        raw_tokens = shlex.split(command)
+    except ValueError:
+        raw_tokens = command.split()
     tokens: list[str] = []
     for raw in raw_tokens:
         for part in _CONTROL_OPERATOR_RE.split(raw):
@@ -164,12 +169,12 @@ def is_dangerous(command: str, patterns: list[str]) -> bool:
     (``;``, ``&&``, ``&``, ``||``, ``|``). Multi-token patterns are matched
     against the leading tokens starting at each command position.
 
-    .. warning::
-        This check is heuristic only. It tokenizes the top-level command, so
-        subshells (``bash -c ...``), command substitution (``$(rm ...)``),
-        variable indirection, variable assignments before a command name
-        (``VAR=1 rm -rf /``), and options between the command name and the
-        matched tokens (``git -C /foo reset --hard``) can bypass it.
+    .. note::
+        This is a best-effort heuristic against accidental destruction, not
+        a security boundary. It tokenizes the top-level command, so
+        subshells, command substitution, variable indirection, and similar
+        shell constructs can bypass it. Commands that ``shlex`` cannot
+        parse fall back to whitespace tokenization instead of raising.
     """
     tokens = _tokenize_command(command)
     control_operators = {";", "&&", "&", "||", "|"}

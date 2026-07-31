@@ -8,9 +8,11 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+from limbo.config import DEFAULT_SENSITIVE_FILES
 from limbo.models import ToolResult
 from limbo.tools.base import (
     BaseTool,
+    is_sensitive_path,
     truncate_output,
 )
 from limbo.tools.ignore import GitignoreMatcher
@@ -48,6 +50,18 @@ class GrepTool(BaseTool):
         "required": ["pattern"],
     }
 
+    def __init__(
+        self,
+        workdir: Path,
+        sensitive_files: list[str] | None = None,
+        allowed_roots: set[Path] | None = None,
+    ):
+        super().__init__(workdir, allowed_roots=allowed_roots)
+        # Convenience guardrail (aligned with read/find): sensitive files
+        # are skipped so secrets don't leak into the model context by
+        # accident. Not a security boundary — bash is not covered.
+        self.sensitive_files = set(sensitive_files or DEFAULT_SENSITIVE_FILES)
+
     def run(self, arguments: dict[str, Any]) -> ToolResult:
         pattern = arguments.get("pattern", "")
         path = arguments.get("path", ".")
@@ -58,6 +72,17 @@ class GrepTool(BaseTool):
         limit = arguments.get("limit", MAX_MATCHES)
 
         target = self.resolve_existing(path)
+
+        if is_sensitive_path(target, self.sensitive_files):
+            return ToolResult(
+                success=False,
+                error=(
+                    "Refusing to search sensitive path. This is a convenience "
+                    "guardrail against accidental secret exposure, not a "
+                    "security boundary. Ask the user if access is genuinely "
+                    "needed."
+                ),
+            )
 
         rg = self._find_rg()
         if rg:
@@ -93,6 +118,11 @@ class GrepTool(BaseTool):
             cmd.extend(["-C", str(context)])
         if glob:
             cmd.extend(["-g", glob])
+        # Exclude sensitive files (same guardrail as read). ``**/name``
+        # matches at any depth including the search root; for directory
+        # names (e.g. .ssh) rg skips the whole subtree.
+        for name in sorted(self.sensitive_files):
+            cmd.extend(["-g", f"!**/{name}"])
         # Emit workdir-relative paths, consistent with the Python fallback and
         # find. A granted root outside the workdir is passed as an absolute
         # path (rg accepts both).
@@ -158,6 +188,8 @@ class GrepTool(BaseTool):
             if not self.is_within_scope(resolved):
                 continue
             if not resolved.is_file():
+                continue
+            if is_sensitive_path(resolved, self.sensitive_files):
                 continue
             try:
                 rel_str = str(resolved.relative_to(self.workdir))

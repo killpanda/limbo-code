@@ -13,6 +13,7 @@ from limbo.tools.base import (
     DEFAULT_MAX_LINES,
     BaseTool,
     ToolError,
+    is_sensitive_path,
     truncate_head,
 )
 
@@ -78,10 +79,16 @@ class ReadTool(BaseTool):
         raw_path = arguments.get("path", "")
         target = self._resolve_offload_path(raw_path) or self.resolve(raw_path)
 
-        if target.name in self.sensitive_files or any(
-            part in self.sensitive_files for part in target.parts
-        ):
-            return ToolResult(success=False, error="Refusing to read sensitive file.")
+        if is_sensitive_path(target, self.sensitive_files):
+            return ToolResult(
+                success=False,
+                error=(
+                    "Refusing to read sensitive file. This is a convenience "
+                    "guardrail against accidental secret exposure, not a "
+                    "security boundary. Ask the user if access is genuinely "
+                    "needed."
+                ),
+            )
 
         if not target.exists():
             raise ToolError(f"File not found: {raw_path}")

@@ -2,7 +2,7 @@
 
 **Limbo** is a minimal terminal AI coding agent (Python 3.11+, Textual). Users converse with an LLM in a TUI to explore, read, edit, and write code via 7 tools.
 
-**Tools execute immediately — no confirmation flow.** Guardrails: a workdir fence on file tools (+ session-scoped grants from user-mentioned paths), a sensitive-file blocklist on `read`, and a heuristic dangerous-command filter on `bash` (rejects matches outright; bypassable via subshells/variables — documented in the tool description).
+**Tools execute immediately — no confirmation flow.** Convenience guardrails (not a security boundary): a workdir scope on file tools (+ session-scoped grants from user-mentioned paths), a sensitive-file skip list shared by `read`/`grep`/`find`, and a heuristic dangerous-command filter on `bash` (best-effort, rejects matches outright; `bash` is otherwise not covered by any guardrail).
 
 ## Quick Start
 
@@ -33,7 +33,7 @@ src/limbo/
 │                     # openai_client.py, anthropic_client.py, responses_client.py, retry.py, sse.py,
 │                     # usage.py (token accounting: usage normalization + prompt-size estimation),
 │                     # scaffold.py (plumbing shared by dialect clients: credentials, retry, images)
-├── tools/            # base.py (BaseTool + fence + truncation), registry.py (dispatch, grants),
+├── tools/            # base.py (BaseTool + path guardrail + truncation), registry.py (dispatch, grants),
 │                     # mutation_queue.py (per-file locks), ignore.py (.gitignore),
 │                     # read/bash/edit/write/grep/find/ls.py
 └── ui/               # app.py + app.tcss (ALL styles here; theme vars only, no bare hex),
