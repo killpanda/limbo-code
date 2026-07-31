@@ -6,6 +6,7 @@ import json
 import logging
 import shlex
 import subprocess
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,38 @@ TESTBED = "/testbed"
 LIMBO_SRC = "/limbo-src"  # host limbo-code repo, mounted read-only
 PROMPT_FILE = "/tmp/limbo-prompt.md"
 CONTAINER_CONFIG = Path("/root/.limbo/config.toml")
+
+# uv is a static binary, independent of the container's Python — this is
+# what lets the fallback work even on Python 3.6 images, where no uv wheel
+# exists for pip to install. Downloaded once on the host; the uv data/cache
+# dirs are mounted into every container so the standalone Python 3.12 (and
+# dependency wheels) are fetched only once across the whole pilot.
+UV_HOST_DIR = Path.home() / ".cache" / "limbo-swebench"
+UV_HOST_BIN = UV_HOST_DIR / "bin" / "uv"
+UV_API_URL = "https://api.github.com/repos/astral-sh/uv/releases/latest"
+UV_ASSET_NAME = "uv-x86_64-unknown-linux-gnu.tar.gz"
+UV_CONTAINER_BIN = "/usr/local/bin/uv"
+
+_uv_download_lock = threading.Lock()
+
+
+def _uv_download_url() -> str:
+    """Resolve the exact asset URL via the GitHub API.
+
+    The releases/latest/download/ redirect intermittently 404s, so go
+    through the API (stable) and download the pinned asset URL instead.
+    """
+    import urllib.request
+
+    req = urllib.request.Request(
+        UV_API_URL, headers={"User-Agent": "limbo-swebench"}
+    )
+    with urllib.request.urlopen(req) as resp:
+        release = json.load(resp)
+    for asset in release["assets"]:
+        if asset["name"] == UV_ASSET_NAME:
+            return asset["browser_download_url"]  # type: ignore[no-any-return]
+    raise RuntimeError(f"{UV_ASSET_NAME} not found in uv release assets")
 
 
 @dataclass
@@ -103,12 +136,48 @@ def _container_python(container: str) -> tuple[int, int]:
     return tuple(int(p) for p in probe.stdout.strip().split("."))  # type: ignore[return-value]
 
 
+def _ensure_host_uv() -> Path:
+    """Download the linux/x86_64 uv binary once (containers run x86_64)."""
+    if UV_HOST_BIN.exists():
+        return UV_HOST_BIN
+    with _uv_download_lock:
+        if UV_HOST_BIN.exists():
+            return UV_HOST_BIN
+        import tarfile
+        log.info("downloading uv binary to %s ...", UV_HOST_BIN)
+        UV_HOST_BIN.parent.mkdir(parents=True, exist_ok=True)
+        tmp = UV_HOST_BIN.with_suffix(".tar.gz")
+        url = _uv_download_url()
+        try:
+            subprocess.run(
+                ["curl", "-fsSL", "--retry", "3", "--retry-all-errors",
+                 "-o", str(tmp), url],
+                check=True,
+            )
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            import urllib.request
+
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "limbo-swebench"}
+            )
+            with urllib.request.urlopen(req) as resp:
+                tmp.write_bytes(resp.read())
+        with tarfile.open(tmp) as tar:
+            member = next(m for m in tar.getmembers() if m.name.endswith("/uv"))
+            extracted = tar.extractfile(member)
+            assert extracted is not None
+            UV_HOST_BIN.write_bytes(extracted.read())
+        tmp.unlink()
+        UV_HOST_BIN.chmod(0o755)
+    return UV_HOST_BIN
+
+
 def _install_limbo(container: str) -> str:
     """Install limbo inside the container; return the python to run it with.
 
     Instance images frequently ship Python < 3.11 (the repo's historical
-    test env), too old for limbo. Fallback: install a standalone 3.12 via
-    uv into /opt/limbo-venv and use that interpreter instead.
+    test env), too old for limbo. Fallback: copy the host's uv binary in
+    and let it install a standalone 3.12 into /opt/limbo-venv.
 
     Raises RuntimeError on failure.
     """
@@ -125,11 +194,13 @@ def _install_limbo(container: str) -> str:
         python = "python3"
     else:
         log.info("python < 3.11; installing standalone 3.12 via uv")
+        _docker(
+            "cp", str(_ensure_host_uv()), f"{container}:{UV_CONTAINER_BIN}"
+        )
         install = " && ".join([
-            "python3 -m pip install --quiet uv",
-            "python3 -m uv python install --quiet 3.12",
-            "python3 -m uv venv --quiet --python 3.12 /opt/limbo-venv",
-            f"{env} python3 -m uv pip install --quiet"
+            f"{UV_CONTAINER_BIN} python install --quiet 3.12",
+            f"{UV_CONTAINER_BIN} venv --quiet --python 3.12 /opt/limbo-venv",
+            f"{env} {UV_CONTAINER_BIN} pip install --quiet"
             f" --python /opt/limbo-venv/bin/python {shlex.quote(LIMBO_SRC)}",
             "/opt/limbo-venv/bin/python -c 'import limbo'",
         ])
@@ -160,10 +231,18 @@ def run_instance(
 
     try:
         _ensure_image(image)
+        # Shared uv caches: standalone pythons and dependency wheels are
+        # downloaded once for the whole pilot, not once per container.
+        uv_data = UV_HOST_DIR / "uv-data"
+        uv_cache = UV_HOST_DIR / "uv-cache"
+        uv_data.mkdir(parents=True, exist_ok=True)
+        uv_cache.mkdir(parents=True, exist_ok=True)
         _docker(
             "run", "-d", "--rm",
             "--name", container,
             "-v", f"{config.limbo_repo.resolve()}:{LIMBO_SRC}:ro",
+            "-v", f"{uv_data}:/root/.local/share/uv",
+            "-v", f"{uv_cache}:/root/.cache/uv",
             image, "tail", "-f", "/dev/null",
         )
         try:

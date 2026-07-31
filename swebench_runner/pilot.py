@@ -124,14 +124,29 @@ def find_eval_report(run_dir: Path, instance_id: str) -> dict | None:
     return None
 
 
-def _load_done(results_path: Path) -> set[str]:
+def _load_records(results_path: Path) -> dict[str, dict]:
+    """All result records, last-wins deduped by instance id."""
     if not results_path.exists():
-        return set()
-    return {
-        json.loads(line)["instance_id"]
-        for line in results_path.read_text().splitlines()
-        if line.strip()
-    }
+        return {}
+    records: dict[str, dict] = {}
+    for line in results_path.read_text().splitlines():
+        if line.strip():
+            r = json.loads(line)
+            records[r["instance_id"]] = r
+    return records
+
+
+def _load_done(results_path: Path, retry_failed: bool = False) -> set[str]:
+    records = _load_records(results_path)
+    if retry_failed:
+        # Infra failures are runner bugs, not model outcomes: eligible
+        # for re-run once the runner is fixed.
+        return {
+            iid
+            for iid, r in records.items()
+            if r["exit_status"] != "infra_error"
+        }
+    return set(records)
 
 
 def _cleanup_stale_containers() -> None:
@@ -200,12 +215,7 @@ def _load_or_create_plan(args: argparse.Namespace) -> list[str]:
 
 
 def _print_status(run_dir: Path, instance_ids: list[str]) -> None:
-    results_path = run_dir / "results.jsonl"
-    done_records = [
-        json.loads(line)
-        for line in results_path.read_text().splitlines()
-        if line.strip()
-    ] if results_path.exists() else []
+    done_records = list(_load_records(run_dir / "results.jsonl").values())
     done = {r["instance_id"] for r in done_records}
     remaining = [i for i in instance_ids if i not in done]
     resolved = sum(1 for r in done_records if r["resolved"])
@@ -288,6 +298,12 @@ def main() -> int:
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--status", action="store_true",
                         help="print done/remaining progress and exit")
+    parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="re-run instances whose last record is infra_error "
+        "(runner-side failures, e.g. after a runner fix)",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -308,7 +324,7 @@ def main() -> int:
     _cleanup_stale_containers()
     _dedupe_predictions(args.run_dir / "predictions.jsonl")
     results_path = args.run_dir / "results.jsonl"
-    done = _load_done(results_path)
+    done = _load_done(results_path, retry_failed=args.retry_failed)
 
     instances = load_instances(args.dataset, instance_ids=plan_ids)
     todo = [i for i in instances if i["instance_id"] not in done]
@@ -339,11 +355,8 @@ def main() -> int:
                 log.exception("worker crashed: %s", futures[future]["instance_id"])
 
     # Merge with prior records for the final summary (resume case).
-    prior = [
-        json.loads(line)
-        for line in results_path.read_text().splitlines()
-        if line.strip()
-    ]
+    # Last-wins per instance: re-run records supersede earlier failures.
+    prior = list(_load_records(results_path).values())
     resolved = sum(1 for r in prior if r["resolved"])
     by_status: dict[str, int] = {}
     for r in prior:

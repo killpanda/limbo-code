@@ -84,6 +84,12 @@ def build_report(run_dir: Path) -> str:
     records = _load_jsonl(run_dir / "results.jsonl")
     if not records:
         raise SystemExit(f"no results in {run_dir}/results.jsonl")
+    # Last-wins per instance: --retry-failed re-runs append a new record
+    # that supersedes the earlier (infra_error) one.
+    deduped: dict[str, dict] = {}
+    for r in records:
+        deduped[r["instance_id"]] = r
+    records = list(deduped.values())
 
     rows = []
     for r in records:
