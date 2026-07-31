@@ -6,7 +6,9 @@ both phases are done with it. Peak disk usage is therefore roughly
 `concurrency` images (~4 GB each) instead of the whole pilot's worth.
 
 Resume: instances already present in <run-dir>/results.jsonl are skipped
-entirely (prediction + evaluation both done).
+entirely (prediction + evaluation both done). The sampled instance list is
+persisted to <run-dir>/plan.json on first run, so follow-up batches only
+need `--run-dir` to pick up exactly where the last one stopped.
 """
 
 from __future__ import annotations
@@ -114,6 +116,88 @@ def _load_done(results_path: Path) -> set[str]:
     }
 
 
+def _cleanup_stale_containers() -> None:
+    """Remove leftover agent/eval containers from an interrupted run."""
+    for prefix in ("limbo-swe-", "sweb.eval."):
+        out = _docker(
+            "ps", "-a", "--filter", f"name={prefix}",
+            "--format", "{{.Names}}", check=False,
+        )
+        for name in out.stdout.split():
+            log.info("removing stale container %s", name)
+            _docker("rm", "-f", name, check=False)
+
+
+def _dedupe_predictions(path: Path) -> None:
+    """Keep the last record per instance id.
+
+    A kill between the prediction write and the result write makes the
+    next batch re-run that instance and append a second record; the
+    official harness dislikes duplicates, so collapse them on startup.
+    """
+    if not path.exists():
+        return
+    records = [
+        json.loads(line)
+        for line in path.read_text().splitlines()
+        if line.strip()
+    ]
+    latest: dict[str, dict] = {}
+    for r in records:
+        latest[r["instance_id"]] = r
+    if len(latest) != len(records):
+        path.write_text(
+            "".join(json.dumps(r) + "\n" for r in latest.values())
+        )
+        log.warning(
+            "deduped predictions.jsonl: %d -> %d records",
+            len(records), len(latest),
+        )
+
+
+def _load_or_create_plan(args: argparse.Namespace) -> list[str]:
+    """Persist the sampled instance list so batches resume consistently."""
+    plan_path = args.run_dir / "plan.json"
+    if plan_path.exists():
+        plan = json.loads(plan_path.read_text())
+        log.info(
+            "loaded plan.json: %d instances (dataset %s)",
+            len(plan["instance_ids"]), plan["dataset"],
+        )
+        return plan["instance_ids"]
+    instances = load_instances(
+        args.dataset,
+        instance_ids=args.instance_ids,
+        count=args.count,
+        seed=args.seed,
+    )
+    plan_path.write_text(json.dumps({
+        "dataset": args.dataset,
+        "count": args.count,
+        "seed": args.seed,
+        "instance_ids": [i["instance_id"] for i in instances],
+    }, indent=2))
+    log.info("wrote plan.json: %d instances", len(instances))
+    return [i["instance_id"] for i in instances]
+
+
+def _print_status(run_dir: Path, instance_ids: list[str]) -> None:
+    results_path = run_dir / "results.jsonl"
+    done_records = [
+        json.loads(line)
+        for line in results_path.read_text().splitlines()
+        if line.strip()
+    ] if results_path.exists() else []
+    done = {r["instance_id"] for r in done_records}
+    remaining = [i for i in instance_ids if i not in done]
+    resolved = sum(1 for r in done_records if r["resolved"])
+    print(f"plan:      {len(instance_ids)} instances")
+    print(f"done:      {len(done)} (resolved {resolved})")
+    print(f"remaining: {len(remaining)}")
+    for iid in remaining:
+        print(f"  - {iid}")
+
+
 def pilot_instance(
     instance: dict,
     config: RunConfig,
@@ -184,6 +268,8 @@ def main() -> int:
     parser.add_argument("--keep-images", action="store_true",
                         help="do not delete instance images afterwards")
     parser.add_argument("--run-dir", type=Path, required=True)
+    parser.add_argument("--status", action="store_true",
+                        help="print done/remaining progress and exit")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -192,15 +278,21 @@ def main() -> int:
         stream=sys.stderr,
     )
     args.run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Batches resume from the persisted plan, not from the sampling
+    # flags, so `--count/--seed` mistakes on later runs can't swap the
+    # instance set halfway through.
+    plan_ids = _load_or_create_plan(args)
+    if args.status:
+        _print_status(args.run_dir, plan_ids)
+        return 0
+
+    _cleanup_stale_containers()
+    _dedupe_predictions(args.run_dir / "predictions.jsonl")
     results_path = args.run_dir / "results.jsonl"
     done = _load_done(results_path)
 
-    instances = load_instances(
-        args.dataset,
-        instance_ids=args.instance_ids,
-        count=args.count,
-        seed=args.seed,
-    )
+    instances = load_instances(args.dataset, instance_ids=plan_ids)
     todo = [i for i in instances if i["instance_id"] not in done]
     log.info(
         "pilot: %d instances, %d done, %d to run", len(instances), len(done), len(todo)

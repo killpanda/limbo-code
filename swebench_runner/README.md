@@ -57,9 +57,31 @@ Per instance: pull (if absent) -> agent run -> `predictions.jsonl` ->
 official eval (`logs/run_evaluation/<run>-<id>/`) -> `docker rmi`.
 Instances with an empty patch skip evaluation (`resolved=false`).
 
-Re-running with the same `--run-dir` resumes: instances present in
-`results.jsonl` are skipped. The final `summary.json` reports resolve
-rate, exit-status distribution, and empty-patch count.
+## Running in batches (resume)
+
+The first run persists the sampled instance list to `<run-dir>/plan.json`;
+**later batches only need `--run-dir`** — selection flags (`--count`,
+`--seed`, `--instance-ids`) are ignored once the plan exists, so a
+mistyped flag can't swap the instance set halfway through. Instances
+already in `results.jsonl` are skipped.
+
+```bash
+# check progress any time
+python -m swebench_runner.pilot --run-dir runs/pilot-50 --status
+
+# continue where the last batch stopped (e.g. after Ctrl+C)
+python -m swebench_runner.pilot --run-dir runs/pilot-50 \
+    --concurrency 4 --timeout 1800 --model k3
+```
+
+Startup also removes stale `limbo-swe-*`/`sweb.eval.*` containers from
+interrupted runs and dedupes `predictions.jsonl` (a kill between the
+prediction write and the result write would otherwise duplicate the
+re-run instance's record; the last record wins).
+
+The final `summary.json` reports resolve rate, exit-status distribution,
+and empty-patch count; `python -m swebench_runner.report --run-dir
+runs/pilot-50` renders `REPORT.md` with failure classification.
 
 ## Evaluate (bulk, alternative to the pilot)
 
