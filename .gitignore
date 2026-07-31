@@ -12,3 +12,8 @@ dist/
 build/
 .pi-subagents/
 snapshot_report.html
+
+# SWE-bench runner outputs
+runs/
+# swebench harness eval logs
+logs/
