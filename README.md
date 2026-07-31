@@ -7,7 +7,7 @@ A minimal terminal AI coding agent.
 Requires Python 3.11 or later.
 
 ```bash
-pip install -e .
+pip install limbo-code
 ```
 
 ## Configure
