@@ -35,6 +35,7 @@ from limbo.sessions import derive_title, export_jsonl, export_markdown, list_ses
 from limbo.skills import Skill, discover_skills
 from limbo.ui.banner import startup_art_text
 from limbo.ui.commands import SlashCommand, SlashCommandRegistry
+from limbo.ui.screens.btw import BtwScreen
 from limbo.ui.screens.game2048 import Game2048Screen
 from limbo.ui.screens.model_picker import ModelPicker
 from limbo.ui.screens.session_picker import SessionPicker
@@ -226,6 +227,15 @@ class MainScreen(Screen[None]):
                 "显示帮助",
                 allow_when_busy=True,
                 handler=lambda arg: self._show_help(),
+            )
+        )
+        self._commands.register(
+            SlashCommand(
+                "/btw",
+                "侧问：不打断当前任务的快速提问（不进会话历史）[问题]",
+                takes_args=True,
+                allow_when_busy=True,
+                handler=lambda arg: self._btw(arg),
             )
         )
         self._commands.register(
@@ -440,6 +450,26 @@ class MainScreen(Screen[None]):
 
     def action_toggle_tools(self) -> None:
         self.query_one("#chat", ChatWidget).toggle_tool_bodies()
+
+    def _btw(self, question: str) -> None:
+        """Open the /btw side-question overlay.
+
+        Works mid-turn (allow_when_busy): the query runs on a snapshot of
+        the history and the answer lives only in the overlay — the steer
+        queue and session history are never touched (see limbo.btw).
+        """
+        chat = self.query_one("#chat", ChatWidget)
+        if not question:
+            chat.add_info("用法：/btw <问题>")
+            return
+        self.app.push_screen(
+            BtwScreen(
+                question=question,
+                llm_client=self.llm_client,
+                history=list(self.agent.messages),
+                trace=self.agent.trace,
+            )
+        )
 
     def _open_game2048(self) -> None:
         """Open the 2048 modal. The agent turn (if any) keeps running."""
