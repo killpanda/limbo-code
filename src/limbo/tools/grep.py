@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-import fnmatch
-import re
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -15,7 +14,6 @@ from limbo.tools.base import (
     is_sensitive_path,
     truncate_output,
 )
-from limbo.tools.ignore import GitignoreMatcher
 
 MAX_MATCHES = 100
 
@@ -23,9 +21,8 @@ MAX_MATCHES = 100
 class GrepTool(BaseTool):
     name = "grep"
     description = (
-        "Search file contents for a pattern. Respects .gitignore (basic rules). "
-        "Install ripgrep for full gitignore, glob, and context-line support. "
-        "The Python fallback does not support `**` recursive glob patterns."
+        "Search file contents for a pattern. Requires ripgrep (rg) on PATH. "
+        "Respects .gitignore, glob filters, and context lines."
     )
     parameters = {
         "type": "object",
@@ -34,17 +31,14 @@ class GrepTool(BaseTool):
             "path": {"type": "string", "description": "Directory or file to search"},
             "glob": {
                 "type": "string",
-                "description": "Filter files by glob (Python fallback does not support `**`)",
+                "description": "Filter files by glob (e.g. '*.py', 'src/**/*.ts')",
             },
             "ignore_case": {"type": "boolean", "description": "Case-insensitive"},
             "fixed_string": {"type": "boolean", "description": "Literal string"},
             "context": {"type": "integer", "description": "Lines before/after match"},
             "limit": {
                 "type": "integer",
-                "description": (
-                    "Max matches (per file with ripgrep,"
-                    " total across files in Python fallback)"
-                ),
+                "description": "Max matches per file",
             },
         },
         "required": ["pattern"],
@@ -84,19 +78,22 @@ class GrepTool(BaseTool):
                 ),
             )
 
-        rg = self._find_rg()
-        if rg:
-            return self._run_rg(
-                rg, target, pattern, glob, ignore_case, fixed_string, context, limit
+        # ripgrep is a hard dependency (pi parity): a single implementation
+        # means one set of gitignore/glob/context semantics, no drift
+        # between a full-featured path and a degraded Python fallback.
+        rg = shutil.which("rg")
+        if rg is None:
+            return ToolResult(
+                success=False,
+                error=(
+                    "ripgrep (rg) is required for grep but was not found on "
+                    "PATH. Install it (e.g. 'brew install ripgrep' or "
+                    "'apt install ripgrep') and try again."
+                ),
             )
-        return self._run_python_regex(
-            target, pattern, glob, ignore_case, fixed_string, context, limit
+        return self._run_rg(
+            rg, target, pattern, glob, ignore_case, fixed_string, context, limit
         )
-
-    def _find_rg(self) -> str | None:
-        import shutil
-
-        return shutil.which("rg")
 
     def _run_rg(
         self,
@@ -123,9 +120,8 @@ class GrepTool(BaseTool):
         # names (e.g. .ssh) rg skips the whole subtree.
         for name in sorted(self.sensitive_files):
             cmd.extend(["-g", f"!**/{name}"])
-        # Emit workdir-relative paths, consistent with the Python fallback and
-        # find. A granted root outside the workdir is passed as an absolute
-        # path (rg accepts both).
+        # Emit workdir-relative paths, consistent with find. A granted root
+        # outside the workdir is passed as an absolute path (rg accepts both).
         try:
             rel_target = target.relative_to(self.workdir)
         except ValueError:
@@ -148,75 +144,4 @@ class GrepTool(BaseTool):
         output = proc.stdout
         output = truncate_output(output)
 
-        return ToolResult(success=True, output=output or "No matches.")
-
-    def _run_python_regex(
-        self,
-        target: Path,
-        pattern: str,
-        glob: str | None,
-        ignore_case: bool,
-        fixed_string: bool,
-        context: int,
-        limit: int,
-    ) -> ToolResult:
-        # Fallback path: supports pattern/glob/ignore_case/fixed_string/limit.
-        # Context lines are only available through ripgrep.
-        if context:
-            return ToolResult(
-                success=False,
-                error="Context lines require ripgrep. Install ripgrep or omit 'context'.",
-            )
-
-        flags = re.IGNORECASE if ignore_case else 0
-        try:
-            compiled = re.compile(
-                re.escape(pattern) if fixed_string else pattern, flags
-            )
-        except re.error as e:
-            return ToolResult(success=False, error=f"Invalid regex: {e}")
-
-        matches = []
-        matcher = GitignoreMatcher(self.workdir)
-        # ``rglob`` may traverse directory symlinks before we can filter them;
-        # we resolve and enforce the workdir boundary for each candidate.
-        files = [target] if target.is_file() else target.rglob("*")
-        count = 0
-        for f in files:
-            # Resolve symlinks and enforce the boundary before reading.
-            resolved = f.resolve()
-            if not self.is_within_scope(resolved):
-                continue
-            if not resolved.is_file():
-                continue
-            if is_sensitive_path(resolved, self.sensitive_files):
-                continue
-            try:
-                rel_str = str(resolved.relative_to(self.workdir))
-            except ValueError:
-                # Granted root outside the workdir: match by absolute path
-                # (gitignore matching only applies under the workdir).
-                rel_str = str(resolved)
-                in_workdir = False
-            else:
-                in_workdir = True
-            if in_workdir and matcher.is_ignored(rel_str):
-                continue
-            if glob is not None and not fnmatch.fnmatch(rel_str, glob):
-                continue
-            try:
-                text = resolved.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            for lineno, line in enumerate(text.splitlines(), start=1):
-                if compiled.search(line):
-                    matches.append(f"{rel_str}:{lineno}:{line}")
-                    count += 1
-                    if count >= limit:
-                        break
-            if count >= limit:
-                break
-
-        output = "\n".join(matches)
-        output = truncate_output(output)
         return ToolResult(success=True, output=output or "No matches.")

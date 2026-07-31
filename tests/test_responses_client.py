@@ -580,3 +580,47 @@ async def test_close_releases_http_client(client):
     _ = client.client
     await client.close()
     assert client._client is None
+
+
+def test_tool_message_with_image_attachment_becomes_output_parts(tmp_path):
+    import base64 as b64
+
+    from limbo.models import Attachment
+
+    image = tmp_path / "shot.png"
+    image.write_bytes(b"png-bytes")
+    message = Message(
+        role="tool",
+        content="Read image file [image/png]",
+        tool_call_id="c1",
+        attachments=[
+            Attachment(
+                kind="image", name="shot.png", path=str(image), mime="image/png"
+            )
+        ],
+    )
+    _, items = _messages_to_responses([message])
+    item = items[0]
+    assert item["type"] == "function_call_output"
+    assert item["call_id"] == "c1"
+    output = item["output"]
+    assert isinstance(output, list)
+    assert output[0]["type"] == "input_image"
+    expected = b64.standard_b64encode(b"png-bytes").decode("ascii")
+    assert output[0]["image_url"] == f"data:image/png;base64,{expected}"
+    assert output[1] == {"type": "input_text", "text": "Read image file [image/png]"}
+
+
+def test_tool_message_missing_image_stays_plain_string(tmp_path):
+    from limbo.models import Attachment
+
+    message = Message(
+        role="tool",
+        content="Read image file [image/png]",
+        tool_call_id="c1",
+        attachments=[
+            Attachment(kind="image", name="gone.png", path=str(tmp_path / "gone.png"))
+        ],
+    )
+    _, items = _messages_to_responses([message])
+    assert items[0]["output"] == "Read image file [image/png]"

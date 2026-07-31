@@ -655,3 +655,40 @@ def test_message_to_openai_missing_image_stays_plain(tmp_path):
 def test_message_to_openai_without_attachments_unchanged():
     result = _message_to_openai(Message(role="user", content="hi"))
     assert result["content"] == "hi"
+
+
+def test_message_to_openai_tool_message_with_image_attachment(tmp_path):
+    """Tool results can carry image payloads (e.g. read on an image file)."""
+    image = tmp_path / "shot.png"
+    image.write_bytes(b"png-bytes")
+    message = Message(
+        role="tool",
+        content="Read image file [image/png]",
+        tool_call_id="c1",
+        attachments=[
+            Attachment(
+                kind="image", name="shot.png", path=str(image), mime="image/png"
+            )
+        ],
+    )
+    result = _message_to_openai(message)
+    assert result["tool_call_id"] == "c1"
+    content = result["content"]
+    assert isinstance(content, list)
+    assert content[0]["type"] == "image_url"
+    expected = base64.standard_b64encode(b"png-bytes").decode("ascii")
+    assert content[0]["image_url"]["url"] == f"data:image/png;base64,{expected}"
+    assert content[1] == {"type": "text", "text": "Read image file [image/png]"}
+
+
+def test_message_to_openai_tool_message_missing_image_stays_plain(tmp_path):
+    message = Message(
+        role="tool",
+        content="Read image file [image/png]",
+        tool_call_id="c1",
+        attachments=[
+            Attachment(kind="image", name="gone.png", path=str(tmp_path / "gone.png"))
+        ],
+    )
+    result = _message_to_openai(message)
+    assert result["content"] == "Read image file [image/png]"

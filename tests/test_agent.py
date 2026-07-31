@@ -2036,3 +2036,60 @@ async def test_cancel_all_before_turn_end_breaks_normally(workdir):
     assert not any(
         m.role == "user" and "撤回" in (m.content or "") for m in agent.messages
     )
+
+
+PNG_BYTES = b"\x89PNG\r\n\x1a\n" + b"\x00\x00\x00\rIHDR" + b"\x00" * 32
+
+
+@pytest.mark.asyncio
+async def test_agent_records_image_tool_result_with_attachments(workdir):
+    """Vision model: read on an image file stores attachments on the tool message."""
+    (workdir / "pic.png").write_bytes(PNG_BYTES)
+    cfg = Config()
+    fake_llm = FakeLLMClient([
+        [ToolCallEvent(id="c1", name="read", arguments={"path": "pic.png"})],
+        [TextChunk(text="done")],
+    ])
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    agent._vision = True
+
+    await _collect(agent.run("look at pic.png"))
+
+    tool_message = next(
+        m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c1"
+    )
+    assert tool_message.attachments is not None
+    assert tool_message.attachments[0].kind == "image"
+    assert tool_message.attachments[0].mime == "image/png"
+
+
+@pytest.mark.asyncio
+async def test_agent_degrades_image_tool_result_without_vision(workdir):
+    """Non-vision model: attachments degrade to a path-reference note."""
+    (workdir / "pic.png").write_bytes(PNG_BYTES)
+    cfg = Config()
+    fake_llm = FakeLLMClient([
+        [ToolCallEvent(id="c1", name="read", arguments={"path": "pic.png"})],
+        [TextChunk(text="done")],
+    ])
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    agent._vision = False
+
+    await _collect(agent.run("look at pic.png"))
+
+    tool_message = next(
+        m for m in agent.messages if m.role == "tool" and m.tool_call_id == "c1"
+    )
+    assert tool_message.attachments is None
+    assert "pic.png" in (tool_message.content or "")
+    assert "不支持图像" in (tool_message.content or "")

@@ -604,3 +604,41 @@ def test_user_message_missing_image_falls_back_to_plain_text(tmp_path):
 def test_user_message_without_attachments_stays_plain_string():
     _, converted = _messages_to_anthropic([Message(role="user", content="hi")])
     assert converted[0]["content"] == "hi"
+
+
+def test_tool_message_with_image_attachment_becomes_tool_result_blocks(tmp_path):
+    image = tmp_path / "shot.png"
+    image.write_bytes(b"png-bytes")
+    message = Message(
+        role="tool",
+        content="Read image file [image/png]",
+        tool_call_id="c1",
+        attachments=[
+            Attachment(
+                kind="image", name="shot.png", path=str(image), mime="image/png"
+            )
+        ],
+    )
+    _, converted = _messages_to_anthropic([message])
+    block = converted[0]["content"][0]
+    assert block["type"] == "tool_result"
+    assert block["tool_use_id"] == "c1"
+    content = block["content"]
+    assert isinstance(content, list)
+    assert content[0]["type"] == "image"
+    assert content[0]["source"]["media_type"] == "image/png"
+    assert content[1] == {"type": "text", "text": "Read image file [image/png]"}
+
+
+def test_tool_message_missing_image_stays_plain_string(tmp_path):
+    message = Message(
+        role="tool",
+        content="Read image file [image/png]",
+        tool_call_id="c1",
+        attachments=[
+            Attachment(kind="image", name="gone.png", path=str(tmp_path / "gone.png"))
+        ],
+    )
+    _, converted = _messages_to_anthropic([message])
+    block = converted[0]["content"][0]
+    assert block["content"] == "Read image file [image/png]"

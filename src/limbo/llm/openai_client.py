@@ -264,10 +264,11 @@ def _message_to_openai(
     m: dict[str, Any] = {"role": message.role}
     # OpenAI requires `content` on assistant and tool messages, even when empty.
     m["content"] = message.content or ""
-    if message.role == "user" and message.attachments:
-        # Multimodal user message: image_url blocks + text. Missing files
+    if message.role in ("user", "tool") and message.attachments:
+        # Multimodal message: image_url blocks + text. Missing files
         # (expired session attachments) are skipped; if none survive, the
-        # message stays a plain string.
+        # message stays a plain string. Tool messages carry images when a
+        # tool returned an image payload (e.g. read on an image file).
         blocks: list[dict[str, Any]] = []
         for attachment in message.attachments:
             if attachment.kind != "image":

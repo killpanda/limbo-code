@@ -241,3 +241,69 @@ def test_sensitive_blacklist_wins_over_granted_root(workdir, tmp_path):
     result = tool.execute({"path": str(outside / ".env")})
     assert result.success is False
     assert "sensitive" in result.error
+
+
+# -- image attachments (pi parity) ----------------------------------------------
+
+PNG_BYTES = (
+    b"\x89PNG\r\n\x1a\n"
+    b"\x00\x00\x00\rIHDR"
+    b"\x00" * 32
+)
+JPEG_BYTES = b"\xff\xd8\xff\xe0" + b"\x00" * 32
+GIF_BYTES = b"GIF89a" + b"\x00" * 32
+WEBP_BYTES = b"RIFF" + b"\x00" * 4 + b"WEBP" + b"\x00" * 32
+BMP_BYTES = b"BM" + b"\x00" * 32
+
+
+@pytest.mark.parametrize(
+    "data, mime",
+    [
+        (PNG_BYTES, "image/png"),
+        (JPEG_BYTES, "image/jpeg"),
+        (GIF_BYTES, "image/gif"),
+        (WEBP_BYTES, "image/webp"),
+        (BMP_BYTES, "image/bmp"),
+    ],
+)
+def test_read_image_returns_attachment(workdir, data, mime):
+    (workdir / "pic.bin").write_bytes(data)
+    tool = ReadTool(workdir=workdir)
+    result = tool.execute({"path": "pic.bin"})
+    assert result.success is True
+    assert mime in result.output
+    assert result.attachments is not None
+    assert len(result.attachments) == 1
+    attachment = result.attachments[0]
+    assert attachment.kind == "image"
+    assert attachment.mime == mime
+    assert attachment.path.endswith("pic.bin")
+
+
+def test_read_image_sniffed_by_magic_bytes_not_extension(workdir):
+    (workdir / "photo.txt").write_bytes(PNG_BYTES)
+    tool = ReadTool(workdir=workdir)
+    result = tool.execute({"path": "photo.txt"})
+    assert result.success is True
+    assert result.attachments is not None
+    assert result.attachments[0].mime == "image/png"
+
+
+def test_read_oversized_image_rejected(workdir):
+    big = workdir / "big.png"
+    with big.open("wb") as f:
+        f.write(PNG_BYTES)
+        f.seek(20 * 1024 * 1024 + 1)
+        f.write(b"\x00")
+    tool = ReadTool(workdir=workdir)
+    result = tool.execute({"path": "big.png"})
+    assert result.success is False
+    assert "too large" in result.error.lower()
+
+
+def test_read_text_file_has_no_attachments(workdir):
+    (workdir / "a.txt").write_text("hello\n")
+    tool = ReadTool(workdir=workdir)
+    result = tool.execute({"path": "a.txt"})
+    assert result.success is True
+    assert result.attachments is None

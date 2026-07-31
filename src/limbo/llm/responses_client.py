@@ -316,32 +316,52 @@ def _messages_to_responses(
                 {
                     "type": "function_call_output",
                     "call_id": message.tool_call_id or "",
-                    "output": message.content or "",
+                    "output": _tool_output(message),
                 }
             )
 
     return "\n\n".join(system_parts), items
 
 
-def _user_content(message: Message) -> list[dict[str, Any]]:
+def _image_blocks(message: Message) -> list[dict[str, Any]]:
+    """input_image blocks for a message's attachments.
+
+    Missing files (expired session attachments) are skipped.
+    """
     blocks: list[dict[str, Any]] = []
-    if message.attachments:
-        # Multimodal user message: input_image blocks + text. Missing files
-        # (expired session attachments) are skipped.
-        for attachment in message.attachments:
-            if attachment.kind != "image":
-                continue
-            encoded = encode_image_data(attachment)
-            if encoded is None:
-                continue
-            data, mime = encoded
-            blocks.append(
-                {
-                    "type": "input_image",
-                    "detail": "auto",
-                    "image_url": f"data:{mime};base64,{data}",
-                }
-            )
+    for attachment in message.attachments or []:
+        if attachment.kind != "image":
+            continue
+        encoded = encode_image_data(attachment)
+        if encoded is None:
+            continue
+        data, mime = encoded
+        blocks.append(
+            {
+                "type": "input_image",
+                "detail": "auto",
+                "image_url": f"data:{mime};base64,{data}",
+            }
+        )
+    return blocks
+
+
+def _user_content(message: Message) -> list[dict[str, Any]]:
+    blocks = _image_blocks(message)
+    blocks.append({"type": "input_text", "text": message.content or ""})
+    return blocks
+
+
+def _tool_output(message: Message) -> str | list[dict[str, Any]]:
+    """function_call_output payload: plain string, or content parts.
+
+    A tool result carries attachments when a tool returned an image
+    payload (e.g. read on an image file); the Responses API accepts
+    input_image parts inside function call output.
+    """
+    blocks = _image_blocks(message)
+    if not blocks:
+        return message.content or ""
     blocks.append({"type": "input_text", "text": message.content or ""})
     return blocks
 

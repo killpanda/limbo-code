@@ -1,3 +1,4 @@
+import shutil
 import tempfile
 from pathlib import Path
 
@@ -52,12 +53,43 @@ def test_grep_rejects_absolute_path_outside_workdir(workdir):
     assert "outside" in result.error.lower()
 
 
-def test_grep_python_fallback_respects_gitignore(workdir):
+def test_grep_requires_ripgrep(workdir, monkeypatch):
+    """ripgrep is a hard dependency: no PATH rg means an actionable error."""
+    monkeypatch.setattr(shutil, "which", lambda name: None)
     tool = GrepTool(workdir=workdir)
-    tool._find_rg = lambda: None
-    result = tool.execute({"pattern": "def ignored"})
+    result = tool.execute({"pattern": "def foo"})
+    assert result.success is False
+    assert "ripgrep" in result.error.lower()
+
+
+def test_grep_supports_context(workdir):
+    if not shutil.which("rg"):
+        pytest.skip("ripgrep not installed")
+    tool = GrepTool(workdir=workdir)
+    result = tool.execute({"pattern": "def foo", "context": 1})
     assert result.success is True
-    assert "ignored.py" not in result.output
+    assert "pass" in result.output
+
+
+def test_grep_uses_glob(workdir):
+    if not shutil.which("rg"):
+        pytest.skip("ripgrep not installed")
+    tool = GrepTool(workdir=workdir)
+    result = tool.execute({"pattern": "def ", "glob": "a.py"})
+    assert result.success is True
+    assert "a.py" in result.output
+    assert "b.py" not in result.output
+
+
+def test_grep_limit_is_per_file(workdir):
+    if not shutil.which("rg"):
+        pytest.skip("ripgrep not installed")
+    tool = GrepTool(workdir=workdir)
+    result = tool.execute({"pattern": "def ", "limit": 1})
+    assert result.success is True
+    # rg --max-count is per file: both files match once.
+    assert "a.py" in result.output
+    assert "b.py" in result.output
 
 
 def test_grep_skips_sensitive_files(workdir):
@@ -67,15 +99,6 @@ def test_grep_skips_sensitive_files(workdir):
     result = tool.execute({"pattern": "SECRET"})
     assert result.success is True
     assert ".env" not in result.output
-    assert "topsecret" not in result.output
-
-
-def test_grep_python_fallback_skips_sensitive_files(workdir):
-    (workdir / ".env").write_text("SECRET=topsecret\n")
-    tool = GrepTool(workdir=workdir)
-    tool._find_rg = lambda: None
-    result = tool.execute({"pattern": "SECRET"})
-    assert result.success is True
     assert "topsecret" not in result.output
 
 
@@ -106,56 +129,6 @@ def test_grep_custom_sensitive_files(workdir):
     assert "a.py" not in result.output
 
 
-def test_grep_python_fallback_searches_directory(workdir):
-    tool = GrepTool(workdir=workdir)
-    tool._find_rg = lambda: None
-    result = tool.execute({"pattern": "def foo"})
-    assert result.success is True
-    assert "a.py" in result.output
-
-
-def test_grep_python_fallback_does_not_follow_symlinks_outside_workdir(workdir):
-    outside = workdir.parent / "outside_secret.txt"
-    outside.write_text("SECRET_OUTSIDE_WORKDIR=1\n")
-    (workdir / "escape_link").symlink_to(outside)
-    tool = GrepTool(workdir=workdir)
-    tool._find_rg = lambda: None
-    result = tool.execute({"pattern": "SECRET_OUTSIDE_WORKDIR"})
-    assert result.success is True
-    assert "SECRET_OUTSIDE_WORKDIR" not in result.output
-
-
-def test_grep_python_fallback_uses_glob(workdir):
-    tool = GrepTool(workdir=workdir)
-    tool._find_rg = lambda: None
-    result = tool.execute({"pattern": "def ", "glob": "*.py"})
-    assert result.success is True
-    assert "a.py" in result.output
-    assert "b.py" in result.output
-
-    result = tool.execute({"pattern": "def ", "glob": "a.py"})
-    assert result.success is True
-    assert "a.py" in result.output
-    assert "b.py" not in result.output
-
-
-def test_grep_python_fallback_rejects_context(workdir):
-    tool = GrepTool(workdir=workdir)
-    tool._find_rg = lambda: None
-    result = tool.execute({"pattern": "def foo", "context": 2})
-    assert result.success is False
-    assert "ripgrep" in result.error.lower()
-
-
-def test_grep_python_fallback_limit_is_global(workdir):
-    tool = GrepTool(workdir=workdir)
-    tool._find_rg = lambda: None
-    result = tool.execute({"pattern": "def ", "limit": 1})
-    assert result.success is True
-    # Only one match total should be returned, even though both files match.
-    assert len(result.output.splitlines()) == 1
-
-
 def test_grep_broken_symlink_search_path_returns_invalid_path(workdir):
     link = workdir / "broken_link"
     try:
@@ -164,15 +137,13 @@ def test_grep_broken_symlink_search_path_returns_invalid_path(workdir):
         pytest.skip("Symlinks not supported on this platform")
 
     tool = GrepTool(workdir=workdir)
-    tool._find_rg = lambda: None
     result = tool.execute({"pattern": "foo", "path": "broken_link"})
     assert result.success is False
     assert "invalid path" in result.error.lower()
 
 
 def test_grep_ripgrep_uses_relative_paths(workdir):
-    rg = GrepTool(workdir=workdir)._find_rg()
-    if not rg:
+    if not shutil.which("rg"):
         pytest.skip("ripgrep not installed")
 
     tool = GrepTool(workdir=workdir)

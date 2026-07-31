@@ -661,9 +661,34 @@ class Agent:
         # Record results in assistant source order after the batch completes.
         for tc in tool_calls:
             result = results[tc["id"]]
-            self._history.record_result(
-                tc["id"], result.output or result.error or ""
-            )
+            content, attachments = self._gate_tool_attachments(result)
+            self._history.record_result(tc["id"], content, attachments)
+
+    def _gate_tool_attachments(
+        self, result: ToolResult
+    ) -> tuple[str, list[Attachment] | None]:
+        """Apply the vision gate to tool-result attachments.
+
+        Mirrors the user-attachment policy (limbo.attachments): image
+        payloads reach the model only when it supports vision; otherwise
+        they degrade to a path-reference note in the text content so the
+        model knows the file exists and where it is. Nothing is silently
+        dropped.
+        """
+        content = result.output or result.error or ""
+        images = [
+            a for a in (result.attachments or []) if a.kind == "image"
+        ]
+        if not images:
+            return content, None
+        if self._vision:
+            return content, result.attachments
+        notes = "\n".join(
+            f"[图片 {a.name} 位于 {a.path}；当前模型不支持图像输入，无法直接查看]"
+            for a in images
+        )
+        content = f"{content}\n{notes}" if content else notes
+        return content, None
 
     async def _execute_tool_safe(
         self,
