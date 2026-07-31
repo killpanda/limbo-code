@@ -6,7 +6,7 @@ Owns the invariant that keeps the OpenAI API happy: every assistant
 
 from __future__ import annotations
 
-from limbo.models import Message
+from limbo.models import Attachment, Message
 
 INTERRUPTED_CONTENT = "[session restored: tool call interrupted]"
 
@@ -17,15 +17,32 @@ class ToolHistory:
     def __init__(self, messages: list[Message]):
         self.messages = messages
 
-    def record_result(self, tool_call_id: str, content: str) -> None:
-        """Replace the existing result for a call, or append a new one."""
+    def record_result(
+        self,
+        tool_call_id: str,
+        content: str,
+        attachments: list[Attachment] | None = None,
+    ) -> None:
+        """Replace the existing result for a call, or append a new one.
+
+        ``attachments`` carries image payloads from tools (e.g. read on an
+        image file); they are stored on the tool message and replayed as
+        multimodal blocks by the clients, same as user-message attachments.
+        """
         for idx, msg in enumerate(self.messages):
             if msg.role == "tool" and msg.tool_call_id == tool_call_id:
-                self.messages[idx] = msg.model_copy(update={"content": content})
+                self.messages[idx] = msg.model_copy(
+                    update={"content": content, "attachments": attachments}
+                )
                 break
         else:
             self.messages.append(
-                Message(role="tool", content=content, tool_call_id=tool_call_id)
+                Message(
+                    role="tool",
+                    content=content,
+                    tool_call_id=tool_call_id,
+                    attachments=attachments,
+                )
             )
 
 

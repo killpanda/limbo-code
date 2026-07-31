@@ -132,10 +132,11 @@ class OpenAICompatibleClient:
     ) -> AsyncIterator[LLMEvent]:
         """One streaming attempt: build the request and yield its events."""
         include_reasoning = self.spec.requires_reasoning_content
-        request_messages = [
-            _message_to_openai(m, include_reasoning=include_reasoning)
-            for m in messages
-        ]
+        request_messages = _messages_to_openai(
+            messages,
+            include_reasoning=include_reasoning,
+            vision=self.spec.vision,
+        )
         kwargs: dict[str, Any] = {
             "model": self.config.llm.model,
             "messages": request_messages,
@@ -256,6 +257,83 @@ class OpenAICompatibleClient:
 def _is_stream_options_error(error: BadRequestError) -> bool:
     message = str(error).lower()
     return "stream_options" in message or "include_usage" in message
+
+
+def _messages_to_openai(
+    messages: list[Message], *, include_reasoning: bool = False, vision: bool = True
+) -> list[dict[str, Any]]:
+    """Convert internal messages to chat-completions params, pi-style.
+
+    The chat completions API rejects ``image_url`` parts in tool messages,
+    so tool results stay text-only; images a tool returned (e.g. read on
+    an image file) are collected across each consecutive run of tool
+    messages and appended as ONE synthetic user message afterwards
+    (``"Attached image(s) from tool result:"`` + image_url blocks), the
+    same shape pi uses. Images are dropped entirely when the current
+    model lacks vision (possible after a mid-session /model switch).
+    """
+    params: list[dict[str, Any]] = []
+    pending_images: list[dict[str, Any]] = []
+
+    def flush_images() -> None:
+        if pending_images:
+            params.append(
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "Attached image(s) from tool result:",
+                        },
+                        *pending_images,
+                    ],
+                }
+            )
+            pending_images.clear()
+
+    for message in messages:
+        if message.role == "tool":
+            params.append(
+                _tool_message_to_openai(message, pending_images, vision=vision)
+            )
+            continue
+        flush_images()
+        params.append(
+            _message_to_openai(message, include_reasoning=include_reasoning)
+        )
+    flush_images()
+    return params
+
+
+def _tool_message_to_openai(
+    message: Message, images_out: list[dict[str, Any]], *, vision: bool
+) -> dict[str, Any]:
+    """Text-only tool message; its image blocks are collected into ``images_out``."""
+    has_images = False
+    for attachment in message.attachments or []:
+        if attachment.kind != "image":
+            continue
+        encoded = encode_image_data(attachment) if vision else None
+        if encoded is None:
+            continue
+        has_images = True
+        data, mime = encoded
+        images_out.append(
+            {
+                "type": "image_url",
+                "image_url": {"url": f"data:{mime};base64,{data}"},
+            }
+        )
+    content = message.content or ""
+    if not content:
+        # Placeholders keep the API contract (non-empty tool content) even
+        # for image-only or empty results.
+        content = "(see attached image)" if has_images else "(no tool output)"
+    return {
+        "role": "tool",
+        "content": content,
+        "tool_call_id": message.tool_call_id or "",
+    }
 
 
 def _message_to_openai(

@@ -25,7 +25,7 @@ _BASE_INTRO = (
 
 _GUIDELINES_TAIL = (
     "- Use read to examine files before editing\n"
-    "- Use edit for precise changes (old_text must match exactly)\n"
+    "- Use edit for precise changes (edits[].old_text must match exactly)\n"
     "- Use write only for new files or complete rewrites\n"
     "- Be concise in your responses\n"
     "- Show file paths clearly when working with files"

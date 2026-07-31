@@ -9,7 +9,11 @@ from httpx import Response
 from openai import BadRequestError, RateLimitError
 
 from limbo.config import Config, ProviderOverride
-from limbo.llm.openai_client import OpenAICompatibleClient, _message_to_openai
+from limbo.llm.openai_client import (
+    OpenAICompatibleClient,
+    _message_to_openai,
+    _messages_to_openai,
+)
 from limbo.models import (
     Attachment,
     CompletionMeta,
@@ -655,3 +659,97 @@ def test_message_to_openai_missing_image_stays_plain(tmp_path):
 def test_message_to_openai_without_attachments_unchanged():
     result = _message_to_openai(Message(role="user", content="hi"))
     assert result["content"] == "hi"
+
+
+def test_messages_to_openai_tool_result_images_become_synthetic_user(tmp_path):
+    """Tool results stay text-only; their images are appended as ONE
+    synthetic user message after a run of tool messages (pi parity — the
+    chat completions API rejects image parts in tool messages)."""
+    image = tmp_path / "shot.png"
+    image.write_bytes(b"png-bytes")
+    attachment = Attachment(
+        kind="image", name="shot.png", path=str(image), mime="image/png"
+    )
+    messages = [
+        Message(
+            role="tool",
+            content="Read image file [image/png]",
+            tool_call_id="c1",
+            attachments=[attachment],
+        ),
+        Message(
+            role="tool",
+            content="",
+            tool_call_id="c2",
+            attachments=[attachment],
+        ),
+        Message(role="user", content="next"),
+    ]
+    result = _messages_to_openai(messages)
+
+    # Tool messages are text-only; the empty one gets the placeholder.
+    assert result[0] == {
+        "role": "tool",
+        "content": "Read image file [image/png]",
+        "tool_call_id": "c1",
+    }
+    assert result[1] == {
+        "role": "tool",
+        "content": "(see attached image)",
+        "tool_call_id": "c2",
+    }
+    # Both images are grouped into ONE synthetic user message.
+    synthetic = result[2]
+    assert synthetic["role"] == "user"
+    assert synthetic["content"][0] == {
+        "type": "text",
+        "text": "Attached image(s) from tool result:",
+    }
+    image_blocks = [b for b in synthetic["content"] if b["type"] == "image_url"]
+    assert len(image_blocks) == 2
+    expected = base64.standard_b64encode(b"png-bytes").decode("ascii")
+    assert image_blocks[0]["image_url"]["url"] == f"data:image/png;base64,{expected}"
+    assert result[3]["role"] == "user"
+
+
+def test_messages_to_openai_tool_images_dropped_without_vision(tmp_path):
+    """A mid-session /model switch to a non-vision model drops the images."""
+    image = tmp_path / "shot.png"
+    image.write_bytes(b"png-bytes")
+    message = Message(
+        role="tool",
+        content="Read image file [image/png]",
+        tool_call_id="c1",
+        attachments=[
+            Attachment(
+                kind="image", name="shot.png", path=str(image), mime="image/png"
+            )
+        ],
+    )
+    result = _messages_to_openai([message], vision=False)
+    assert result == [
+        {
+            "role": "tool",
+            "content": "Read image file [image/png]",
+            "tool_call_id": "c1",
+        }
+    ]
+
+
+def test_messages_to_openai_tool_missing_image_stays_plain(tmp_path):
+    message = Message(
+        role="tool",
+        content="Read image file [image/png]",
+        tool_call_id="c1",
+        attachments=[
+            Attachment(kind="image", name="gone.png", path=str(tmp_path / "gone.png"))
+        ],
+    )
+    result = _messages_to_openai([message])
+    assert result == [
+        {
+            "role": "tool",
+            "content": "Read image file [image/png]",
+            "tool_call_id": "c1",
+        }
+    ]

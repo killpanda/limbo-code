@@ -1,5 +1,6 @@
 import re
 import tempfile
+import time
 from pathlib import Path
 
 import pytest
@@ -52,9 +53,41 @@ def test_bash_timeout(workdir):
     assert "timed out" in result.error.lower()
 
 
-def test_bash_timeout_is_capped(workdir):
+def test_bash_timeout_returns_partial_output(workdir):
     tool = BashTool(workdir=workdir)
-    # A huge requested timeout should be capped so the command returns quickly.
+    result = tool.execute({"command": "echo before-sleep && sleep 5", "timeout": 0.2})
+    assert result.success is False
+    assert "timed out" in result.error.lower()
+    assert "before-sleep" in result.output
+
+
+def test_bash_timeout_kills_process_tree(workdir):
+    """A timed-out command's whole tree is killed (pi's killProcessTree).
+
+    With a detached grandchild that keeps the pipe open, a plain
+    ``proc.kill()`` would leave the reader threads blocked on the pipe
+    and the call hanging; killing the process group tears it all down.
+    """
+    tool = BashTool(workdir=workdir)
+    start = time.monotonic()
+    result = tool.execute({"command": "sleep 60 & sleep 60", "timeout": 0.2})
+    elapsed = time.monotonic() - start
+    assert result.success is False
+    assert "timed out" in result.error.lower()
+    assert elapsed < 10
+
+
+def test_bash_no_default_timeout(workdir):
+    """Without an explicit timeout a command runs to completion."""
+    tool = BashTool(workdir=workdir)
+    result = tool.execute({"command": "sleep 1 && echo done"})
+    assert result.success is True
+    assert "done" in result.output
+
+
+def test_bash_accepts_large_timeout(workdir):
+    """No hardcoded cap: huge timeouts are honored, not clamped."""
+    tool = BashTool(workdir=workdir)
     result = tool.execute({"command": "echo ok", "timeout": 1_000_000})
     assert result.success is True
     assert result.output.strip() == "ok"
@@ -63,6 +96,14 @@ def test_bash_timeout_is_capped(workdir):
 def test_bash_rejects_invalid_timeout(workdir):
     tool = BashTool(workdir=workdir)
     result = tool.execute({"command": "echo ok", "timeout": "not-a-number"})
+    assert result.success is False
+    assert "invalid timeout" in result.error.lower()
+
+
+@pytest.mark.parametrize("bad", [0, -1, float("inf"), float("nan")])
+def test_bash_rejects_non_positive_or_non_finite_timeout(workdir, bad):
+    tool = BashTool(workdir=workdir)
+    result = tool.execute({"command": "echo ok", "timeout": bad})
     assert result.success is False
     assert "invalid timeout" in result.error.lower()
 

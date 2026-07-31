@@ -274,7 +274,7 @@ def _messages_to_anthropic(
             block = {
                 "type": "tool_result",
                 "tool_use_id": message.tool_call_id or "",
-                "content": message.content or "",
+                "content": _tool_result_content(message),
             }
             previous = converted[-1] if converted else None
             if previous is not None and previous.get("role") == "user" and isinstance(
@@ -287,8 +287,8 @@ def _messages_to_anthropic(
     return "\n\n".join(system_parts), converted
 
 
-def _user_content(message: Message) -> str | list[dict[str, Any]]:
-    """User content: plain string, or image blocks + text when attached.
+def _image_blocks(message: Message) -> list[dict[str, Any]]:
+    """Anthropic image blocks for a message's attachments.
 
     Missing image files (expired session attachments) are skipped so a
     restored session can still be replayed; the marker text in ``content``
@@ -312,6 +312,26 @@ def _user_content(message: Message) -> str | list[dict[str, Any]]:
                 },
             }
         )
+    return blocks
+
+
+def _user_content(message: Message) -> str | list[dict[str, Any]]:
+    """User content: plain string, or image blocks + text when attached."""
+    blocks = _image_blocks(message)
+    if not blocks:
+        return message.content or ""
+    blocks.append({"type": "text", "text": message.content or ""})
+    return blocks
+
+
+def _tool_result_content(message: Message) -> str | list[dict[str, Any]]:
+    """tool_result content: plain string, or image blocks + text.
+
+    A tool result carries attachments when a tool returned an image
+    payload (e.g. read on an image file); Anthropic accepts image blocks
+    inside tool_result content.
+    """
+    blocks = _image_blocks(message)
     if not blocks:
         return message.content or ""
     blocks.append({"type": "text", "text": message.content or ""})

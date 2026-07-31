@@ -25,6 +25,10 @@ jobs:
         with:
           python-version: ${{ matrix.python-version }}
 
+      # grep hard-depends on ripgrep (no Python fallback since LIM-24).
+      - name: Install ripgrep
+        run: sudo apt-get install -y ripgrep
+
       # Install from uv.lock so CI renders snapshots with the exact same
       # textual/rich/syrupy versions the baselines were generated with.
       - name: Install dependencies

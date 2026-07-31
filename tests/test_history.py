@@ -65,3 +65,30 @@ def test_repair_keeps_complete_histories_untouched():
     restored = repair(messages)
 
     assert [m.model_dump() for m in restored] == [m.model_dump() for m in messages]
+
+
+def test_record_result_stores_attachments():
+    from limbo.models import Attachment
+
+    messages = [Message(role="user", content="hi")]
+    history = ToolHistory(messages)
+    attachment = Attachment(kind="image", name="p.png", path="/tmp/p.png", mime="image/png")
+
+    history.record_result("c1", "Read image file [image/png]", [attachment])
+
+    assert messages[-1].role == "tool"
+    assert messages[-1].attachments == [attachment]
+
+
+def test_record_result_replaces_attachments():
+    from limbo.models import Attachment
+
+    history = ToolHistory(
+        [Message(role="tool", content="old", tool_call_id="c1")]
+    )
+    attachment = Attachment(kind="image", name="p.png", path="/tmp/p.png")
+
+    history.record_result("c1", "new", [attachment])
+
+    assert history.messages[0].content == "new"
+    assert history.messages[0].attachments == [attachment]

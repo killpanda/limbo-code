@@ -28,7 +28,25 @@ def test_ls_limit(workdir):
     tool = LsTool(workdir=workdir)
     result = tool.execute({"path": ".", "limit": 2})
     lines = [line for line in result.output.splitlines() if line.strip()]
-    assert len(lines) == 2
+    assert len(lines) == 3  # 2 entries + truncation notice
+
+
+def test_ls_truncation_notice(workdir):
+    """Hitting the entry limit must never be silent (pi parity)."""
+    tool = LsTool(workdir=workdir)
+    result = tool.execute({"path": ".", "limit": 2})
+    assert "Showing 2 of 3 entries" in result.output
+
+    result = tool.execute({"path": ".", "limit": 10})
+    assert "Showing" not in result.output
+
+
+def test_ls_empty_directory(workdir):
+    (workdir / "empty").mkdir()
+    tool = LsTool(workdir=workdir)
+    result = tool.execute({"path": "empty"})
+    assert result.success is True
+    assert result.output == "(empty directory)"
 
 
 def test_ls_rejects_paths_outside_workdir(workdir):

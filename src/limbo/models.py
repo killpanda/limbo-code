@@ -65,11 +65,19 @@ class ToolCall(BaseModel):
 
 
 class ToolResult(BaseModel):
-    """Result of executing a tool."""
+    """Result of executing a tool.
+
+    ``attachments`` carries image payloads a tool wants the model to see
+    (e.g. read returning an image file). Only the path is persisted —
+    never bytes — same policy as user-message attachments, so restored
+    sessions may reference files that no longer exist; clients skip
+    missing images when replaying.
+    """
 
     success: bool
     output: str | None = None
     error: str | None = None
+    attachments: list[Attachment] | None = None
 
 
 @dataclass(frozen=True)
