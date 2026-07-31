@@ -225,10 +225,7 @@ def build_initial_prompt(state: GoalState) -> str:
     if state.verify_command:
         gate = f"验收标准将由命令 `{state.verify_command}` 判定（退出码 0 = 通过）。"
     else:
-        gate = (
-            "尚未设置验收命令（可用 /goal verify <命令> 设置）；"
-            "本轮结束后不会自动验收续轮。"
-        )
+        gate = "尚未设置验收命令；本轮结束后不会自动验收续轮。"
     return (
         "🎯 Goal 模式已启动\n\n"
         f"目标：{state.text}\n\n"
