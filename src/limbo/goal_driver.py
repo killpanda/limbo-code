@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from limbo.agent import Agent, AgentEvent, SteerEvent
+from limbo.config import DEFAULT_DANGEROUS_COMMANDS
 from limbo.goal import (
     STATUS_ACTIVE,
     STATUS_CLEARED,
@@ -98,7 +99,12 @@ class GoalDriver:
         self._workdir = workdir
         self._max_rounds = max_rounds
         self._verify_timeout_ms = verify_timeout_ms
-        self._dangerous_patterns = list(dangerous_patterns or [])
+        # None falls back to the same default posture as the bash tool.
+        self._dangerous_patterns = (
+            list(dangerous_patterns)
+            if dangerous_patterns is not None
+            else list(DEFAULT_DANGEROUS_COMMANDS)
+        )
         self._running = False
         self._verify_task: asyncio.Task[VerifyResult] | None = None
         # Adopt the configured budget onto a restored goal (D4/D6: silent

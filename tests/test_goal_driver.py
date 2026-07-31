@@ -233,6 +233,17 @@ async def test_second_run_rejected_while_running(workdir):
         driver.run("second")
 
 
+def test_dangerous_patterns_default_fallback(workdir):
+    from limbo.config import DEFAULT_DANGEROUS_COMMANDS
+
+    driver = make_driver(workdir, [])
+    assert driver._dangerous_patterns == DEFAULT_DANGEROUS_COMMANDS
+    explicit = GoalDriver(
+        make_agent(workdir, []), workdir, dangerous_patterns=["rm"]
+    )
+    assert explicit._dangerous_patterns == ["rm"]
+
+
 # -- steer priority + E1 (FakeAgent for timing control) ------------------------
 
 

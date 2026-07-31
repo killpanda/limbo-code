@@ -10,12 +10,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import BaseModel
 
+from limbo.config import DEFAULT_DANGEROUS_COMMANDS
 from limbo.tools.base import truncate_tail
 from limbo.tools.bash import is_dangerous
 
@@ -139,9 +141,17 @@ async def run_verify(
     GoalDriver.cancel_verify) kills the process tree and re-raises so the
     caller can turn it into a ``cancelled`` result.
     """
-    if is_dangerous(command, list(dangerous_patterns or [])):
+    patterns = (
+        list(dangerous_patterns)
+        if dangerous_patterns is not None
+        else list(DEFAULT_DANGEROUS_COMMANDS)
+    )
+    if is_dangerous(command, patterns):
         return VerifyResult(exit_code=None, refused=True)
-    proc = await asyncio.create_subprocess_shell(
+    # Same shell dialect as the bash tool: bash -c, own process group.
+    proc = await asyncio.create_subprocess_exec(
+        shutil.which("bash") or "/bin/bash",
+        "-c",
         command,
         cwd=str(workdir),
         stdout=asyncio.subprocess.PIPE,

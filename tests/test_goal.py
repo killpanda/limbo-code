@@ -176,6 +176,16 @@ async def test_run_verify_dangerous_refused(workdir):
 
 
 @pytest.mark.asyncio
+async def test_run_verify_dangerous_default_fallback(workdir):
+    # No explicit patterns: falls back to DEFAULT_DANGEROUS_COMMANDS (the
+    # same posture as the bash tool), which includes "rm".
+    result = await run_verify("rm -rf /", workdir)
+    assert result.refused
+    result = await run_verify("git reset --hard", workdir)
+    assert result.refused
+
+
+@pytest.mark.asyncio
 async def test_run_verify_cancellation_kills_process(workdir):
     sleep = "timeout" if sys.platform == "win32" else "sleep"
     task = asyncio.create_task(run_verify(f"{sleep} 30", workdir))
