@@ -52,6 +52,24 @@ def test_bash_guideline_present_when_bash_enabled(tmp_path, monkeypatch):
     assert "over bash" in prompt
 
 
+def test_script_to_file_guideline_present_when_bash_and_write_enabled(
+    tmp_path, monkeypatch
+):
+    """S4: steer the model away from long heredoc one-liners up front."""
+    monkeypatch.setattr("limbo.prompt.discover_skills", lambda workdir: [])
+    prompt = build_system_prompt(_registry(tmp_path), tmp_path)
+    assert "heredoc" in prompt.lower()
+
+
+def test_script_to_file_guideline_absent_without_bash(tmp_path, monkeypatch):
+    """The heredoc guidance is pointless when bash is not registered."""
+    monkeypatch.setattr("limbo.prompt.discover_skills", lambda workdir: [])
+    config = Config()
+    config.tools.bash_enabled = False
+    prompt = build_system_prompt(_registry(tmp_path, config), tmp_path)
+    assert "heredoc" not in prompt.lower()
+
+
 def test_wraps_agents_md_in_xml_boundary(tmp_path, monkeypatch):
     monkeypatch.setattr("limbo.prompt.discover_skills", lambda workdir: [])
     (tmp_path / "AGENTS.md").write_text("# Project rules\n")

@@ -107,7 +107,7 @@ append-only，崩溃/打断最多丢失写入中的一条）。`/export` 默认�
 | `llm_response` | `duration`、`ttft`、`finish_reason`、`usage`（原始用量，含 provider 缓存字段）、`cached_tokens`（归一化缓存命中）、content/reasoning 长度、tool_calls 摘要 |
 | `llm_error` | `exception_type`、`error`、`traceback` |
 | `tool_call` / `tool_result` | `id`、`name`、`arguments`、`success`、`output`/`error`、耗时；崩溃时带 `exception_type` + `traceback` |
-| `error` | `kind`（如 max_iterations）、`message` |
+| `error` | `kind`（如 max_iterations / length_stop / length_stop_loop）、`message` |
 | `turn_end` | `iterations`、`duration`、`status`（completed） |
 | `session_save_error` | `error` |
 

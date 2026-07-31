@@ -194,7 +194,10 @@ class BashTool(BaseTool):
         "Note: bash is not sandboxed — it can access files outside the working "
         "directory, and the file tools' guardrails do not apply to it. "
         "Destructive commands are blocked; if a command you need is blocked, "
-        "ask the user to run it manually."
+        "ask the user to run it manually. "
+        "For multi-line scripts, write the script to a file with the write "
+        "tool and execute that file (e.g. python script.py) instead of using "
+        "heredocs."
     )
     parameters = {
         "type": "object",
