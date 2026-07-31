@@ -21,6 +21,7 @@ from typing import Any
 from pydantic import BaseModel, Field
 
 from limbo.compaction import is_summary_message, make_summary_message
+from limbo.goal import GoalState
 from limbo.models import Message
 from limbo.trace import read_trace
 
@@ -57,6 +58,8 @@ class SessionMeta(BaseModel):
     # Session-scoped granted roots beyond the workdir (implicit user
     # grants); restored on resume so the fence stays consistent.
     allowed_roots: list[str] = Field(default_factory=list)
+    # Active/finished closed-loop goal (LIM-40); restored on resume (D4/D6).
+    goal: GoalState | None = None
     # Populated by list/load; not written to disk.
     path: Path | None = None
 

@@ -29,6 +29,8 @@ src/limbo/
 ├── model_switch.py   # /model domain logic: validate, swap client, persist (UI is an adapter)
 ├── prompt.py         # System-prompt assembly (tools section derived from the registry)
 ├── steer.py          # Mid-turn steer queue (LIM-20): queueing semantics, cancel boundary
+├── goal.py           # /goal closed-loop state machine, prompt templates, verify executor (LIM-40)
+├── goal_driver.py    # /goal orchestrator (frontend-agnostic, non-UI): turn → verify → next round
 ├── sessions.py       # Session JSONL save/load/list/export
 ├── trace.py          # Append-only JSONL run log (sessions/traces/)
 ├── skills.py         # SKILL.md discovery (user + project dirs)
@@ -65,6 +67,7 @@ Providers/models live in `llm/catalog.py`; unknown models get generic OpenAI-com
              # max_tokens, thinking_effort, max_retries, timeout, ...
 [tools]      # bash_enabled = true, parallel = true
 [compaction] # enabled, reserve_tokens = 16384, keep_recent_tokens = 20000
+[goal]       # max_rounds = 10, verify_timeout_ms = 600000
 [safety]     # dangerous_commands, sensitive_files, auto_grant_user_paths
 [ui]         # theme, show_banner
 [providers.<id>]  # base_url / api_key / api_key_env / headers
@@ -76,7 +79,9 @@ Skills: `~/.limbo/skills/<name>/SKILL.md` (user) and `<workdir>/.agents/skills/<
 
 ## UI
 
-Single column: status bar (state/elapsed/tokens/model/workdir/queued) → scrolling chat flow (user `❯`, streaming Markdown, tool cards, errors) → input box (Enter submits, Shift+Enter newline, paste markers, `ctrl+v` image attach) → hint line. Slash commands: `/sessions /new /export /compact /model /help /2048` + skill commands. After palette changes run `python scripts/check_contrast.py` (≥ 4.5:1).
+Single column: status bar (state/elapsed/tokens/model/workdir/queued + rainbow 🎯GOAL badge while a goal loop runs) → scrolling chat flow (user `❯`, streaming Markdown, tool cards, errors) → input box (Enter submits, Shift+Enter newline, paste markers, `ctrl+v` image attach) → hint line. Slash commands: `/sessions /new /export /compact /model /help /2048 /goal` + skill commands. After palette changes run `python scripts/check_contrast.py` (≥ 4.5:1).
+
+`/goal <text>` starts closed-loop mode (LIM-40): `GoalDriver` (non-UI, shared by any frontend) runs each round as a complete `Agent.run()` turn, then executes the session's verify command (`/goal verify <cmd>`); exit 0 ends the loop, otherwise the failure output is fed back verbatim into the next round until `max_rounds`, when a no-tool wrap-up turn summarizes and any user message resumes with a fresh budget. Goal state persists on `SessionMeta.goal`. Esc during verify cancels the subprocess.
 
 ## Key Decisions
 

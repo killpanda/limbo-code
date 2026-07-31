@@ -190,12 +190,21 @@ class CompactionSettings(BaseModel):
         return value
 
 
+class GoalSettings(BaseModel):
+    """[goal] section: closed-loop /goal mode (LIM-40)."""
+
+    # Max verify attempts before the loop stops with a wrap-up summary.
+    max_rounds: int = 10
+    verify_timeout_ms: int = 600_000
+
+
 class Config(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
     safety: SafetyConfig = Field(default_factory=SafetyConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     compaction: CompactionSettings = Field(default_factory=CompactionSettings)
+    goal: GoalSettings = Field(default_factory=GoalSettings)
     # [providers.<id>] per-provider overrides, keyed by catalog provider id
     # (e.g. [providers.glm], [providers.codex]).
     providers: dict[str, ProviderOverride] = Field(default_factory=dict)

@@ -11,7 +11,6 @@ from textual.widgets import Static
 
 from limbo.agent import (
     Agent,
-    AgentEvent,
     CompactionEvent,
     ErrorEvent,
     SteerEvent,
@@ -23,6 +22,23 @@ from limbo.agent import (
 )
 from limbo.compaction import is_summary_message
 from limbo.config import Config
+from limbo.goal import (
+    STATUS_ACTIVE,
+    GoalClear,
+    GoalQuery,
+    GoalVerify,
+    build_initial_prompt,
+    parse_goal_args,
+)
+from limbo.goal_driver import (
+    DriverEvent,
+    GoalDriver,
+    GoalExhausted,
+    GoalPassed,
+    GoalResumed,
+    GoalVerifyResultEvent,
+    GoalVerifyStarted,
+)
 from limbo.llm.client import LLMClient
 from limbo.llm.factory import create_llm_client
 from limbo.model_switch import (
@@ -33,6 +49,7 @@ from limbo.model_switch import (
 from limbo.models import Attachment
 from limbo.sessions import derive_title, export_jsonl, export_markdown, list_sessions
 from limbo.skills import Skill, discover_skills
+from limbo.tools.bash import is_dangerous
 from limbo.ui.banner import startup_art_text
 from limbo.ui.commands import SlashCommand, SlashCommandRegistry
 from limbo.ui.screens.btw import BtwScreen
@@ -70,11 +87,32 @@ class MainScreen(Screen[None]):
         self.llm_client = llm_client or create_llm_client(self.config)
         self.session_dir = session_dir or Path.home() / ".limbo" / "sessions"
         self.agent = self._new_agent(resume=resume)
+        self.driver = self._new_driver(self.agent)
         self._slash_menu_open = False
-        # Busy while a turn OR a /compact worker owns the agent history.
-        self._agent_busy = False
+        # Busy while a /compact worker owns the agent history; turn-level
+        # busy is owned by the goal driver (see _agent_busy).
+        self._compact_busy = False
         self._commands = SlashCommandRegistry()
         self._register_builtin_commands()
+
+    @property
+    def _agent_busy(self) -> bool:
+        """Busy while a driver run OR a /compact worker owns the history.
+
+        Turn-level single-flight lives in ``GoalDriver.running`` (eagerly
+        set when ``driver.run()`` is called); /compact sets its own flag
+        because it bypasses the driver.
+        """
+        return self._compact_busy or self.driver.running
+
+    def _new_driver(self, agent: Agent) -> GoalDriver:
+        return GoalDriver(
+            agent,
+            self.workdir,
+            max_rounds=self.config.goal.max_rounds,
+            verify_timeout_ms=self.config.goal.verify_timeout_ms,
+            dangerous_patterns=self.config.safety.dangerous_commands,
+        )
 
     def _new_agent(self, resume: Path | None = None) -> Agent:
         return Agent(
@@ -112,6 +150,7 @@ class MainScreen(Screen[None]):
             chat.add_info(
                 f"已恢复会话 {meta.id} · {meta.title or '(无标题)'}"
             )
+        self._refresh_goal_indicator()  # D6: silent resume, badge only
         self.query_one("#input", InputWidget).focus()
 
     # -- slash command menu ---------------------------------------------------
@@ -189,6 +228,81 @@ class MainScreen(Screen[None]):
 
     # -- slash commands ---------------------------------------------------------
 
+    # -- /goal: closed-loop goal mode (LIM-40) -------------------------------
+
+    def _goal(self, arg: str) -> None:
+        chat = self.query_one("#chat", ChatWidget)
+        command = parse_goal_args(arg)
+        if isinstance(command, GoalQuery):
+            state = self.driver.status()
+            if state is None or state.status == "cleared":
+                chat.add_info(
+                    "当前没有 goal。用法：/goal <目标> · "
+                    "/goal verify <验收命令> · /goal clear"
+                )
+            else:
+                chat.add_info(
+                    f"🎯 Goal（{state.status} · 已验收 "
+                    f"{state.rounds_completed}/{state.max_rounds} 轮）\n"
+                    f"目标：{state.text}\n"
+                    f"验收命令：{state.verify_command or '（未设置）'}"
+                )
+            return
+        if isinstance(command, GoalClear):
+            if self.driver.status() is None:
+                chat.add_info("当前没有 goal")
+                return
+            self.driver.clear()
+            suffix = "（当前轮跑完后停止续轮）" if self.driver.running else ""
+            chat.add_info(f"已退出 goal 模式{suffix}")
+            self._refresh_goal_indicator()
+            return
+        if isinstance(command, GoalVerify):
+            state = self.driver.status()
+            if state is None or state.status == "cleared":
+                chat.add_info("请先 /goal <目标> 设定目标")
+                return
+            if not command.command:
+                chat.add_info("用法：/goal verify <验收命令>")
+                return
+            if is_dangerous(
+                command.command, self.config.safety.dangerous_commands
+            ):
+                chat.add_error(
+                    f"验收命令命中危险命令过滤，已拒绝：{command.command}"
+                )
+                return
+            self.driver.set_verify(command.command)
+            chat.add_info(f"验收命令已设置（轮次重置）：{command.command}")
+            self._refresh_goal_indicator()
+            return
+        # GoalSet: starting a new goal is a history-shaping action, so it
+        # follows the same busy rule as other rewriting commands (LIM-20).
+        if self._agent_busy:
+            chat.add_info("当前任务进行中，请等待完成后再设定 /goal")
+            return
+        state = self.driver.set_goal(command.text)
+        chat.add_user_message(f"/goal {command.text}")
+        self._refresh_goal_indicator()
+        if not state.verify_command:
+            chat.add_info(
+                "提示：尚未设置验收命令，本轮结束后不会自动验收续轮；"
+                "用 /goal verify <命令> 设置"
+            )
+        self.run_worker(self._handle_turn(build_initial_prompt(state)))
+
+    def _refresh_goal_indicator(self) -> None:
+        """Sync the status-bar badge with driver state (rainbow = running)."""
+        statusbar = self.query_one("#statusbar", StatusBar)
+        state = self.driver.status()
+        if state is not None and state.status == STATUS_ACTIVE:
+            statusbar.set_goal(
+                (state.rounds_completed, state.max_rounds),
+                running=self.driver.running,
+            )
+        else:
+            statusbar.set_goal(None)
+
     def _register_builtin_commands(self) -> None:
         self._commands.register(
             SlashCommand(
@@ -246,6 +360,17 @@ class MainScreen(Screen[None]):
                 handler=lambda arg: self._open_game2048(),
             )
         )
+        self._commands.register(
+            SlashCommand(
+                "/goal",
+                "闭环目标模式：/goal <目标> · /goal verify <验收命令> · /goal clear",
+                takes_args=True,
+                # Query/clear must work mid-turn; the set variant re-checks
+                # busy inside the handler.
+                allow_when_busy=True,
+                handler=lambda arg: self._goal(arg),
+            )
+        )
 
     def _handle_command(self, text: str) -> None:
         chat = self.query_one("#chat", ChatWidget)
@@ -288,13 +413,13 @@ class MainScreen(Screen[None]):
         # seconds, and a concurrent turn or second /compact would race
         # compact()'s wholesale history rewrite and silently drop messages.
         input_widget.disabled = True
-        self._agent_busy = True
+        self._compact_busy = True
         statusbar.set_state("compacting…", "thinking")
         try:
             async for event in self.agent.compact(trigger="manual"):
                 await self._process_agent_event(event)
         finally:
-            self._agent_busy = False
+            self._compact_busy = False
             input_widget.disabled = False
             input_widget.focus()
             statusbar.set_state("idle")
@@ -400,6 +525,7 @@ class MainScreen(Screen[None]):
         chat = self.query_one("#chat", ChatWidget)
         self.agent.close()  # release the old session's trace file handle
         self.agent = self._new_agent(resume=path)
+        self.driver = self._new_driver(self.agent)
         chat.clear()
         self._render_history()
         meta = self.agent.session_meta
@@ -555,7 +681,13 @@ class MainScreen(Screen[None]):
         self._update_queue_status()
 
     def cancel_latest_queued(self) -> None:
-        """Esc with no menu open: cancel the newest queued steer message."""
+        """Esc with no menu open: cancel verify first, then the newest
+        queued steer message (LIM-40: during the verify window Esc routes
+        to the verify subprocess, not the steer queue)."""
+        if self.driver.verifying:
+            if self.driver.cancel_verify():
+                self.query_one("#chat", ChatWidget).add_info("已取消验收命令")
+            return
         item_id = self.agent.cancel_latest_steer()
         if item_id is None:
             return
@@ -579,11 +711,15 @@ class MainScreen(Screen[None]):
         input_widget = self.query_one("#input", InputWidget)
         statusbar = self.query_one("#statusbar", StatusBar)
         # The input stays enabled during the turn (RFC LIM-20): submissions
-        # go to the steer queue instead of being blocked.
-        self._agent_busy = True
+        # go to the steer queue instead of being blocked. Single-flight is
+        # owned by the goal driver (``running`` is set eagerly on call).
         statusbar.set_state("thinking…", "thinking")
+        # driver.run() sets ``running`` eagerly at call time, so the badge
+        # refresh below already sees the loop as executing (rainbow on).
+        events = self.driver.run(user_input, attachments)
+        self._refresh_goal_indicator()
         try:
-            async for event in self.agent.run(user_input, attachments):
+            async for event in events:
                 await self._process_agent_event(event)
         finally:
             chat = self.query_one("#chat", ChatWidget)
@@ -603,14 +739,14 @@ class MainScreen(Screen[None]):
                 self._update_queue_status()
                 self.run_worker(self._handle_turn(joined, followup_attachments))
                 return
-            self._agent_busy = False
             self._update_queue_status()
             # Disabling the input mid-turn moves focus away; give it back so
             # the user can keep typing without clicking.
             input_widget.focus()
             statusbar.set_state("idle")
+            self._refresh_goal_indicator()
 
-    async def _process_agent_event(self, event: AgentEvent) -> None:
+    async def _process_agent_event(self, event: DriverEvent) -> None:
         chat = self.query_one("#chat", ChatWidget)
         statusbar = self.query_one("#statusbar", StatusBar)
 
@@ -636,6 +772,40 @@ class MainScreen(Screen[None]):
         elif isinstance(event, SteerEvent):
             chat.mark_steer_delivered(event.id)
             self._update_queue_status()
+        elif isinstance(event, GoalVerifyStarted):
+            chat.add_info(
+                f"🔍 第 {event.round}/{event.max_rounds} 轮验收：`{event.command}`"
+            )
+            statusbar.set_state("verifying…", "tool")
+        elif isinstance(event, GoalVerifyResultEvent):
+            vresult = event.result
+            if vresult.refused:
+                chat.add_error("验收命令命中危险命令过滤，闭环暂停（goal 保持 active）")
+            elif vresult.cancelled:
+                chat.add_info("验收已取消，闭环暂停（goal 保持 active）")
+            elif vresult.timed_out:
+                chat.add_error("验收命令执行超时，将带入下一轮处理")
+            elif vresult.exit_code == 0:
+                chat.add_info("✅ 验收命令退出码 0")
+            else:
+                chat.add_error(
+                    f"❌ 第 {event.round} 轮验收未通过（退出码 "
+                    f"{vresult.exit_code}），失败输出将原样注入下一轮"
+                )
+            statusbar.set_state("thinking…", "thinking")
+            self._refresh_goal_indicator()
+        elif isinstance(event, GoalPassed):
+            chat.add_info(f"✅ 目标达成（共 {event.rounds} 轮验收）")
+            self._refresh_goal_indicator()
+        elif isinstance(event, GoalExhausted):
+            chat.add_info(
+                f"⚠️ 已达最大轮次（{event.rounds} 轮）：发送任意消息带新预算继续，"
+                "/goal clear 退出"
+            )
+            self._refresh_goal_indicator()
+        elif isinstance(event, GoalResumed):
+            chat.add_info(f"🎯 恢复 goal 闭环，预算已重置（{event.max_rounds} 轮）")
+            self._refresh_goal_indicator()
         elif isinstance(event, ToolCallRequest):
             chat.add_tool_card(event.id, event.name, event.arguments)
             statusbar.set_state(f"running {event.name}…", "tool")

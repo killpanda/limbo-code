@@ -67,7 +67,7 @@ async def test_compact_rejected_while_turn_is_running(tmp_path):
         screen = pilot.app.screen_stack[-1]
         chat = screen.query_one("#chat", ChatWidget)
 
-        screen._agent_busy = True  # simulate an in-flight turn
+        screen.driver._running = True  # simulate an in-flight turn (driver owns single-flight)
         before = list(screen.agent.messages)
         screen._handle_command("/compact")
         await pilot.pause()
