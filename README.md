@@ -232,15 +232,25 @@ bash_enabled = false
 
 ## Development
 
-Run tests:
+Set up the environment (dev tools are a PEP 735 dependency group, so plain
+`uv sync` installs pytest/ruff/mypy — no `--extra` flag):
 
 ```bash
-pytest tests/ -v
+uv sync
 ```
 
-Run linting and type checks:
+Run everything (sync + tests + lint + type check) with one command:
 
 ```bash
-ruff check src tests
-mypy src
+make check
+```
+
+Or run the pieces individually. Always use `python -m pytest`: `uv run pytest`
+silently falls through to a global pytest on PATH when the venv lacks pytest,
+which can run the suite against the wrong source tree.
+
+```bash
+uv run python -m pytest tests/ -v   # tests
+uv run ruff check src tests         # lint
+uv run mypy src                     # type check
 ```

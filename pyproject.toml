@@ -16,7 +16,11 @@ dependencies = [
     "pygments>=2.17",
 ]
 
-[project.optional-dependencies]
+[dependency-groups]
+# Dev tools live in a PEP 735 dependency group (not an extra) so `uv sync`
+# installs them by default — no `--extra`/`--group` flag needed. Always run
+# tests via `uv run python -m pytest` so a missing venv fails loudly instead
+# of silently falling through to a global pytest on PATH.
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",

@@ -31,10 +31,18 @@ jobs:
 
       # Install from uv.lock so CI renders snapshots with the exact same
       # textual/rich/syrupy versions the baselines were generated with.
+      # Dev tools (pytest/ruff/mypy) are a PEP 735 dependency group and are
+      # installed by default — no --extra flag.
       - name: Install dependencies
-        run: uv sync --frozen --extra dev
+        run: uv sync --frozen
         env:
           UV_PYTHON: ${{ matrix.python-version }}
 
       - name: Run tests
         run: uv run python -m pytest -v
+
+      - name: Lint
+        run: uv run ruff check src tests
+
+      - name: Type check
+        run: uv run mypy src
