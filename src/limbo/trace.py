@@ -51,8 +51,6 @@ class TraceLogger:
 
     def log(self, event_type: str, **fields: Any) -> None:
         """Append one event record. Never raises."""
-        if self._closed:
-            return
         record = {"ts": _utc_now_iso(), "type": event_type, **fields}
         try:
             line = json.dumps(record, ensure_ascii=False, default=str)
@@ -68,6 +66,10 @@ class TraceLogger:
             )
         try:
             with self._lock:
+                # Checked under the lock: a concurrent close() must never leave
+                # us writing to an already-closed handle.
+                if self._closed:
+                    return
                 self._file.write(line + "\n")
                 self._file.flush()
         except OSError as e:
