@@ -148,7 +148,10 @@ class GoalDriver:
         return state
 
     def set_verify(self, command: str) -> GoalState | None:
-        """Set/replace the verify command; a fresh gate resets the budget."""
+        """Set/replace the verify command; a fresh gate resets the budget.
+
+        Called by the frontend after the user confirms a model proposal
+        (or, in a headless frontend, programmatically)."""
         state = self.status()
         if state is None or state.status == STATUS_CLEARED:
             return None
@@ -160,7 +163,6 @@ class GoalDriver:
             }
         )
         self._save_state(state)
-        self._agent.trace.log("goal_verify_set", command=command)
         return state
 
     def clear(self) -> None:

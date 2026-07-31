@@ -13,6 +13,7 @@ from limbo.goal import VerifyResult
 from limbo.models import TextChunk
 from limbo.ui.app import LimboApp
 from limbo.ui.screens.main import MainScreen
+from limbo.ui.screens.verify_picker import VerifyPicker
 from limbo.ui.widgets.chat import ChatWidget
 from limbo.ui.widgets.input import InputWidget
 from limbo.ui.widgets.status_bar import StatusBar
@@ -52,6 +53,22 @@ def get_screen(pilot) -> MainScreen:
     return pilot.app.screen_stack[-1]
 
 
+async def wait_picker(pilot, attempts: int = 200) -> None:
+    for _ in range(attempts):
+        await pilot.pause()
+        if pilot.app.screen_stack and isinstance(pilot.app.screen_stack[-1], VerifyPicker):
+            return
+    raise AssertionError("timed out waiting for VerifyPicker")
+
+
+async def wait_main(pilot, attempts: int = 200) -> None:
+    for _ in range(attempts):
+        await pilot.pause()
+        if isinstance(pilot.app.screen_stack[-1], MainScreen):
+            return
+    raise AssertionError("timed out waiting for MainScreen")
+
+
 async def wait_until(pilot, predicate, attempts: int = 200) -> None:
     for _ in range(attempts):
         await pilot.pause()
@@ -82,10 +99,15 @@ async def test_goal_query_without_goal(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_goal_set_starts_turn_and_shows_badge(tmp_path, monkeypatch):
-    gate = asyncio.Event()
+async def test_goal_proposal_accept_starts_closed_loop(tmp_path, monkeypatch):
+    """M2 flow: /goal → proposal round → picker pops → accept → closed loop."""
     client = GatedClient()
-    client.add([TextChunk(text="working on it")], gate=gate)
+    client.add([TextChunk(
+        text="仓库是 unittest 布局。\n<verify_proposal>\n"
+        "<command>python3 -m unittest discover -v</command>\n"
+        "<rationale>unittest 布局</rationale>\n</verify_proposal>"
+    )])
+    client.add([TextChunk(text="fixing")])
     app = make_app(tmp_path, client)
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -100,22 +122,89 @@ async def test_goal_set_starts_turn_and_shows_badge(tmp_path, monkeypatch):
         monkeypatch.setattr(goal_driver_module, "run_verify", passing)
 
         await type_and_submit(pilot, input_widget, "/goal 补齐测试")
-        await wait_until(pilot, lambda: len(client.calls) == 1)
-        # Set the verify command while the first turn is still running.
-        await type_and_submit(pilot, input_widget, "/goal verify pytest -x")
-        gate.set()
+        # Proposal round ends → confirmation picker pops.
+        await wait_picker(pilot)
+        await pilot.press("enter")  # accept the first candidate
         await wait_until(pilot, lambda: "目标达成" in chat.transcript_text())
 
         transcript = chat.transcript_text()
         assert "❯ /goal 补齐测试" in transcript
-        assert "验收命令已设置" in transcript
+        assert "验收方式已确认：python3 -m unittest discover -v" in transcript
         assert "第 1/10 轮验收" in transcript
-        # Goal passed → badge hidden, state persisted.
-        assert statusbar._goal is None
+        assert statusbar._goal is None  # passed → badge hidden
         state = screen.driver.status()
         assert state is not None and state.status == "passed"
-        # The first turn's prompt is the goal block, not the raw command.
-        assert "🎯 Goal 模式已启动" in client.calls[0][-1].content
+        assert state.verify_command == "python3 -m unittest discover -v"
+        # First turn is the proposal round (proposer prompt, not work prompt).
+        assert "先不要动手" in client.calls[0][-1].content
+
+
+@pytest.mark.asyncio
+async def test_goal_proposal_skip_keeps_single_turn(tmp_path, monkeypatch):
+    client = GatedClient()
+    client.add([TextChunk(
+        text="<verify_proposal><command>pytest -x</command></verify_proposal>"
+    )])
+    app = make_app(tmp_path, client)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = get_screen(pilot)
+        chat = screen.query_one("#chat", ChatWidget)
+        input_widget = screen.query_one("#input", InputWidget)
+
+        await type_and_submit(pilot, input_widget, "/goal 补齐测试")
+        await wait_picker(pilot)
+        await pilot.press("escape")  # skip
+        await wait_until(
+            pilot, lambda: "已跳过自动验收" in chat.transcript_text()
+        )
+        state = screen.driver.status()
+        assert state is not None and state.verify_command == ""
+        assert len(client.calls) == 1  # no work turn started
+
+
+@pytest.mark.asyncio
+async def test_goal_proposal_none_means_no_gate(tmp_path):
+    client = GatedClient()
+    client.add([TextChunk(
+        text="<verify_proposal><none/></verify_proposal> 这是审美类目标"
+    )])
+    app = make_app(tmp_path, client)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = get_screen(pilot)
+        chat = screen.query_one("#chat", ChatWidget)
+        input_widget = screen.query_one("#input", InputWidget)
+
+        await type_and_submit(pilot, input_widget, "/goal 让代码更优雅")
+        await wait_until(
+            pilot,
+            lambda: "没有客观可判定的验收方式" in chat.transcript_text(),
+        )
+        # No picker popped for an explicit <none/>.
+        assert isinstance(pilot.app.screen_stack[-1], MainScreen)
+
+
+@pytest.mark.asyncio
+async def test_goal_proposal_dangerous_command_rejected(tmp_path, monkeypatch):
+    client = GatedClient()
+    client.add([TextChunk(
+        text="<verify_proposal><command>rm -rf build/</command></verify_proposal>"
+    )])
+    app = make_app(tmp_path, client)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = get_screen(pilot)
+        chat = screen.query_one("#chat", ChatWidget)
+        input_widget = screen.query_one("#input", InputWidget)
+
+        await type_and_submit(pilot, input_widget, "/goal 清理构建产物")
+        await wait_picker(pilot)
+        await pilot.press("enter")  # accept the dangerous proposal
+        await wait_until(pilot, lambda: "危险命令" in chat.transcript_text())
+        state = screen.driver.status()
+        assert state is not None and state.verify_command == ""
+        assert len(client.calls) == 1  # rejected, no work turn
 
 
 @pytest.mark.asyncio
@@ -171,8 +260,13 @@ async def test_goal_set_rejected_while_busy(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_goal_verify_rejects_dangerous_command(tmp_path):
+async def test_goal_edit_mode_accepts_edited_command(tmp_path, monkeypatch):
+    """M2 edit path: picker → 自己编辑 → prefill → submit → accepted."""
     client = GatedClient()
+    client.add([TextChunk(
+        text="<verify_proposal><command>pytest -x</command></verify_proposal>"
+    )])
+    client.add([TextChunk(text="working")])
     app = make_app(tmp_path, client)
     async with app.run_test() as pilot:
         await pilot.pause()
@@ -180,8 +274,21 @@ async def test_goal_verify_rejects_dangerous_command(tmp_path):
         chat = screen.query_one("#chat", ChatWidget)
         input_widget = screen.query_one("#input", InputWidget)
 
-        screen.driver.set_goal("g")
-        await type_and_submit(pilot, input_widget, "/goal verify rm -rf build/")
-        assert "危险命令" in chat.transcript_text()
+        async def passing(command, workdir, **kwargs):
+            return VerifyResult(exit_code=0)
+
+        monkeypatch.setattr(goal_driver_module, "run_verify", passing)
+
+        await type_and_submit(pilot, input_widget, "/goal 补齐测试")
+        await wait_picker(pilot)
+        # Move to "✏️ 自己输入/编辑命令…" (second row) and select it.
+        await pilot.press("down")
+        await pilot.press("enter")
+        await wait_main(pilot)
+        # Input is prefilled with the best proposal; edit and submit.
+        assert input_widget.text == "pytest -x"
+        await type_and_submit(pilot, input_widget, "pytest tests/tools -q")
+        await wait_until(pilot, lambda: "目标达成" in chat.transcript_text())
         state = screen.driver.status()
-        assert state is not None and state.verify_command == ""
+        assert state is not None
+        assert state.verify_command == "pytest tests/tools -q"

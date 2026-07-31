@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import sys
 from dataclasses import dataclass
@@ -51,11 +52,6 @@ class GoalSet:
 
 
 @dataclass(frozen=True)
-class GoalVerify:
-    command: str
-
-
-@dataclass(frozen=True)
 class GoalClear:
     pass
 
@@ -65,24 +61,20 @@ class GoalQuery:
     pass
 
 
-GoalCommand = GoalSet | GoalVerify | GoalClear | GoalQuery
+GoalCommand = GoalSet | GoalClear | GoalQuery
 
 
 def parse_goal_args(arg: str) -> GoalCommand:
     """Parse the /goal argument into a command variant.
 
-    ``/goal`` → query, ``/goal clear`` → clear, ``/goal verify <cmd>`` →
-    set the verify command; anything else is the goal text itself (a goal
-    whose text literally starts with "verify " needs quoting by wording —
-    documented limitation of the single-command free-text form, D5).
+    Only two commands exist (D5 revised): ``/goal <目标>`` and
+    ``/goal clear``; anything that isn't ``clear`` (or empty) is goal text.
     """
     arg = arg.strip()
     if not arg:
         return GoalQuery()
     if arg == "clear":
         return GoalClear()
-    if arg == "verify" or arg.startswith("verify "):
-        return GoalVerify(arg.removeprefix("verify").strip())
     return GoalSet(arg)
 
 
@@ -174,7 +166,58 @@ async def run_verify(
     return VerifyResult(exit_code=proc.returncode, output_tail=tail.content)
 
 
-# -- prompt templates ---------------------------------------------------------
+# -- prompt templates ----------------------------------------------------------
+
+VERIFY_PROPOSAL_TAG = "verify_proposal"
+_MAX_PROPOSALS = 3
+
+
+def build_proposer_prompt(state: GoalState) -> str:
+    """First (proposal) round after ``/goal <text>`` (M2): the model explores
+    the repo and proposes the acceptance command(s); it must stop after the
+    proposal and wait for the user's confirmation — no real work yet."""
+    return (
+        "🎯 Goal 模式已启动\n\n"
+        f"目标：{state.text}\n\n"
+        "你的第一个任务（先不要动手修改任何代码）：探索当前仓库，找出能客观判定"
+        "该目标是否完成的验收命令（例如跑哪些测试、lint、typecheck）。要求：\n"
+        "- 命令必须能在当前工作目录直接用 bash 运行，退出码 0 = 通过、非 0 = 未通过；\n"
+        "- 优先复用仓库已有的测试/检查入口（Makefile、pyproject、package.json 等）；\n"
+        f"- 给出 1–{_MAX_PROPOSALS} 条候选（可以是一条组合命令）；\n"
+        "- 若该目标没有客观可判定的验收方式（例如纯审美类目标），如实说明，不要硬造。\n"
+        "探索完成后，用以下格式输出提议，然后停止，等我确认：\n"
+        f"<{VERIFY_PROPOSAL_TAG}>\n"
+        "<command>命令1</command>\n"
+        "<command>命令2（可选）</command>\n"
+        "<rationale>一句话说明理由</rationale>\n"
+        f"</{VERIFY_PROPOSAL_TAG}>\n"
+        f"若没有客观验收方式，输出 <{VERIFY_PROPOSAL_TAG}><none/></{VERIFY_PROPOSAL_TAG}> 并解释。"
+    )
+
+
+def parse_verify_proposal(text: str) -> list[str] | None:
+    """Parse the model's verify proposal out of its response text.
+
+    Returns ``None`` when no ``<verify_proposal>`` block is present, ``[]``
+    for an explicit ``<none/>`` (no objective gate exists), otherwise up to
+    3 candidate commands (stripped, de-duplicated, order preserved).
+    """
+    blocks = re.findall(
+        rf"<{VERIFY_PROPOSAL_TAG}>(.*?)</{VERIFY_PROPOSAL_TAG}>",
+        text,
+        flags=re.DOTALL,
+    )
+    if not blocks:
+        return None
+    block = blocks[-1]  # the final block wins if the model drafted several
+    if "<none/>" in block or "<none>" in block:
+        return []
+    commands: list[str] = []
+    for match in re.findall(r"<command>(.*?)</command>", block, flags=re.DOTALL):
+        command = " ".join(match.split())
+        if command and command not in commands:
+            commands.append(command)
+    return commands[:_MAX_PROPOSALS]
 
 
 def build_initial_prompt(state: GoalState) -> str:

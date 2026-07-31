@@ -16,13 +16,14 @@ from limbo.goal import (
     GoalQuery,
     GoalSet,
     GoalState,
-    GoalVerify,
     VerifyResult,
     build_goal_prompt,
     build_initial_prompt,
+    build_proposer_prompt,
     build_wrapup_prompt,
     next_state,
     parse_goal_args,
+    parse_verify_proposal,
     run_verify,
 )
 
@@ -44,22 +45,71 @@ def test_parse_clear():
     assert isinstance(parse_goal_args("clear"), GoalClear)
 
 
-def test_parse_verify():
-    cmd = parse_goal_args("verify uv run python -m pytest -x")
-    assert isinstance(cmd, GoalVerify)
-    assert cmd.command == "uv run python -m pytest -x"
-
-
-def test_parse_verify_without_command():
-    cmd = parse_goal_args("verify")
-    assert isinstance(cmd, GoalVerify)
-    assert cmd.command == ""
+def test_parse_verify_is_goal_text_now():
+    # /goal verify was removed (M2): "verify ..." is just goal text.
+    cmd = parse_goal_args("verify something")
+    assert isinstance(cmd, GoalSet)
+    assert cmd.text == "verify something"
 
 
 def test_parse_goal_text():
     cmd = parse_goal_args("为 tools/ 补齐测试\n验收标准：全绿")
     assert isinstance(cmd, GoalSet)
     assert "补齐测试" in cmd.text
+
+
+# -- M2: proposer prompt + proposal parsing ------------------------------------
+
+
+def test_proposer_prompt_has_contract_and_goal():
+    state = GoalState(text="补测试")
+    prompt = build_proposer_prompt(state)
+    assert "补测试" in prompt
+    assert "<verify_proposal>" in prompt
+    assert "<command>" in prompt
+    assert "先不要动手" in prompt
+
+
+def test_parse_proposal_single_command():
+    text = (
+        "看了下仓库。\n<verify_proposal>\n<command>pytest -x</command>\n"
+        "<rationale>r</rationale>\n</verify_proposal>"
+    )
+    assert parse_verify_proposal(text) == ["pytest -x"]
+
+
+def test_parse_proposal_multiple_capped_and_deduped():
+    text = (
+        "<verify_proposal><command>a</command><command>b</command>"
+        "<command>a</command><command>c</command><command>d</command>"
+        "</verify_proposal>"
+    )
+    assert parse_verify_proposal(text) == ["a", "b", "c"]
+
+
+def test_parse_proposal_none_explicit():
+    text = "<verify_proposal><none/></verify_proposal> 这个目标无法客观验收"
+    assert parse_verify_proposal(text) == []
+
+
+def test_parse_proposal_missing_block():
+    assert parse_verify_proposal("没有按格式输出") is None
+
+
+def test_parse_proposal_last_block_wins():
+    text = (
+        "<verify_proposal><command>old</command></verify_proposal>\n"
+        "（修改后）<verify_proposal><command>new</command></verify_proposal>"
+    )
+    assert parse_verify_proposal(text) == ["new"]
+
+
+def test_parse_proposal_command_whitespace_collapsed():
+    text = (
+        "<verify_proposal><command>python3 -m unittest\n"
+        "  discover -v</command></verify_proposal>"
+    )
+    assert parse_verify_proposal(text) == ["python3 -m unittest discover -v"]
 
 
 # -- prompt templates ---------------------------------------------------------

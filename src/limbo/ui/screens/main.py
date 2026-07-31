@@ -26,9 +26,10 @@ from limbo.goal import (
     STATUS_ACTIVE,
     GoalClear,
     GoalQuery,
-    GoalVerify,
     build_initial_prompt,
+    build_proposer_prompt,
     parse_goal_args,
+    parse_verify_proposal,
 )
 from limbo.goal_driver import (
     DriverEvent,
@@ -56,6 +57,8 @@ from limbo.ui.screens.btw import BtwScreen
 from limbo.ui.screens.game2048 import Game2048Screen
 from limbo.ui.screens.model_picker import ModelPicker
 from limbo.ui.screens.session_picker import SessionPicker
+from limbo.ui.screens.verify_picker import EDIT as VERIFY_EDIT
+from limbo.ui.screens.verify_picker import VerifyPicker
 from limbo.ui.widgets.chat import ChatWidget, QueuedMessage
 from limbo.ui.widgets.command_menu import SlashCommandMenu
 from limbo.ui.widgets.input import InputWidget, PasteMarkersInvalid, UserSubmitted
@@ -89,6 +92,13 @@ class MainScreen(Screen[None]):
         self.agent = self._new_agent(resume=resume)
         self.driver = self._new_driver(self.agent)
         self._slash_menu_open = False
+        # M2: proposal-round bookkeeping. _awaiting_verify_proposal is set
+        # when /goal starts a proposal round; the confirmation picker pops
+        # at the next quiet turn boundary. _editing_verify marks that the
+        # next submission is a verify command being edited (not a message).
+        self._awaiting_verify_proposal = False
+        self._editing_verify = False
+        self._pending_proposals: list[str] = []
         # Busy while a /compact worker owns the agent history; turn-level
         # busy is owned by the goal driver (see _agent_busy).
         self._compact_busy = False
@@ -236,10 +246,7 @@ class MainScreen(Screen[None]):
         if isinstance(command, GoalQuery):
             state = self.driver.status()
             if state is None or state.status == "cleared":
-                chat.add_info(
-                    "当前没有 goal。用法：/goal <目标> · "
-                    "/goal verify <验收命令> · /goal clear"
-                )
+                chat.add_info("当前没有 goal。用法：/goal <目标> · /goal clear")
             else:
                 chat.add_info(
                     f"🎯 Goal（{state.status} · 已验收 "
@@ -253,27 +260,10 @@ class MainScreen(Screen[None]):
                 chat.add_info("当前没有 goal")
                 return
             self.driver.clear()
+            self._awaiting_verify_proposal = False
+            self._editing_verify = False
             suffix = "（当前轮跑完后停止续轮）" if self.driver.running else ""
             chat.add_info(f"已退出 goal 模式{suffix}")
-            self._refresh_goal_indicator()
-            return
-        if isinstance(command, GoalVerify):
-            state = self.driver.status()
-            if state is None or state.status == "cleared":
-                chat.add_info("请先 /goal <目标> 设定目标")
-                return
-            if not command.command:
-                chat.add_info("用法：/goal verify <验收命令>")
-                return
-            if is_dangerous(
-                command.command, self.config.safety.dangerous_commands
-            ):
-                chat.add_error(
-                    f"验收命令命中危险命令过滤，已拒绝：{command.command}"
-                )
-                return
-            self.driver.set_verify(command.command)
-            chat.add_info(f"验收命令已设置（轮次重置）：{command.command}")
             self._refresh_goal_indicator()
             return
         # GoalSet: starting a new goal is a history-shaping action, so it
@@ -284,12 +274,11 @@ class MainScreen(Screen[None]):
         state = self.driver.set_goal(command.text)
         chat.add_user_message(f"/goal {command.text}")
         self._refresh_goal_indicator()
-        if not state.verify_command:
-            chat.add_info(
-                "提示：尚未设置验收命令，本轮结束后不会自动验收续轮；"
-                "用 /goal verify <命令> 设置"
-            )
-        self.run_worker(self._handle_turn(build_initial_prompt(state)))
+        # M2: the first round is a proposal round — the model explores the
+        # repo and proposes the acceptance command(s); the confirmation
+        # picker pops when the turn ends (see _maybe_confirm_verify_proposal).
+        self._awaiting_verify_proposal = True
+        self.run_worker(self._handle_turn(build_proposer_prompt(state)))
 
     def _refresh_goal_indicator(self) -> None:
         """Sync the status-bar badge with driver state (rainbow = running)."""
@@ -302,6 +291,79 @@ class MainScreen(Screen[None]):
             )
         else:
             statusbar.set_goal(None)
+
+    # -- M2: model-proposed verify command confirmation ------------------------
+
+    def _maybe_confirm_verify_proposal(self) -> None:
+        """After a proposal round, confirm the model's verify command.
+
+        Only fires at a quiet turn boundary (the finally-chain handles
+        leftover steers first, per LIM-20): parse the last assistant
+        message for <verify_proposal> and pop the picker.
+        """
+        if not self._awaiting_verify_proposal:
+            return
+        state = self.driver.status()
+        if state is None or state.status != STATUS_ACTIVE or state.verify_command:
+            self._awaiting_verify_proposal = False
+            return
+        text = ""
+        for msg in reversed(self.agent.messages):
+            if msg.role == "assistant" and msg.content:
+                text = msg.content
+                break
+        parsed = parse_verify_proposal(text)
+        chat = self.query_one("#chat", ChatWidget)
+        if parsed is not None and len(parsed) == 0:
+            # Explicit <none/>: no objective gate exists for this goal.
+            self._awaiting_verify_proposal = False
+            chat.add_info(
+                "模型认为该目标没有客观可判定的验收方式，保持单轮模式；"
+                "/goal clear 退出"
+            )
+            return
+        self._pending_proposals = parsed or []
+        if not self._pending_proposals:
+            chat.add_info("未能解析模型的验收提议，请手动输入或跳过")
+        self.app.push_screen(
+            VerifyPicker(self._pending_proposals), self._on_verify_picked
+        )
+
+    def _on_verify_picked(self, choice: str | None) -> None:
+        chat = self.query_one("#chat", ChatWidget)
+        self._awaiting_verify_proposal = False
+        state = self.driver.status()
+        if state is None or state.status != STATUS_ACTIVE:
+            return
+        if choice is None:
+            chat.add_info("已跳过自动验收（单轮模式）；/goal clear 可退出 goal")
+            self._refresh_goal_indicator()
+            return
+        if choice == VERIFY_EDIT:
+            # Prefill the best proposal for editing; the next submission is
+            # treated as the verify command (see on_user_submitted).
+            input_widget = self.query_one("#input", InputWidget)
+            prefill = self._pending_proposals[0] if self._pending_proposals else ""
+            input_widget.text = prefill
+            input_widget.move_cursor(input_widget.document.end)
+            input_widget.focus()
+            self._editing_verify = True
+            chat.add_info("编辑验收命令后回车确认（清空回车则跳过）")
+            return
+        self._accept_verify(choice)
+
+    def _accept_verify(self, command: str) -> None:
+        chat = self.query_one("#chat", ChatWidget)
+        if is_dangerous(command, self.config.safety.dangerous_commands):
+            chat.add_error(f"验收命令命中危险命令过滤，已拒绝：{command}")
+            chat.add_info("goal 保持单轮模式；/goal clear 退出")
+            return
+        state = self.driver.set_verify(command)
+        if state is None:
+            return
+        chat.add_info(f"验收方式已确认：{command}")
+        self._refresh_goal_indicator()
+        self.run_worker(self._handle_turn(build_initial_prompt(state)))
 
     def _register_builtin_commands(self) -> None:
         self._commands.register(
@@ -363,7 +425,7 @@ class MainScreen(Screen[None]):
         self._commands.register(
             SlashCommand(
                 "/goal",
-                "闭环目标模式：/goal <目标> · /goal verify <验收命令> · /goal clear",
+                "闭环目标模式：/goal <目标>（模型自拟验收，确认后自动闭环）· /goal clear",
                 takes_args=True,
                 # Query/clear must work mid-turn; the set variant re-checks
                 # busy inside the handler.
@@ -526,6 +588,9 @@ class MainScreen(Screen[None]):
         self.agent.close()  # release the old session's trace file handle
         self.agent = self._new_agent(resume=path)
         self.driver = self._new_driver(self.agent)
+        self._awaiting_verify_proposal = False
+        self._editing_verify = False
+        self._pending_proposals = []
         chat.clear()
         self._render_history()
         meta = self.agent.session_meta
@@ -624,6 +689,21 @@ class MainScreen(Screen[None]):
 
     def on_user_submitted(self, event: UserSubmitted) -> None:
         text = event.message
+        if self._editing_verify:
+            # M2 edit mode: the submission is a verify command, not a chat
+            # message. A slash command cancels edit mode and runs normally.
+            self._editing_verify = False
+            chat = self.query_one("#chat", ChatWidget)
+            if text.startswith("/"):
+                self._handle_command(text)
+                return
+            command = text.strip()
+            if command:
+                chat.add_user_message(f"验收命令：{command}")
+                self._accept_verify(command)
+            else:
+                chat.add_info("已跳过自动验收（单轮模式）；/goal clear 可退出 goal")
+            return
         if text.startswith("/"):
             self._handle_command(text)
             return
@@ -745,6 +825,9 @@ class MainScreen(Screen[None]):
             input_widget.focus()
             statusbar.set_state("idle")
             self._refresh_goal_indicator()
+            # M2: a proposal round that ends without leftover steers pops
+            # the verify-command confirmation picker.
+            self._maybe_confirm_verify_proposal()
 
     async def _process_agent_event(self, event: DriverEvent) -> None:
         chat = self.query_one("#chat", ChatWidget)
