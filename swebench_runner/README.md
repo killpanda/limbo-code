@@ -39,7 +39,29 @@ python -m swebench_runner --concurrency 8 --timeout 1800 \
 Re-running with the same `--run-dir` skips instances already present in
 `predictions.jsonl` (resume).
 
-## Evaluate
+## M3 pilot (disk-bounded, with per-instance evaluation)
+
+`pilot.py` interleaves the official evaluation into the loop so each
+instance image can be deleted immediately after both phases finish with
+it. Peak disk usage ~= `concurrency` images (~4 GB each), not the whole
+pilot's worth. A free-space guard pauses new instances below
+`--min-free-gb` (default 15 GB) until other workers clean up.
+
+```bash
+python -m swebench_runner.pilot --count 50 --seed 42 --concurrency 4 \
+    --timeout 1800 --eval-timeout 1800 --min-free-gb 15 \
+    --run-dir runs/pilot-50 --model k3
+```
+
+Per instance: pull (if absent) -> agent run -> `predictions.jsonl` ->
+official eval (`logs/run_evaluation/<run>-<id>/`) -> `docker rmi`.
+Instances with an empty patch skip evaluation (`resolved=false`).
+
+Re-running with the same `--run-dir` resumes: instances present in
+`results.jsonl` are skipped. The final `summary.json` reports resolve
+rate, exit-status distribution, and empty-patch count.
+
+## Evaluate (bulk, alternative to the pilot)
 
 ```bash
 python -m swebench.harness.run_evaluation \
