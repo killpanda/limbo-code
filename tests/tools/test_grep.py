@@ -6,6 +6,12 @@ import pytest
 
 from limbo.tools.grep import GrepTool
 
+# grep hard-depends on ripgrep: skip the whole module when it is absent
+# (test_grep_requires_ripgrep covers the missing-rg error path via monkeypatch).
+pytestmark = pytest.mark.skipif(
+    shutil.which("rg") is None, reason="ripgrep not installed"
+)
+
 
 @pytest.fixture
 def workdir():
@@ -63,8 +69,6 @@ def test_grep_requires_ripgrep(workdir, monkeypatch):
 
 
 def test_grep_supports_context(workdir):
-    if not shutil.which("rg"):
-        pytest.skip("ripgrep not installed")
     tool = GrepTool(workdir=workdir)
     result = tool.execute({"pattern": "def foo", "context": 1})
     assert result.success is True
@@ -72,8 +76,6 @@ def test_grep_supports_context(workdir):
 
 
 def test_grep_uses_glob(workdir):
-    if not shutil.which("rg"):
-        pytest.skip("ripgrep not installed")
     tool = GrepTool(workdir=workdir)
     result = tool.execute({"pattern": "def ", "glob": "a.py"})
     assert result.success is True
@@ -82,8 +84,6 @@ def test_grep_uses_glob(workdir):
 
 
 def test_grep_limit_is_per_file(workdir):
-    if not shutil.which("rg"):
-        pytest.skip("ripgrep not installed")
     tool = GrepTool(workdir=workdir)
     result = tool.execute({"pattern": "def ", "limit": 1})
     assert result.success is True
@@ -143,8 +143,6 @@ def test_grep_broken_symlink_search_path_returns_invalid_path(workdir):
 
 
 def test_grep_ripgrep_uses_relative_paths(workdir):
-    if not shutil.which("rg"):
-        pytest.skip("ripgrep not installed")
 
     tool = GrepTool(workdir=workdir)
     result = tool.execute({"pattern": "def foo"})
