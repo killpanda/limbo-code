@@ -246,6 +246,16 @@ class Agent:
             resolved=_resolved_llm_trace_fields(config),
         )
 
+    def close(self) -> None:
+        """Release owned resources (the trace log file handle).
+
+        Call when this agent is replaced (``/new``, resume) or torn down so
+        the append-only trace file descriptor is not leaked across sessions.
+        The LLM client is owned by the UI layer and closed separately.
+        Idempotent: safe to call more than once.
+        """
+        self.trace.close()
+
     def update_llm(self, llm_client: LLMClient) -> None:
         """Swap the LLM client after a /model switch.
 

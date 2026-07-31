@@ -47,6 +47,7 @@ class TraceLogger:
             self.path.chmod(0o600)
         self._lock = threading.Lock()
         self._failed = False
+        self._closed = False
 
     def log(self, event_type: str, **fields: Any) -> None:
         """Append one event record. Never raises."""
@@ -65,6 +66,10 @@ class TraceLogger:
             )
         try:
             with self._lock:
+                # Checked under the lock: a concurrent close() must never leave
+                # us writing to an already-closed handle.
+                if self._closed:
+                    return
                 self._file.write(line + "\n")
                 self._file.flush()
         except OSError as e:
@@ -73,9 +78,14 @@ class TraceLogger:
                 warnings.warn(f"Trace log write failed: {e}", stacklevel=2)
 
     def close(self) -> None:
+        # Idempotent: safe to call from Agent.close() at every replacement
+        # point even when the UI tears down several agents in sequence.
+        if self._closed:
+            return
         try:
             with self._lock:
                 self._file.close()
+                self._closed = True
         except OSError:
             pass
 
