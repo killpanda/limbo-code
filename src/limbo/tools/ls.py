@@ -13,8 +13,9 @@ MAX_ENTRIES = 500
 class LsTool(BaseTool):
     name = "ls"
     description = (
-        "List directory contents. Includes dotfiles. Output is truncated to "
-        f"{MAX_ENTRIES} entries (a notice is shown when the limit is hit)."
+        "List directory contents. Includes dotfiles. Returns up to "
+        f"{MAX_ENTRIES} entries by default (raise `limit` for more; a "
+        "notice is shown whenever entries are truncated)."
     )
     parameters = {
         "type": "object",

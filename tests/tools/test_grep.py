@@ -6,12 +6,6 @@ import pytest
 
 from limbo.tools.grep import GrepTool
 
-# grep hard-depends on ripgrep: skip the whole module when it is absent
-# (test_grep_requires_ripgrep covers the missing-rg error path via monkeypatch).
-pytestmark = pytest.mark.skipif(
-    shutil.which("rg") is None, reason="ripgrep not installed"
-)
-
 
 @pytest.fixture
 def workdir():

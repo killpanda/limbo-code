@@ -90,9 +90,16 @@ class _StreamCollector:
             if self._spill is not None:
                 self._spill.write(text)
 
-    def finish(self) -> str:
+    def finish(self, timeout: float | None = 30.0) -> str:
+        """Join the reader thread and return the buffered text.
+
+        The join is time-bounded: a grandchild that escaped the process
+        group (setsid) while holding the pipe fd would otherwise keep the
+        reader waiting for EOF forever and hang the tool. The thread is a
+        daemon, so a leaked one dies with the process.
+        """
         if self._thread is not None:
-            self._thread.join()
+            self._thread.join(timeout=timeout)
         with self._lock:
             return "".join(self._chunks)
 
