@@ -7,9 +7,13 @@
 ## Quick Start
 
 ```bash
-pip install -e .
-limbo --workdir /path/to/project   # config: ~/.limbo/config.toml
+uv sync                               # installs runtime + dev tools (PEP 735 dev group, on by default)
+uv run limbo --workdir /path/to/project   # config: ~/.limbo/config.toml
 ```
+
+Prefer `uv` over `pip`: dev tools (pytest/ruff/mypy) are a `[dependency-groups]`
+group, NOT an extra — `pip install -e ".[dev]"` no longer exists. `pip install -e .`
+still works for a runtime-only install.
 
 ## Architecture
 
@@ -83,9 +87,17 @@ Single column: status bar (state/elapsed/tokens/model/workdir/queued) → scroll
 ## Testing
 
 ```bash
-pytest tests/ -v                  # pytest-asyncio, respx HTTP mocks, pytest-textual-snapshot
-ruff check src tests && mypy src  # lint + type check
-pytest --snapshot-update          # after intentional visual changes; review the SVG diff
+make check                          # single entrypoint: sync + tests + lint + type check
+```
+
+Or individually — always `python -m pytest`, never bare `uv run pytest` (which
+silently falls through to a global pytest on PATH when the venv lacks pytest):
+
+```bash
+uv sync                             # first time / after pulling; dev group is default
+uv run python -m pytest tests/ -v   # pytest-asyncio, respx HTTP mocks, pytest-textual-snapshot
+uv run ruff check src tests && uv run mypy src  # lint + type check
+uv run python -m pytest --snapshot-update  # after intentional visual changes; review the SVG diff
 ```
 
 ## Adding Things
