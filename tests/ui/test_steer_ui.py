@@ -132,7 +132,7 @@ async def test_busy_rejects_history_commands(tmp_path):
         screen = get_screen(pilot)
         chat = screen.query_one("#chat", ChatWidget)
         chat.add_info("标记消息")
-        screen._agent_busy = True
+        screen.driver._running = True  # simulate an in-flight turn (driver owns single-flight)
         agent_before = screen.agent
 
         screen._handle_command("/new")
@@ -171,7 +171,7 @@ async def test_busy_rejection_via_enter_submission(tmp_path):
         screen = get_screen(pilot)
         chat = screen.query_one("#chat", ChatWidget)
         input_widget = screen.query_one("#input", InputWidget)
-        screen._agent_busy = True
+        screen.driver._running = True  # simulate an in-flight turn (driver owns single-flight)
         agent_before = screen.agent
 
         input_widget.text = "/new"
@@ -194,7 +194,7 @@ async def test_skill_invocation_while_busy_enqueues_full_prompt(tmp_path):
         await pilot.pause()
         screen = get_screen(pilot)
         chat = screen.query_one("#chat", ChatWidget)
-        screen._agent_busy = True
+        screen.driver._running = True  # simulate an in-flight turn (driver owns single-flight)
 
         screen._handle_command("/tdd implement login")
         await pilot.pause()

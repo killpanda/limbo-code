@@ -262,6 +262,29 @@ ModelPicker #picker-hint {
     height: auto;
 }
 
+/* ---- /goal 验收命令确认弹窗 (LIM-40) ---- */
+VerifyPicker #verify-picker {
+    width: 80%;
+    max-width: 110;
+    height: auto;
+    max-height: 80%;
+    border: round $accent;
+    background: $surface;
+    padding: 1 2;
+}
+VerifyPicker #picker-title {
+    text-style: bold;
+    margin-bottom: 1;
+}
+VerifyPicker ListView {
+    height: auto;
+    max-height: 12;
+}
+VerifyPicker ListView:focus > ListItem.-highlight {
+    background: $panel;
+    color: $accent;
+}
+
 /* ---- /btw 侧问浮层 ---- */
 BtwScreen {
     align: center middle;

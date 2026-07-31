@@ -10,11 +10,17 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import Static
 
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⴦⦧⦇⦏"
+
+# Rainbow palette for the goal-mode indicator (LIM-40): while a goal loop
+# is executing, the badge cycles hues per frame; an active-but-idle goal
+# shows a static cyan badge instead.
+_RAINBOW = ("red", "orange1", "yellow1", "green1", "cyan1", "blue1", "magenta1")
 
 
 def _format_tokens(total: int) -> str:
@@ -40,6 +46,10 @@ class StatusBar(Horizontal):
         self._text = "idle"
         self._started: float | None = None
         self._frame = 0
+        # Goal-mode badge: (rounds_completed, max_rounds) while a goal is
+        # active, None otherwise; _goal_running toggles the rainbow.
+        self._goal: tuple[int, int] | None = None
+        self._goal_running = False
 
     def compose(self) -> ComposeResult:
         yield self._state_label
@@ -80,6 +90,31 @@ class StatusBar(Horizontal):
         except Exception:  # noqa: BLE001 - not composed yet
             pass
 
+    def set_goal(
+        self, goal: tuple[int, int] | None, *, running: bool = False
+    ) -> None:
+        """Show/hide the goal-mode badge (LIM-40).
+
+        ``goal`` is (rounds_completed, max_rounds); ``running=True`` turns
+        on the rainbow animation (goal loop executing), ``False`` a static
+        badge (goal active but idle). None hides the badge.
+        """
+        self._goal = goal
+        self._goal_running = running and goal is not None
+        self._render_state()
+
+    def _goal_badge(self) -> Text:
+        rounds, max_rounds = self._goal if self._goal is not None else (0, 0)
+        label = f"🎯GOAL {rounds}/{max_rounds} "
+        text = Text()
+        if self._goal_running:
+            for i, ch in enumerate(label):
+                color = _RAINBOW[(i + self._frame) % len(_RAINBOW)]
+                text.append(ch, style=f"bold {color}")
+        else:
+            text.append(label, style="bold cyan")
+        return text
+
     def set_state(self, text: str, style: str = "idle") -> None:
         """Update the left side. ``style`` is one of idle/thinking/tool."""
         active = style in ("thinking", "tool")
@@ -95,12 +130,17 @@ class StatusBar(Horizontal):
         self._render_state()
 
     def _render_state(self) -> None:
+        label: str | Text
         if self._style in ("thinking", "tool") and self._started is not None:
             frame = _SPINNER_FRAMES[self._frame % len(_SPINNER_FRAMES)]
             elapsed = time.monotonic() - self._started
             label = f"{frame} {self._text} {elapsed:.0f}s"
         else:
             label = f"● {self._text}"
+        if self._goal is not None:
+            badge = self._goal_badge()
+            badge.append(label)
+            label = badge
         try:
             self._state_label.update(label)
         except Exception:  # noqa: BLE001 - not composed yet
@@ -111,6 +151,6 @@ class StatusBar(Horizontal):
         self.set_interval(1 / 8, self._tick)
 
     def _tick(self) -> None:
-        if self._style in ("thinking", "tool"):
+        if self._style in ("thinking", "tool") or self._goal_running:
             self._frame += 1
             self._render_state()
