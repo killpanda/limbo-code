@@ -30,7 +30,6 @@ from .instance import RunConfig, _docker, _remote_image_key, run_instance
 log = logging.getLogger(__name__)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
-EVAL_LOGS = REPO_ROOT / "logs" / "run_evaluation"
 
 _disk_condition = threading.Condition()
 
@@ -71,6 +70,11 @@ def evaluate_instance(
     pred_file = eval_dir / f"{instance_id}.jsonl"
     pred_file.write_text(json.dumps(prediction) + "\n")
     run_id = f"{run_dir.name}-{instance_id}"
+    # swebench writes per-instance logs AND the final <model>.<run_id>.json
+    # report relative to its cwd; run it in a per-instance dir so the repo
+    # root stays clean. (--report_dir exists but is unused in swebench 4.1.)
+    eval_cwd = eval_dir / instance_id
+    eval_cwd.mkdir(exist_ok=True)
 
     cmd = [
         sys.executable, "-m", "swebench.harness.run_evaluation",
@@ -84,9 +88,9 @@ def evaluate_instance(
     try:
         subprocess.run(
             cmd,
-            cwd=REPO_ROOT,
+            cwd=eval_cwd,
             stdout=subprocess.DEVNULL,
-            stderr=(eval_dir / f"{instance_id}.eval.log").open("w"),
+            stderr=open(eval_dir / f"{instance_id}.eval.log", "w"),
             timeout=eval_timeout,
         )
     except subprocess.TimeoutExpired:
@@ -98,12 +102,26 @@ def evaluate_instance(
         )
         return None
 
-    reports = glob.glob(str(EVAL_LOGS / run_id / "*" / instance_id / "report.json"))
-    if not reports:
+    report = find_eval_report(run_dir, instance_id)
+    if report is None:
         log.error("no eval report for %s", instance_id)
         return None
-    report = json.loads(Path(reports[0]).read_text())
-    return bool(report[instance_id].get("resolved"))
+    return bool(report.get("resolved"))
+
+
+def find_eval_report(run_dir: Path, instance_id: str) -> dict | None:
+    """Locate the official per-instance report.json for an instance.
+
+    New runs keep it under <run-dir>/eval/<id>/logs/...; fall back to the
+    repo-root logs/ layout used by early pilot runs.
+    """
+    run_id = f"{run_dir.name}-{instance_id}"
+    rel = Path("logs") / "run_evaluation" / run_id / "*" / instance_id / "report.json"
+    for base in (run_dir / "eval" / instance_id, REPO_ROOT):
+        matches = glob.glob(str(base / rel))
+        if matches:
+            return json.loads(Path(matches[0]).read_text())[instance_id]
+    return None
 
 
 def _load_done(results_path: Path) -> set[str]:

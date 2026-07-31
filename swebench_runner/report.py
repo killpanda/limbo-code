@@ -3,21 +3,20 @@
 Usage: python -m swebench_runner.report --run-dir runs/pilot-50
 
 Reads results.jsonl + predictions.jsonl from the run dir, the official
-per-instance eval reports under logs/run_evaluation/, and the agent's
-stderr logs (for token counts). Writes <run-dir>/REPORT.md.
+per-instance eval reports (under <run-dir>/eval/<id>/logs/, or the legacy
+repo-root logs/ layout), and the agent's stderr logs (for token counts).
+Writes <run-dir>/REPORT.md.
 """
 
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import re
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parent.parent
-EVAL_LOGS = REPO_ROOT / "logs" / "run_evaluation"
+from .pilot import find_eval_report
 
 TOKENS_RE = re.compile(r"exec end: total_tokens=(\d+)")
 
@@ -63,17 +62,6 @@ def _tokens_for(run_dir: Path, instance_id: str) -> int | None:
     return None
 
 
-def _eval_report(run_dir: Path, instance_id: str) -> dict | None:
-    pattern = str(
-        EVAL_LOGS / f"{run_dir.name}-{instance_id}" / "*" / instance_id
-        / "report.json"
-    )
-    matches = glob.glob(pattern)
-    if not matches:
-        return None
-    return json.loads(Path(matches[0]).read_text())[instance_id]
-
-
 def classify(record: dict, report: dict | None) -> str:
     """Assign one failure class per instance (see CLASSES precedence)."""
     status = record["exit_status"]
@@ -100,7 +88,7 @@ def build_report(run_dir: Path) -> str:
     rows = []
     for r in records:
         iid = r["instance_id"]
-        report = _eval_report(run_dir, iid)
+        report = find_eval_report(run_dir, iid)
         rows.append({
             **r,
             "class": classify(r, report),
