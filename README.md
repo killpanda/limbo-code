@@ -204,23 +204,24 @@ flight.
 ## Safety
 
 Limbo executes every tool call immediately, without asking for confirmation.
-File tools (`read`, `edit`, `write`, `grep`, `find`, `ls`) are bounded to the
-current working directory and reject paths that escape it, including via
-symlinks. The boundary check resolves the path before each operation, so a
-symlink swapped between the check and the operation (a time-of-check-to-time-of-use
-race) could escape the workdir. **This is a known limitation for the MVP.**
+
+File tools (`read`, `edit`, `write`, `grep`, `find`, `ls`) are scoped to the
+current working directory plus any session grants (paths the user mentions in
+a message), and `read`/`grep`/`find` skip a small blocklist of sensitive files
+(`.env`, SSH keys) to avoid leaking secrets into the model context by accident.
+**These are convenience guardrails against accidents, not a security boundary.**
+The path check resolves the path before each operation, so a symlink swapped
+between the check and the operation (a time-of-check-to-time-of-use race) could
+escape it.
 
 Bash is an exception: it is started in the working directory but is **not**
-sandboxed. Commands can `cd ..`, use absolute paths, and read or write outside
-the workdir. In addition, commands that match dangerous patterns such as `rm`
-or `git reset --hard` are **rejected outright**.
-The pattern list is configurable but cannot be disabled from the UI. Bash
-commands are filtered with a simple heuristic, but that filter can be bypassed
-by subshells (`bash -c 'rm -rf /'`), command substitution (`$(rm -rf /)`),
-variable indirection, options before the command name
-(`git -C /foo reset --hard`), variable assignments before the command name
-(`VAR=1 rm -rf /`), and similar shell constructs. Only run Limbo with
-trusted commands and in repositories you can afford to modify or lose.
+covered by any of these guardrails. Commands can `cd ..`, use absolute paths,
+and read or write outside the workdir. Commands that match dangerous patterns
+such as `rm` or `git reset --hard` are **rejected outright** by a best-effort
+heuristic filter — ordinary shell constructs can bypass it, so it only
+protects against accidents. The pattern list is configurable but cannot be
+disabled from the UI. Only run Limbo with trusted commands and in
+repositories you can afford to modify or lose.
 
 If you need to work with untrusted projects, disable the bash tool entirely:
 

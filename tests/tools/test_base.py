@@ -78,12 +78,15 @@ def test_resolve_rejects_outside_workdir(tool):
         tool.resolve("../escape.txt")
 
 
-def test_resolve_error_names_workdir_and_suggests_bash(tool):
+def test_resolve_error_names_workdir_and_does_not_teach_bypass(tool):
     with pytest.raises(ToolError) as exc_info:
         tool.resolve("../escape.txt")
     message = str(exc_info.value)
     assert str(tool.workdir) in message
-    assert "bash" in message
+    # The error must not instruct the model to switch tools to bypass the
+    # guardrail; it points at user authorization instead.
+    assert "bash" not in message
+    assert "ask the user" in message
 
 
 def test_resolve_expands_tilde(tmp_path, monkeypatch):

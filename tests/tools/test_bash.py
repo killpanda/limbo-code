@@ -180,6 +180,33 @@ def test_is_dangerous_bypassed_by_options_and_assignments():
     assert is_dangerous("VAR=1 rm -rf /tmp/limbo-fake-target", ["rm"]) is False
 
 
+def test_is_dangerous_never_raises_on_unbalanced_quotes():
+    """Malformed commands must not escape as bare exceptions (P1-5).
+
+    ``shlex.split`` raises ``ValueError`` on unbalanced quotes; the filter
+    falls back to whitespace tokenization so dangerous names are still
+    caught and harmless commands reach bash (which reports its own error).
+    """
+    assert is_dangerous('rm -rf "unbalanced', ["rm"]) is True
+    assert is_dangerous('echo "unbalanced', ["rm"]) is False
+
+
+def test_bash_unbalanced_quotes_returns_clean_error(workdir):
+    tool = BashTool(workdir=workdir)
+    result = tool.execute({"command": 'echo "unbalanced'})
+    # bash itself reports the quoting error; no raw ValueError escapes.
+    assert result.success is False
+    assert "No closing quotation" not in (result.error or "")
+
+
+def test_bash_description_does_not_teach_bypasses():
+    """The tool description must not enumerate filter-bypass techniques (P0-3a)."""
+    description = BashTool.description.lower()
+    for phrase in ("subshell", "command substitution", "variable indirection", "bypass"):
+        assert phrase not in description
+    assert "not sandboxed" in description
+
+
 def test_bash_custom_dangerous_patterns(workdir):
     tool = BashTool(workdir=workdir, dangerous_patterns=["reboot"])
     result = tool.execute({"command": "reboot"})

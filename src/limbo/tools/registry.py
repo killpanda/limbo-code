@@ -31,12 +31,25 @@ class ToolRegistry:
         self.allowed_roots: set[Path] = set()
         self._tools: dict[str, BaseTool] = {}
         # Tools without configurable safety settings are registered generically.
-        for tool_class in [EditTool, WriteTool, GrepTool, FindTool, LsTool]:
+        for tool_class in [EditTool, WriteTool, LsTool]:
             self.register(tool_class)  # type: ignore[type-abstract]
-        # Wire configurable safety options from Config.
+        # Wire configurable safety options from Config. The sensitive-file
+        # guardrail is shared by read/grep/find so it behaves identically
+        # across file tools.
+        sensitive_files = self.config.safety.sensitive_files
         self._tools["read"] = ReadTool(
             workdir=workdir,
-            sensitive_files=self.config.safety.sensitive_files,
+            sensitive_files=sensitive_files,
+            allowed_roots=self.allowed_roots,
+        )
+        self._tools["grep"] = GrepTool(
+            workdir=workdir,
+            sensitive_files=sensitive_files,
+            allowed_roots=self.allowed_roots,
+        )
+        self._tools["find"] = FindTool(
+            workdir=workdir,
+            sensitive_files=sensitive_files,
             allowed_roots=self.allowed_roots,
         )
         if self.config.tools.bash_enabled:

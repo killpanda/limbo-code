@@ -121,3 +121,40 @@ def test_find_outside_workdir_without_grant_fails(workdir, tmp_path):
     result = tool.execute({"pattern": "**/*.py", "path": str(outside)})
     assert result.success is False
     assert "outside working directory" in result.error
+
+
+def test_find_skips_sensitive_files(workdir):
+    """Sensitive files are hidden from results (aligned with read/grep)."""
+    (workdir / ".env").write_text("SECRET=1")
+    tool = FindTool(workdir=workdir)
+    result = tool.execute({"pattern": "**/*"})
+    assert result.success is True
+    assert ".env" not in result.output
+
+
+def test_find_skips_sensitive_directory(workdir):
+    ssh_dir = workdir / ".ssh"
+    ssh_dir.mkdir()
+    (ssh_dir / "id_rsa").write_text("KEY")
+    tool = FindTool(workdir=workdir)
+    result = tool.execute({"pattern": "**/*"})
+    assert result.success is True
+    assert ".ssh" not in result.output
+    assert "id_rsa" not in result.output
+
+
+def test_find_refuses_sensitive_target(workdir):
+    ssh_dir = workdir / ".ssh"
+    ssh_dir.mkdir()
+    tool = FindTool(workdir=workdir)
+    result = tool.execute({"pattern": "**/*", "path": ".ssh"})
+    assert result.success is False
+    assert "sensitive" in result.error.lower()
+
+
+def test_find_custom_sensitive_files(workdir):
+    (workdir / "secret.txt").write_text("SECRET=1")
+    tool = FindTool(workdir=workdir, sensitive_files=["secret.txt"])
+    result = tool.execute({"pattern": "**/*"})
+    assert result.success is True
+    assert "secret.txt" not in result.output
