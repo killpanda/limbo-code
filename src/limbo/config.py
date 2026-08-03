@@ -28,7 +28,7 @@ DEFAULT_SENSITIVE_FILES = [".env", "id_rsa", "id_ed25519", ".ssh"]
 class LLMConfig(BaseModel):
     api_key: str | None = None
     base_url: str = "https://api.deepseek.com/v1"
-    model: str = "deepseek-chat"
+    model: str = "deepseek-v4-pro"
     temperature: float = 0.2
     max_iterations: int = 50
     # Thinking control for reasoning models (e.g. kimi-k3: low|high|max,

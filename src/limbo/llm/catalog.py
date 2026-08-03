@@ -77,7 +77,7 @@ class ModelSpec:
     # plus clear_thinking: false, with optional reasoning_effort passthrough
     # for models that declare thinking_levels), "openai-responses"
     # (reasoning: {effort, summary} on the Responses API), or None (the
-    # model reasons but the API exposes no switch, e.g. deepseek-reasoner).
+    # model reasons but the API exposes no switch).
     thinking_format: str | None = None
     # Supported thinking levels mapped to provider values (openai format;
     # also drives reasoning_effort passthrough for the zai format).
@@ -242,14 +242,20 @@ def _glm(
 
 # Values mirror pi's built-in moonshotai catalog (providers/data/moonshotai.json).
 CATALOG: dict[str, ModelSpec] = {
-    "deepseek-chat": ModelSpec(
-        id="deepseek-chat", provider=DEEPSEEK, max_tokens=8_192
-    ),
-    "deepseek-reasoner": ModelSpec(
-        id="deepseek-reasoner",
+    # DeepSeek V4: both tiers reason and expose the deepseek-style
+    # thinking toggle (thinking: {type: enabled|disabled}).
+    "deepseek-v4-pro": ModelSpec(
+        id="deepseek-v4-pro",
         provider=DEEPSEEK,
         max_tokens=65_536,
         reasoning=True,
+        thinking_format="deepseek",
+    ),
+    "deepseek-v4-flash": ModelSpec(
+        id="deepseek-v4-flash",
+        provider=DEEPSEEK,
+        reasoning=True,
+        thinking_format="deepseek",
     ),
     # -- Kimi (Moonshot AI) -------------------------------------------------
     "kimi-k2-0711-preview": _moonshot(

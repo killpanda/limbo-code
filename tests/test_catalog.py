@@ -5,6 +5,7 @@ import pytest
 from limbo.config import Config, ProviderOverride
 from limbo.llm.anthropic_client import AnthropicMessagesClient
 from limbo.llm.catalog import (
+    DEEPSEEK,
     DEFAULT_BASE_URL,
     GENERIC_OPENAI,
     GLM_CODING,
@@ -34,6 +35,19 @@ def test_kimi_k3_spec():
     assert spec.thinking_levels == {"low": "low", "high": "high", "max": "max"}
     assert spec.thinking_can_disable is False
     assert spec.requires_reasoning_content is True
+
+
+def test_deepseek_v4_specs():
+    pro = resolve_model("deepseek-v4-pro")
+    assert pro.provider is DEEPSEEK
+    assert pro.reasoning is True
+    assert pro.thinking_format == "deepseek"
+    assert pro.max_tokens == 65_536
+
+    flash = resolve_model("deepseek-v4-flash")
+    assert flash.provider is DEEPSEEK
+    assert flash.reasoning is True
+    assert flash.thinking_format == "deepseek"
 
 
 def test_kimi_k2_thinking_spec():
@@ -279,7 +293,7 @@ def test_register_client_adds_dialect():
 
 def test_vision_defaults_to_false():
     # Text-only catalog entries stay non-vision (conservative default).
-    assert resolve_model("deepseek-chat").vision is False
+    assert resolve_model("deepseek-v4-flash").vision is False
     assert resolve_model("kimi-k3").vision is False
 
 

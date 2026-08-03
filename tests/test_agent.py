@@ -708,7 +708,7 @@ async def test_agent_trace_records_full_turn(workdir):
     ]
 
     start = records[0]
-    assert start["config"]["model"] == "deepseek-chat"
+    assert start["config"]["model"] == "deepseek-v4-pro"
     assert start["resumed"] is False
     # The API key must never appear in the trace.
     assert "api_key" not in json.dumps(records)
@@ -753,12 +753,12 @@ def test_agent_trace_session_start_records_resolved_provider(workdir):
     records = read_trace(agent.trace.path)
     resolved = records[0]["resolved"]
     assert resolved == {
-        "model": "deepseek-chat",
+        "model": "deepseek-v4-pro",
         "provider": "deepseek",
         "api": "openai-completions",
         "base_url": "https://api.deepseek.com/v1",
         "context_window": 128_000,
-        "max_tokens": 8_192,
+        "max_tokens": 65_536,
         "thinking_effort": None,
     }
 
@@ -1148,8 +1148,8 @@ async def test_agent_length_stop_message_guides_alternative_strategy(workdir):
     err = result_events[0].result.error or ""
     assert "Do NOT re-issue" in err
     assert "write" in err
-    # deepseek-chat (the default model) has an 8192 output cap in the catalog.
-    assert "8192" in err
+    # deepseek-v4-pro (the default model) has a 65536 output cap in the catalog.
+    assert "65536" in err
 
 
 @pytest.mark.asyncio
@@ -1730,7 +1730,7 @@ async def test_image_attachment_sent_as_blocks_for_vision_model(workdir, tmp_pat
 async def test_image_attachment_degrades_for_non_vision_model(workdir, tmp_path):
     image = tmp_path / "shot.png"
     image.write_bytes(b"png")
-    agent = _make_agent(workdir, "deepseek-chat")
+    agent = _make_agent(workdir, "deepseek-v4-flash")
     attachment = Attachment(
         kind="image", name="shot.png", path=str(image), mime="image/png"
     )
@@ -1759,7 +1759,7 @@ async def test_missing_image_noted_but_not_dropped(workdir, tmp_path):
 async def test_small_text_file_attachment_inlined(workdir, tmp_path):
     note = tmp_path / "note.txt"
     note.write_text("remember the milk")
-    agent = _make_agent(workdir, "deepseek-chat")
+    agent = _make_agent(workdir, "deepseek-v4-flash")
     attachment = Attachment(kind="file", name="note.txt", path=str(note))
     await _collect(agent.run("总结这个文件", attachments=[attachment]))
     user_msg = _last_user_message(agent)
@@ -1771,7 +1771,7 @@ async def test_small_text_file_attachment_inlined(workdir, tmp_path):
 async def test_large_or_binary_file_referenced_by_path(workdir, tmp_path):
     big = tmp_path / "big.bin"
     big.write_bytes(b"\x00" * (ATTACHMENT_INLINE_MAX_BYTES + 1))
-    agent = _make_agent(workdir, "deepseek-chat")
+    agent = _make_agent(workdir, "deepseek-v4-flash")
     attachment = Attachment(kind="file", name="big.bin", path=str(big))
     await _collect(agent.run("分析这个文件", attachments=[attachment]))
     user_msg = _last_user_message(agent)
@@ -2046,7 +2046,7 @@ async def test_steer_with_attachments(workdir):
     steer_msg = client.calls[1][-1]
     assert "文件 note.txt 的内容" in steer_msg["content"]
     assert "备忘内容" in steer_msg["content"]
-    # deepseek-chat has no vision: the image degrades to a path note.
+    # deepseek-v4-pro has no vision: the image degrades to a path note.
     assert "当前模型不支持图像输入" in steer_msg["content"]
 
 

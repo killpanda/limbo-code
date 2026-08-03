@@ -27,7 +27,7 @@ def make_meta(**overrides) -> SessionMeta:
     defaults = {
         "id": "20260720-103000-000000-1",
         "workdir": "/tmp/project",
-        "model": "deepseek-chat",
+        "model": "deepseek-v4-pro",
         "title": "hello world",
         "created_at": "2026-07-20T10:30:00+00:00",
         "updated_at": "2026-07-20T10:30:00+00:00",

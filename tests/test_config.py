@@ -10,7 +10,7 @@ from limbo.config import Config, load_config, save_model_to_config
 def test_default_config():
     cfg = Config()
     assert cfg.llm.base_url == "https://api.deepseek.com/v1"
-    assert cfg.llm.model == "deepseek-chat"
+    assert cfg.llm.model == "deepseek-v4-pro"
     assert cfg.llm.max_iterations == 50
     assert cfg.tools.bash_enabled is True
     assert ".ssh" in cfg.safety.sensitive_files
@@ -63,7 +63,7 @@ model = "gpt-4o"
 
 def test_load_config_missing_file_uses_defaults():
     cfg = load_config(Path("/nonexistent/config.toml"))
-    assert cfg.llm.model == "deepseek-chat"
+    assert cfg.llm.model == "deepseek-v4-pro"
 
 
 def test_load_config_malformed_file_uses_defaults(tmp_path):
@@ -71,7 +71,7 @@ def test_load_config_malformed_file_uses_defaults(tmp_path):
     path.write_text("[unclosed = ")
     with pytest.warns(UserWarning, match="Malformed config file"):
         cfg = load_config(path)
-    assert cfg.llm.model == "deepseek-chat"
+    assert cfg.llm.model == "deepseek-v4-pro"
 
 
 def test_load_config_tools_bash_enabled(tmp_path):
@@ -90,7 +90,7 @@ def test_load_config_permission_error_uses_defaults(tmp_path):
             cfg = load_config(path)
     finally:
         path.chmod(0o644)
-    assert cfg.llm.model == "deepseek-chat"
+    assert cfg.llm.model == "deepseek-v4-pro"
 
 
 def test_load_config_validation_error_uses_defaults(tmp_path):
@@ -190,7 +190,7 @@ def test_save_model_creates_minimal_config(tmp_path):
 def test_save_model_preserves_comments_and_other_fields(tmp_path):
     path = tmp_path / "config.toml"
     path.write_text(
-        '# user notes\n[llm]\napi_key = "k"\nmodel = "deepseek-chat"  # inline\n'
+        '# user notes\n[llm]\napi_key = "k"\nmodel = "deepseek-v4-pro"  # inline\n'
         '\n[tools]\nbash_enabled = false\n'
     )
     assert save_model_to_config("gpt-5.5", path) is True

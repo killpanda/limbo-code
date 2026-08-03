@@ -26,7 +26,7 @@
 JSONL，首行为 meta，后续为消息行。**向后兼容**：无 meta 行的旧文件可正常加载。
 
 ```jsonl
-{"type":"meta","id":"20260720-103000-123456-42","workdir":"/path/to/proj","model":"deepseek-chat","title":"修复 grep 工具 bug","created_at":"...","updated_at":"..."}
+{"type":"meta","id":"20260720-103000-123456-42","workdir":"/path/to/proj","model":"deepseek-v4-pro","title":"修复 grep 工具 bug","created_at":"...","updated_at":"..."}
 {"role":"system","content":"..."}
 {"role":"user","content":"..."}
 {"role":"assistant","content":"...","tool_calls":[...]}

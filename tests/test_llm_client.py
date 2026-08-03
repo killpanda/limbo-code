@@ -482,7 +482,7 @@ async def test_client_reports_request_body_via_hook(client):
 
     assert len(bodies) == 1
     body = bodies[0]
-    assert body["model"] == "deepseek-chat"
+    assert body["model"] == "deepseek-v4-pro"
     assert body["messages"] == [{"role": "user", "content": "hi"}]
     assert body["tools"] == tools
     assert body["stream"] is True
