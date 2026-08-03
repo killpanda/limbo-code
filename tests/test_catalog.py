@@ -43,11 +43,14 @@ def test_deepseek_v4_specs():
     assert pro.reasoning is True
     assert pro.thinking_format == "deepseek"
     assert pro.max_tokens == 65_536
+    assert pro.context_window == 1_000_000
 
     flash = resolve_model("deepseek-v4-flash")
     assert flash.provider is DEEPSEEK
     assert flash.reasoning is True
     assert flash.thinking_format == "deepseek"
+    assert flash.max_tokens == 65_536
+    assert flash.context_window == 1_000_000
 
 
 def test_kimi_k2_thinking_spec():

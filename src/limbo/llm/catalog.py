@@ -243,10 +243,15 @@ def _glm(
 # Values mirror pi's built-in moonshotai catalog (providers/data/moonshotai.json).
 CATALOG: dict[str, ModelSpec] = {
     # DeepSeek V4: both tiers reason and expose the deepseek-style
-    # thinking toggle (thinking: {type: enabled|disabled}).
+    # thinking toggle (thinking: {type: enabled|disabled}). Specs from the
+    # official pricing page (2026-02): 1M context, 384K max output. The
+    # 64K default output cap is deliberately conservative — thinking
+    # tokens count toward the output limit, so a near-max cap would let a
+    # long chain of thought starve the visible answer.
     "deepseek-v4-pro": ModelSpec(
         id="deepseek-v4-pro",
         provider=DEEPSEEK,
+        context_window=1_000_000,
         max_tokens=65_536,
         reasoning=True,
         thinking_format="deepseek",
@@ -254,6 +259,8 @@ CATALOG: dict[str, ModelSpec] = {
     "deepseek-v4-flash": ModelSpec(
         id="deepseek-v4-flash",
         provider=DEEPSEEK,
+        context_window=1_000_000,
+        max_tokens=65_536,
         reasoning=True,
         thinking_format="deepseek",
     ),
