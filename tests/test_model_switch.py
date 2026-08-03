@@ -40,8 +40,8 @@ class _CloseableClient:
 
 
 def test_prepare_same_model_is_a_noop():
-    config = _config(model="deepseek-chat")
-    verdict = prepare_model_switch("deepseek-chat", config)
+    config = _config(model="deepseek-v4-pro")
+    verdict = prepare_model_switch("deepseek-v4-pro", config)
     assert not verdict.switched
     assert any("当前已是" in notice for notice in verdict.notices)
 
@@ -56,7 +56,7 @@ def test_prepare_missing_api_key_refuses():
 
 
 def test_prepare_resets_incompatible_thinking_effort():
-    config = _config(model="deepseek-chat", thinking_effort="medium")
+    config = _config(model="deepseek-v4-pro", thinking_effort="medium")
     verdict = prepare_model_switch("kimi-k3", config)
     assert verdict.switched
     assert config.llm.thinking_effort is None
@@ -64,21 +64,21 @@ def test_prepare_resets_incompatible_thinking_effort():
 
 
 def test_prepare_keeps_supported_thinking_effort():
-    config = _config(model="deepseek-chat", thinking_effort="high")
+    config = _config(model="deepseek-v4-pro", thinking_effort="high")
     verdict = prepare_model_switch("kimi-k3", config)
     assert verdict.switched
     assert config.llm.thinking_effort == "high"
 
 
 def test_prepare_unknown_model_warns_generic():
-    config = _config(model="deepseek-chat")
+    config = _config(model="deepseek-v4-pro")
     verdict = prepare_model_switch("some-custom-model", config)
     assert verdict.switched
     assert any("未知模型" in notice for notice in verdict.notices)
 
 
 def test_prepare_sets_config_model_last():
-    config = _config(model="deepseek-chat")
+    config = _config(model="deepseek-v4-pro")
     verdict = prepare_model_switch("glm-4.7", config)
     assert verdict.switched
     assert config.llm.model == "glm-4.7"
@@ -104,18 +104,18 @@ def test_reload_llm_config_replaces_llm_and_providers(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_swap_closes_old_client_and_updates_agent():
-    config = _config(model="deepseek-chat")
+    config = _config(model="deepseek-v4-pro")
     old = _CloseableClient()
     agent = _StubAgent()
     new_client, notices = await swap_llm_client(config, old, agent)
     assert old.closed
     assert agent.updated_with == [new_client]
-    assert any("已切换模型 deepseek-chat (deepseek)" in n for n in notices)
+    assert any("已切换模型 deepseek-v4-pro (deepseek)" in n for n in notices)
 
 
 @pytest.mark.asyncio
 async def test_swap_tolerates_client_without_close():
-    config = _config(model="deepseek-chat")
+    config = _config(model="deepseek-v4-pro")
     agent = _StubAgent()
     new_client, _ = await swap_llm_client(config, object(), agent)
     assert agent.updated_with == [new_client]
@@ -135,6 +135,6 @@ async def test_swap_persists_model_to_config(tmp_path, monkeypatch):
 @pytest.mark.asyncio
 async def test_swap_reports_persistence_failure(monkeypatch):
     monkeypatch.setattr("limbo.model_switch.save_model_to_config", lambda model: False)
-    config = _config(model="deepseek-chat")
+    config = _config(model="deepseek-v4-pro")
     _, notices = await swap_llm_client(config, _CloseableClient(), _StubAgent())
     assert any("配置写回失败" in notice for notice in notices)

@@ -212,6 +212,12 @@ async def test_goal_badge_rainbow_while_running(tmp_path, monkeypatch):
     gate = asyncio.Event()
     client = GatedClient()
     client.add([TextChunk(text="still working")], gate=gate)
+
+    async def passing(command, workdir, **kwargs):
+        return VerifyResult(exit_code=0)
+
+    monkeypatch.setattr(goal_driver_module, "run_verify", passing)
+
     app = make_app(tmp_path, client)
     async with app.run_test() as pilot:
         await pilot.pause()

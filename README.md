@@ -17,7 +17,7 @@ Create `~/.limbo/config.toml`:
 ```toml
 [llm]
 api_key = "your-api-key"
-model = "deepseek-chat"
+model = "deepseek-v4-pro"
 base_url = "https://api.deepseek.com/v1"
 ```
 

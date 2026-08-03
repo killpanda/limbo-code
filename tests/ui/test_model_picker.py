@@ -25,7 +25,7 @@ KEY_ENVS = [
     "CODEX_API_KEY",
 ]
 
-DEFAULT_FILE = '[llm]\napi_key = "test"\nmodel = "deepseek-chat"\n'
+DEFAULT_FILE = '[llm]\napi_key = "test"\nmodel = "deepseek-v4-pro"\n'
 
 
 class FakeLLMClient:
@@ -123,7 +123,7 @@ async def test_picker_groups_by_provider_and_marks_current(tmp_path):
         ]
         current = [t for t in labels if t.endswith("当前")]
         assert len(current) == 1
-        assert current[0].strip().startswith("deepseek-chat")
+        assert current[0].strip().startswith("deepseek-v4-pro")
         assert any(
             "glm-4.7" in t and "200K" in t and "reasoning" in t for t in labels
         )
@@ -134,7 +134,7 @@ async def test_picker_marks_unavailable_providers(
     tmp_path, isolated_config_path, clear_key_envs, monkeypatch
 ):
     # No key in the file; only glm resolves one (from the env).
-    isolated_config_path.write_text('[llm]\nmodel = "deepseek-chat"\n')
+    isolated_config_path.write_text('[llm]\nmodel = "deepseek-v4-pro"\n')
     monkeypatch.setenv("ZHIPUAI_API_KEY", "glm-key")
 
     def configure(cfg):
@@ -158,7 +158,7 @@ async def test_picker_marks_unavailable_providers(
 async def test_picker_select_unavailable_keeps_open_with_hint(
     tmp_path, isolated_config_path, clear_key_envs
 ):
-    isolated_config_path.write_text('[llm]\nmodel = "deepseek-chat"\n')
+    isolated_config_path.write_text('[llm]\nmodel = "deepseek-v4-pro"\n')
 
     def configure(cfg):
         cfg.llm.api_key = None
@@ -169,7 +169,7 @@ async def test_picker_select_unavailable_keeps_open_with_hint(
         await pilot.pause()
         picker = pilot.app.screen_stack[-1]
         list_view = picker.query_one("ListView")
-        # Index 1 = first model row (deepseek-chat), unavailable without a key.
+        # Index 1 = first model row (deepseek-v4-pro), unavailable without a key.
         list_view.index = 1
         await pilot.press("enter")
         await pilot.pause()
@@ -187,7 +187,7 @@ async def test_picker_escape_dismisses_without_switch(tmp_path):
         await pilot.press("escape")
         await pilot.pause()
         assert isinstance(pilot.app.screen_stack[-1], MainScreen)
-        assert pilot.app.screen.config.llm.model == "deepseek-chat"
+        assert pilot.app.screen.config.llm.model == "deepseek-v4-pro"
 
 
 @pytest.mark.asyncio
@@ -234,8 +234,8 @@ async def test_switch_to_same_model_is_noop(tmp_path):
     async with app.run_test() as pilot:
         screen = pilot.app.screen_stack[-1]
         old_client = screen.llm_client
-        await submit(pilot, "/model deepseek-chat")
-        await wait_for_chat(pilot, "当前已是 deepseek-chat")
+        await submit(pilot, "/model deepseek-v4-pro")
+        await wait_for_chat(pilot, "当前已是 deepseek-v4-pro")
         assert screen.llm_client is old_client
 
 
@@ -243,7 +243,7 @@ async def test_switch_to_same_model_is_noop(tmp_path):
 async def test_switch_without_key_refused(
     tmp_path, isolated_config_path, clear_key_envs
 ):
-    isolated_config_path.write_text('[llm]\nmodel = "deepseek-chat"\n')
+    isolated_config_path.write_text('[llm]\nmodel = "deepseek-v4-pro"\n')
 
     def configure(cfg):
         cfg.llm.api_key = None
@@ -254,7 +254,7 @@ async def test_switch_without_key_refused(
         old_client = screen.llm_client
         await submit(pilot, "/model glm-4.7")
         await wait_for_chat(pilot, "未配置 glm 的 API key（$ZHIPUAI_API_KEY）")
-        assert screen.config.llm.model == "deepseek-chat"
+        assert screen.config.llm.model == "deepseek-v4-pro"
         assert screen.llm_client is old_client
 
 
@@ -302,7 +302,7 @@ async def test_busy_guard_blocks_switch(tmp_path):
         await submit(pilot, "/model glm-4.7")
         await wait_for_chat(pilot, "当前任务进行中")
         assert pilot.app.screen_stack[-1] is screen
-        assert screen.config.llm.model == "deepseek-chat"
+        assert screen.config.llm.model == "deepseek-v4-pro"
 
 
 @pytest.mark.asyncio
@@ -310,7 +310,7 @@ async def test_thinking_effort_reset_when_unsupported(
     tmp_path, isolated_config_path
 ):
     isolated_config_path.write_text(
-        '[llm]\napi_key = "test"\nmodel = "deepseek-chat"\n'
+        '[llm]\napi_key = "test"\nmodel = "deepseek-v4-pro"\n'
         'thinking_effort = "max"\n\n'  # gpt-5.5 tops out at xhigh
         '[providers.codex]\napi_key = "codex-key"\n'
     )
@@ -335,7 +335,7 @@ async def test_thinking_effort_reset_when_unsupported(
 async def test_hot_reload_picks_up_new_provider_key(
     tmp_path, isolated_config_path, clear_key_envs
 ):
-    isolated_config_path.write_text('[llm]\nmodel = "deepseek-chat"\n')
+    isolated_config_path.write_text('[llm]\nmodel = "deepseek-v4-pro"\n')
 
     def configure(cfg):
         cfg.llm.api_key = None
@@ -349,7 +349,7 @@ async def test_hot_reload_picks_up_new_provider_key(
         assert resolve_api_key(resolve_model("glm-4.7"), screen.config) is None
 
         isolated_config_path.write_text(
-            '[llm]\nmodel = "deepseek-chat"\n\n'
+            '[llm]\nmodel = "deepseek-v4-pro"\n\n'
             '[providers.glm]\napi_key = "fresh-glm-key"\n'
         )
         await submit(pilot, "/model glm-4.7")
@@ -362,7 +362,7 @@ async def test_switch_persists_model_preserving_comments(
 ):
     isolated_config_path.write_text(
         '# my limbo config\n[llm]\napi_key = "test"\n'
-        'model = "deepseek-chat"  # default\n'
+        'model = "deepseek-v4-pro"  # default\n'
     )
 
     app = make_app(tmp_path)

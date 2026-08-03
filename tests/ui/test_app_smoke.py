@@ -26,7 +26,7 @@ async def test_main_screen_uses_factory_client_for_kimi_coding(tmp_path):
     screen = MainScreen(workdir=tmp_path, config=cfg, session_dir=tmp_path / "sessions")
     assert isinstance(screen.llm_client, AnthropicMessagesClient)
 
-    cfg.llm.model = "deepseek-chat"
+    cfg.llm.model = "deepseek-v4-pro"
     screen = MainScreen(workdir=tmp_path, config=cfg, session_dir=tmp_path / "sessions")
     assert isinstance(screen.llm_client, OpenAICompatibleClient)
 

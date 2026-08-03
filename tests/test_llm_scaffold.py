@@ -20,16 +20,16 @@ from limbo.models import Attachment
 def test_require_api_key_returns_configured_key():
     config = Config()
     config.llm.api_key = "sk-test"
-    assert require_api_key(resolve_model("deepseek-chat"), config) == "sk-test"
+    assert require_api_key(resolve_model("deepseek-v4-pro"), config) == "sk-test"
 
 
 def test_require_api_key_error_names_provider_and_env():
     config = Config()
     config.llm.api_key = None
     with pytest.raises(ValueError, match=r"No API key for provider 'deepseek'"):
-        require_api_key(resolve_model("deepseek-chat"), config)
+        require_api_key(resolve_model("deepseek-v4-pro"), config)
     with pytest.raises(ValueError, match=r"\$DEEPSEEK_API_KEY"):
-        require_api_key(resolve_model("deepseek-chat"), config)
+        require_api_key(resolve_model("deepseek-v4-pro"), config)
 
 
 def test_require_api_key_generic_provider_has_no_env_hint():
