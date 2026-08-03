@@ -21,7 +21,7 @@ from limbo.agent import (
 )
 from limbo.attachments import ATTACHMENT_INLINE_MAX_BYTES
 from limbo.compaction import SUMMARY_TAG
-from limbo.config import CompactionSettings, Config
+from limbo.config import CompactionSettings, Config, LLMConfig
 from limbo.llm.retry import LLMHttpError
 from limbo.models import (
     Attachment,
@@ -757,7 +757,7 @@ def test_agent_trace_session_start_records_resolved_provider(workdir):
         "provider": "deepseek",
         "api": "openai-completions",
         "base_url": "https://api.deepseek.com/v1",
-        "context_window": 128_000,
+        "context_window": 1_000_000,
         "max_tokens": 65_536,
         "thinking_effort": None,
     }
@@ -1323,7 +1323,14 @@ def _compact_cfg(**overrides) -> Config:
     # 1000 is the validator floor; tests pad messages so history exceeds it.
     defaults = {"keep_recent_tokens": 1000}
     defaults.update(overrides)
-    return Config(compaction=CompactionSettings(**defaults))
+    # Lock a small window (generic fallback = 128K) so these tests don't
+    # depend on the default model's context size — deepseek-v4-pro grew to
+    # 1M, which would make the 120K prompt fixtures fall below the
+    # compaction threshold.
+    return Config(
+        compaction=CompactionSettings(**defaults),
+        llm=LLMConfig(model="my-local-model"),
+    )
 
 
 def _seed_history(agent: Agent) -> None:
