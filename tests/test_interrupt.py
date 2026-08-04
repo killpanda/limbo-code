@@ -22,6 +22,7 @@ from limbo.agent import (
     InterruptEvent,
     SteerEvent,
     TextDelta,
+    ToolCallRequest,
     ToolResultEvent,
 )
 from limbo.config import Config
@@ -258,6 +259,69 @@ async def test_interrupt_sequential_batch_placeholders_unstarted(workdir):
 
 
 # -- 4. bash process tree is killed ----------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_interrupt_between_stream_end_and_batch_start(workdir):
+    """ESC landing after the stream finished but before the parallel batch
+    starts: the completed response is kept (full tool_calls), no call
+    starts, every call gets the placeholder, disk untouched."""
+    client = FakeLLMClient(
+        [
+            [
+                ToolCallEvent(
+                    id="w1",
+                    name="write",
+                    arguments={"path": "a.txt", "content": "AAA"},
+                ),
+                ToolCallEvent(
+                    id="w2",
+                    name="write",
+                    arguments={"path": "b.txt", "content": "BBB"},
+                ),
+            ]
+        ]
+    )
+    agent = make_agent(workdir, client)
+
+    events: list = []
+
+    async def consume():
+        async for event in agent.run("go"):
+            events.append(event)
+            # ToolCallRequests stream twice per call: mid-stream (from
+            # _call_llm) and pre-batch (from the loop). The third one is
+            # the first pre-batch re-emit — the stream has completed and
+            # the batch has not started: exactly the target window.
+            requests = [e for e in events if isinstance(e, ToolCallRequest)]
+            if len(requests) == 3:
+                agent.interrupt()
+
+    await asyncio.wait_for(asyncio.ensure_future(consume()), 5)
+
+    # The completed response was appended intact (not treated as a cut
+    # stream): the assistant message keeps its full tool_calls.
+    assistant = [m for m in agent.messages if m.role == "assistant"][-1]
+    assert {tc["id"] for tc in assistant.tool_calls or []} == {"w1", "w2"}
+    # No call started; every call has the placeholder; disk untouched.
+    assert not (workdir / "a.txt").exists()
+    assert not (workdir / "b.txt").exists()
+    results = {e.id: e.result for e in events if isinstance(e, ToolResultEvent)}
+    assert set(results) == {"w1", "w2"}
+    for result in results.values():
+        assert result.success is False
+        assert "未执行" in (result.error or "")
+    interrupts = [e for e in events if isinstance(e, InterruptEvent)]
+    assert len(interrupts) == 1
+    assert interrupts[0].phase == "tool_batch"
+    assert len(client.calls) == 1
+    # History pairing intact, and the trace names the un-executed calls.
+    tool_msgs = [m for m in agent.messages if m.role == "tool"]
+    assert {m.tool_call_id for m in tool_msgs} == {"w1", "w2"}
+    records = read_trace(agent.trace.path)
+    interrupted = [r for r in records if r["type"] == "turn_interrupted"]
+    assert len(interrupted) == 1
+    assert interrupted[0]["unexecuted_tool_call_ids"] == ["w1", "w2"]
 
 
 @pytest.mark.asyncio

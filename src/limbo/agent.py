@@ -198,6 +198,7 @@ class Agent:
         self._interrupt_requested = False
         self._turn_interrupted = False
         self._stream_task: asyncio.Task[Any] | None = None
+        self._stream_cut = False
         self._iteration_count = 0
         self._last_finish_reason: str | None = None
         self._consecutive_length_stops = 0
@@ -800,24 +801,42 @@ class Agent:
         """
         tool_calls = assistant.tool_calls or []
         results: dict[str, ToolResult] = {}
+        unexecuted: list[str] = []
 
         if self.config.tools.parallel and len(tool_calls) > 1:
+
             async def run_one(tc: dict[str, Any]) -> tuple[dict[str, Any], ToolResult]:
                 result = await self._execute_tool_safe(
                     tc["id"], tc["function"]["name"], tc["function"]["arguments"]
                 )
                 return tc, result
 
-            futures = [asyncio.ensure_future(run_one(tc)) for tc in tool_calls]
-            for future in asyncio.as_completed(futures):
-                tc, result = await future
-                results[tc["id"]] = result
-                yield ToolResultEvent(
-                    id=tc["id"],
-                    name=tc["function"]["name"],
-                    result=result,
-                    arguments=tc["function"]["arguments"],
-                )
+            if self._interrupt_requested:
+                # RFC LIM-53 pre-flight, symmetric with the sequential
+                # branch: ESC landed between the end of the stream and the
+                # start of the batch (cancel_active() had nothing to kill
+                # yet) — no call starts, every call gets the placeholder.
+                for tc in tool_calls:
+                    result = ToolResult(success=False, error=_NOT_EXECUTED_MESSAGE)
+                    results[tc["id"]] = result
+                    unexecuted.append(tc["id"])
+                    yield ToolResultEvent(
+                        id=tc["id"],
+                        name=tc["function"]["name"],
+                        result=result,
+                        arguments=tc["function"]["arguments"],
+                    )
+            else:
+                futures = [asyncio.ensure_future(run_one(tc)) for tc in tool_calls]
+                for future in asyncio.as_completed(futures):
+                    tc, result = await future
+                    results[tc["id"]] = result
+                    yield ToolResultEvent(
+                        id=tc["id"],
+                        name=tc["function"]["name"],
+                        result=result,
+                        arguments=tc["function"]["arguments"],
+                    )
         else:
             for tc in tool_calls:
                 if self._interrupt_requested:
@@ -826,6 +845,7 @@ class Agent:
                     # tools always record their real result, so history
                     # and disk cannot diverge.
                     result = ToolResult(success=False, error=_NOT_EXECUTED_MESSAGE)
+                    unexecuted.append(tc["id"])
                 else:
                     result = await self._execute_tool_safe(
                         tc["id"], tc["function"]["name"], tc["function"]["arguments"]
@@ -847,7 +867,9 @@ class Agent:
         # RFC LIM-53: an interrupt that arrived during the batch surfaces
         # now — every call already has its result recorded above (real for
         # started tools, placeholder for never-started ones).
-        event = self._mark_interrupted("tool_batch")
+        event = self._mark_interrupted(
+            "tool_batch", unexecuted_tool_call_ids=unexecuted
+        )
         if event is not None:
             yield event
 
@@ -942,22 +964,28 @@ class Agent:
     ) -> AsyncIterator[Any]:
         """Yield events from an LLM stream, interruptibly (RFC LIM-53).
 
-        Stops early (without raising) once an interrupt is requested —
-        callers check ``_interrupt_requested`` to tell an interrupted
-        stream apart from a completed one. Both interrupt layers live
-        here: the flag check between chunks (graceful, keeps partial
-        content) and the cancellable pump task (covers stalled reads).
+        Sets ``self._stream_cut`` when the stream was cut short by an
+        interrupt — callers use it (not the flag alone) to tell a cut
+        stream apart from one that COMPLETED before the ESC landed (the
+        flag may be set in the synchronous window between stream end and
+        the tool batch; the completed response must be kept then). Both
+        interrupt layers live here: the flag check between chunks
+        (graceful, keeps partial content) and the cancellable pump task
+        (covers stalled reads).
         """
+        self._stream_cut = False
         stream = self.llm_client.chat(messages, tools=tools, on_request=on_request)
         try:
             while True:
                 if self._interrupt_requested:
+                    self._stream_cut = True
                     return
                 try:
                     event = await self._anext_cancellable(stream)
                 except StopAsyncIteration:
                     return
                 except _StreamInterrupted:
+                    self._stream_cut = True
                     return
                 yield event
         finally:
@@ -1012,13 +1040,15 @@ class Agent:
             elif isinstance(event, CompletionMeta):
                 meta = event
 
-        if self._interrupt_requested:
-            # RFC LIM-53: the stream was interrupted. The partial response
-            # is appended content-only — partial tool-call arguments may be
-            # truncated, and truncated thinking cannot be replayed (its
-            # signature is incomplete), so both are dropped. Dialect
-            # replays tolerate reasoning=None (Anthropic skips the thinking
-            # block; Kimi replays reasoning_content as "").
+        if self._stream_cut:
+            # RFC LIM-53: the stream was cut mid-response. The partial
+            # response is appended content-only — partial tool-call
+            # arguments may be truncated, and truncated thinking cannot be
+            # replayed (its signature is incomplete), so both are dropped.
+            # Dialect replays tolerate reasoning=None (Anthropic skips the
+            # thinking block; Kimi replays reasoning_content as ""). A
+            # stream that COMPLETED before the ESC landed takes the normal
+            # path below; the batch pre-flight handles that interrupt.
             if assistant_content:
                 self.messages.append(
                     Message(role="assistant", content=assistant_content)
