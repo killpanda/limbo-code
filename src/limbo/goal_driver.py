@@ -216,6 +216,15 @@ class GoalDriver:
                     yield event
                 next_attachments = None
 
+                # User interrupt (RFC LIM-53) outranks everything at the
+                # turn boundary: stop the loop BEFORE draining leftover
+                # steers — queued messages stay queued and the goal stays
+                # active (same posture as cancel_verify: the user called
+                # stop, not continue).
+                if self._agent.was_interrupted:
+                    self._agent.trace.log("goal_interrupted")
+                    return
+
                 # Turn boundary, user first: leftover steer messages (error
                 # exits) outrank goal continuation. E1: yield one SteerEvent
                 # per item so the frontend flips the queued cards by id.

@@ -296,6 +296,8 @@ async def test_queued_message_with_attachment(tmp_path):
 
 @pytest.mark.asyncio
 async def test_esc_cancels_latest_queued(tmp_path):
+    """RFC LIM-53: while a turn runs, ESC interrupts the turn; cancelling
+    the newest queued steer is what ESC does once no turn is running."""
     gate = asyncio.Event()
     client = GatedClient()
     client.add([TextChunk(text="done")], gate=gate)
@@ -313,7 +315,13 @@ async def test_esc_cancels_latest_queued(tmp_path):
         await type_and_submit(pilot, input_widget, "第二条")
         assert screen.agent.queued_count == 2
 
-        # Esc cancels the newest first (LIFO).
+        # ESC while the turn runs interrupts the turn; the queue survives.
+        await pilot.press("escape")
+        await wait_until(pilot, lambda: not screen.driver.running)
+        assert screen.agent.queued_count == 2
+        assert "⏹ 已打断" in chat.transcript_text()
+
+        # Turn over: Esc cancels the newest queued message first (LIFO).
         await pilot.press("escape")
         await pilot.pause()
         assert screen.agent.queued_count == 1
@@ -331,9 +339,7 @@ async def test_esc_cancels_latest_queued(tmp_path):
         await pilot.press("escape")
         await pilot.pause()
 
-        gate.set()
-        await wait_until(pilot, lambda: "done" in chat.transcript_text())
-        # Nothing was ever injected.
+        # Nothing was ever injected (the interrupted turn drained nothing).
         user_texts = [m.content for m in screen.agent.messages if m.role == "user"]
         assert user_texts == ["go"]
 
@@ -367,14 +373,18 @@ async def test_esc_closes_slash_menu_before_cancelling(tmp_path):
         assert screen.agent.queued_count == 1
         assert "❯ 排队（排队中）" in chat.transcript_text()
 
-        # Menu closed now: Esc reaches the queue.
+        # Menu closed now: the turn is still running, so the next Esc
+        # interrupts the turn (RFC LIM-53) instead of touching the queue.
+        await pilot.press("escape")
+        await wait_until(pilot, lambda: not screen.driver.running)
+        assert screen.agent.queued_count == 1
+        assert "❯ 排队（排队中）" in chat.transcript_text()
+
+        # Turn over: Esc reaches the queue.
         await pilot.press("escape")
         await pilot.pause()
         assert screen.agent.queued_count == 0
         assert "❯ 排队（已取消）" in chat.transcript_text()
-
-        gate.set()
-        await wait_until(pilot, lambda: "done" in chat.transcript_text())
 
 
 # -- cancel: card ✕ (Test Plan #27, #28) ------------------------------------------

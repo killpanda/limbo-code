@@ -268,6 +268,17 @@ class ChatWidget(VerticalScroll):
         for card in self.tool_cards.values():
             card.toggle()
 
+    def cancel_running_tool_cards(self) -> None:
+        """Mark still-running tool cards as interrupted (RFC LIM-53).
+
+        Covers cards created from partial tool-call events during a stream
+        that was then interrupted — those calls never execute, so no
+        ToolResultEvent will ever arrive for them.
+        """
+        for card in self.tool_cards.values():
+            if card.state == "running":
+                card.set_cancelled()
+
     # -- helpers --------------------------------------------------------------
 
     def transcript_text(self) -> str:

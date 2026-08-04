@@ -216,6 +216,25 @@ class BashTool(BaseTool):
         self.dangerous_patterns = dangerous_patterns or list(
             DEFAULT_DANGEROUS_COMMANDS
         )
+        # In-flight processes, for ESC interruption (RFC LIM-53). cancel()
+        # runs on the event loop while run() blocks in a worker thread, so
+        # both sets are guarded by the same lock; ``_cancelled`` keys are
+        # id(proc) to stay correct across pid reuse.
+        self._active_procs: set[subprocess.Popen[bytes]] = set()
+        self._cancelled: set[int] = set()
+        self._procs_lock = threading.Lock()
+
+    def cancel(self) -> None:
+        """Kill every in-flight process tree (ESC interrupt, RFC LIM-53).
+
+        Thread-safe. A killed run reports the interruption explicitly
+        ("已被用户打断") instead of a bare non-zero exit.
+        """
+        with self._procs_lock:
+            procs = list(self._active_procs)
+            self._cancelled.update(id(proc) for proc in procs)
+        for proc in procs:
+            _kill_process_tree(proc)
 
     def run(self, arguments: dict[str, Any]) -> ToolResult:
         command = arguments.get("command", "")
@@ -255,6 +274,8 @@ class BashTool(BaseTool):
         stdout.start(proc.stdout, spill)
         stderr.start(proc.stderr, spill)
 
+        with self._procs_lock:
+            self._active_procs.add(proc)
         timed_out = False
         try:
             proc.wait(timeout=timeout)
@@ -265,6 +286,10 @@ class BashTool(BaseTool):
                 proc.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 pass
+        with self._procs_lock:
+            interrupted = id(proc) in self._cancelled
+            self._cancelled.discard(id(proc))
+            self._active_procs.discard(proc)
 
         out_text = stdout.finish()
         err_text = stderr.finish()
@@ -292,6 +317,11 @@ class BashTool(BaseTool):
             else:
                 hint += "; full output could not be saved to a temp file]"
             output = f"{truncation.content}\n\n{hint}"
+
+        if interrupted:
+            interrupt_msg = "已被用户打断（ESC）"
+            output = f"{interrupt_msg}\n{output}" if output else interrupt_msg
+            return ToolResult(success=False, output=output, error=interrupt_msg)
 
         if timed_out:
             timeout_msg = f"Command timed out after {timeout}s and was killed."
