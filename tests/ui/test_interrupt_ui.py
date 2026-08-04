@@ -179,6 +179,52 @@ async def test_esc_unfocused_falls_back_to_queue_cancel(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_esc_unfocused_closes_open_slash_menu_first(tmp_path):
+    """Narrow path: '/' opens the menu, focus moves to the chat (menu
+    stays open), ESC must close the menu — not interrupt the turn or
+    touch the queue (routing-chain layer 1 from any focus)."""
+    client = GateMidStreamClient()
+    app = make_app(tmp_path, client)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = get_screen(pilot)
+        chat = screen.query_one("#chat", ChatWidget)
+        input_widget = screen.query_one("#input", InputWidget)
+
+        screen.run_worker(screen._handle_turn("go"))
+        await wait_until(pilot, lambda: len(client.calls) == 1)
+        input_widget.text = "排队消息"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert screen.agent.queued_count == 1
+
+        # Open the slash menu, then move focus off the input with the
+        # menu still open.
+        await pilot.press("/")
+        await pilot.pause()
+        assert screen.slash_menu_open
+        chat.focus()
+        await pilot.pause()
+        assert screen.slash_menu_open
+
+        await pilot.press("escape")
+        await pilot.pause()
+
+        # Only the menu closed: the turn is still running and the queued
+        # message is untouched.
+        assert not screen.slash_menu_open
+        assert screen.driver.running
+        assert screen.agent.queued_count == 1
+        assert "⏹ 已打断" not in chat.transcript_text()
+
+        # Next ESC (menu closed, still unfocused) interrupts the turn.
+        await pilot.press("escape")
+        await wait_until(pilot, lambda: not screen.driver.running)
+        assert "⏹ 已打断" in chat.transcript_text()
+        assert screen.agent.queued_count == 1
+
+
+@pytest.mark.asyncio
 async def test_esc_noop_when_idle_and_queue_empty(tmp_path):
     client = GateMidStreamClient()
     app = make_app(tmp_path, client)

@@ -775,17 +775,23 @@ class MainScreen(Screen[None]):
     def handle_escape(self) -> None:
         """ESC routing chain (RFC LIM-53), in priority order.
 
-        Entry points: the input widget's priority binding (input focused —
-        it closes an open slash menu first and only forwards otherwise)
+        Entry points: the input widget's priority binding (input focused)
         and this screen's own ``escape`` binding (focus anywhere else).
-        Modal screens handle ESC in their own bindings. What remains,
-        highest priority first: cancel an in-flight verify subprocess
-        (LIM-40), interrupt the running turn/compact worker (LIM-53),
-        then fall back to cancelling the newest queued steer message
-        (LIM-20). Note the deliberate behavior change: while a turn is
-        running, ESC interrupts the turn — queued-steer cancel is the
-        card's ✕ affordance during that window.
+        Modal screens handle ESC in their own bindings. The chain,
+        highest priority first: close an open slash menu, cancel an
+        in-flight verify subprocess (LIM-40), interrupt the running
+        turn/compact worker (LIM-53), then fall back to cancelling the
+        newest queued steer message (LIM-20). Note the deliberate
+        behavior change: while a turn is running, ESC interrupts the
+        turn — queued-steer cancel is the card's ✕ affordance during
+        that window.
         """
+        # Layer 1 lives here (not only in the input binding) so the narrow
+        # path "menu open → click the chat (focus moves, menu stays open)
+        # → ESC" still closes the menu first instead of skipping a layer.
+        if self.slash_menu_open:
+            self.slash_menu_close()
+            return
         if self.driver.verifying:
             if self.driver.cancel_verify():
                 self.query_one("#chat", ChatWidget).add_info("已取消验收命令")
