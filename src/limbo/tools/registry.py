@@ -98,6 +98,15 @@ class ToolRegistry:
             return ToolResult(success=False, error=f"Unknown tool: {name}")
         return await asyncio.to_thread(tool.execute, arguments)
 
+    def cancel_active(self) -> None:
+        """Cancel in-flight interruptible tools (ESC interrupt, RFC LIM-53).
+
+        Only bash is interruptible (process-tree kill); file tools are
+        no-ops by design — they run to completion and record real results.
+        """
+        for tool in self._tools.values():
+            tool.cancel()
+
     def definitions(self) -> list[dict[str, Any]]:
         return [
             {

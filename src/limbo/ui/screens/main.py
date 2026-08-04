@@ -13,6 +13,7 @@ from limbo.agent import (
     Agent,
     CompactionEvent,
     ErrorEvent,
+    InterruptEvent,
     SteerEvent,
     TextDelta,
     ThinkingDelta,
@@ -72,6 +73,12 @@ class MainScreen(Screen[None]):
     BINDINGS = [
         Binding("ctrl+o", "toggle_tools", "展开/收起工具输出"),
         Binding("ctrl+g", "game2048", "2048 小游戏"),
+        # Screen-level ESC (LIM-53): the input widget's priority binding
+        # wins while it is focused (slash-menu close lives there); this
+        # binding makes ESC work when focus is elsewhere (e.g. the chat
+        # was clicked). Modal screens on top handle ESC in their own
+        # bindings before this screen ever sees it.
+        Binding("escape", "handle_escape", show=False),
     ]
 
     def __init__(
@@ -642,6 +649,11 @@ class MainScreen(Screen[None]):
     def action_toggle_tools(self) -> None:
         self.query_one("#chat", ChatWidget).toggle_tool_bodies()
 
+    def action_handle_escape(self) -> None:
+        """Screen-level ESC binding: fires only when the input widget is
+        NOT focused (its priority binding consumes ESC first otherwise)."""
+        self.handle_escape()
+
     def _btw(self, question: str) -> None:
         """Open the /btw side-question overlay.
 
@@ -760,13 +772,32 @@ class MainScreen(Screen[None]):
             chat.add_info("该消息已注入，无法撤回")
         self._update_queue_status()
 
-    def cancel_latest_queued(self) -> None:
-        """Esc with no menu open: cancel verify first, then the newest
-        queued steer message (LIM-40: during the verify window Esc routes
-        to the verify subprocess, not the steer queue)."""
+    def handle_escape(self) -> None:
+        """ESC routing chain (RFC LIM-53), in priority order.
+
+        Entry points: the input widget's priority binding (input focused)
+        and this screen's own ``escape`` binding (focus anywhere else).
+        Modal screens handle ESC in their own bindings. The chain,
+        highest priority first: close an open slash menu, cancel an
+        in-flight verify subprocess (LIM-40), interrupt the running
+        turn/compact worker (LIM-53), then fall back to cancelling the
+        newest queued steer message (LIM-20). Note the deliberate
+        behavior change: while a turn is running, ESC interrupts the
+        turn — queued-steer cancel is the card's ✕ affordance during
+        that window.
+        """
+        # Layer 1 lives here (not only in the input binding) so the narrow
+        # path "menu open → click the chat (focus moves, menu stays open)
+        # → ESC" still closes the menu first instead of skipping a layer.
+        if self.slash_menu_open:
+            self.slash_menu_close()
+            return
         if self.driver.verifying:
             if self.driver.cancel_verify():
                 self.query_one("#chat", ChatWidget).add_info("已取消验收命令")
+            return
+        if self._agent_busy:
+            self.agent.interrupt()
             return
         item_id = self.agent.cancel_latest_steer()
         if item_id is None:
@@ -808,7 +839,10 @@ class MainScreen(Screen[None]):
             # the gap and start a second concurrent turn worker. Leftovers
             # happen on error / max-iterations exits (the loop's own
             # consumption points never leave the queue non-empty otherwise).
-            pending = self.agent.drain_steer()
+            # RFC LIM-53: an interrupted turn must NOT auto-follow-up —
+            # queued steers stay queued until the user's next submission
+            # (run()-head fallback drain delivers them there).
+            pending = [] if self.agent.was_interrupted else self.agent.drain_steer()
             if pending:
                 for item in pending:
                     chat.mark_steer_delivered(item.id)
@@ -855,6 +889,11 @@ class MainScreen(Screen[None]):
         elif isinstance(event, SteerEvent):
             chat.mark_steer_delivered(event.id)
             self._update_queue_status()
+        elif isinstance(event, InterruptEvent):
+            # RFC LIM-53: cards still running belong to calls that will
+            # never execute (the stream was cut mid-tool-call) — mark them.
+            chat.cancel_running_tool_cards()
+            chat.add_info("⏹ 已打断")
         elif isinstance(event, GoalVerifyStarted):
             chat.add_info(
                 f"🔍 第 {event.round}/{event.max_rounds} 轮验收：`{event.command}`"

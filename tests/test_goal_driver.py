@@ -265,6 +265,10 @@ class FakeAgent:
     def drain_steer(self):
         return self._queue.drain()
 
+    @property
+    def was_interrupted(self):
+        return False
+
     def has_pending_steer(self):
         return len(self._queue) > 0
 

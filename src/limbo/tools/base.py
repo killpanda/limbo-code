@@ -59,6 +59,15 @@ class BaseTool(ABC):
         except ToolError as e:
             return ToolResult(success=False, error=str(e))
 
+    def cancel(self) -> None:
+        """Best-effort cancellation of in-flight work (ESC interrupt).
+
+        Default no-op: file tools always run to completion so history can
+        record their real result — a "cancelled" worker thread would keep
+        writing to disk while history claims the call never happened
+        (RFC LIM-53). BashTool overrides this to kill its process tree.
+        """
+
     @abstractmethod
     def run(self, arguments: dict[str, Any]) -> ToolResult:
         ...

@@ -28,7 +28,7 @@ from limbo.config import Config
 from limbo.history import ToolHistory
 from limbo.history import repair as repair_history
 from limbo.llm.catalog import resolve_base_url, resolve_model
-from limbo.llm.client import LLMClient
+from limbo.llm.client import LLMClient, RequestHook
 from limbo.llm.retry import friendly_message
 from limbo.llm.usage import PromptSizeEstimator, estimate_tokens, normalize_usage
 from limbo.models import (
@@ -57,6 +57,15 @@ from limbo.trace import TraceLogger, trace_path_for
 # model re-issuing the same oversized arguments (LIM-32): without a guard
 # it burns the whole iteration budget re-sending what can never fit.
 _MAX_CONSECUTIVE_LENGTH_STOPS = 3
+
+# Placeholder result for tool calls that never started because the user
+# interrupted the batch (RFC LIM-53). Only ever used for calls that
+# genuinely never ran, so history and disk cannot diverge.
+_NOT_EXECUTED_MESSAGE = "未执行：用户打断（ESC）"
+
+
+class _StreamInterrupted(Exception):
+    """Internal: the LLM stream pump was cancelled by interrupt()."""
 
 
 @dataclass(frozen=True)
@@ -125,6 +134,13 @@ class SteerEvent:
     text: str
 
 
+@dataclass(frozen=True)
+class InterruptEvent:
+    """The user interrupted the current activity with ESC (RFC LIM-53)."""
+
+    phase: str  # "llm_stream" | "tool_batch" | "compact"
+
+
 AgentEvent = (
     TextDelta
     | ThinkingDelta
@@ -134,6 +150,7 @@ AgentEvent = (
     | CompactionEvent
     | UsageUpdate
     | SteerEvent
+    | InterruptEvent
 )
 
 
@@ -175,6 +192,13 @@ class Agent:
         # Steer queue (RFC LIM-20): user messages submitted mid-turn. The
         # queue owns queueing semantics; this loop owns drain timing.
         self._steer_queue = SteerQueue()
+        # Interrupt state (RFC LIM-53): ESC cancels the in-flight LLM
+        # stream / tool batch / compact summary at the nearest
+        # history-consistency point.
+        self._interrupt_requested = False
+        self._turn_interrupted = False
+        self._stream_task: asyncio.Task[Any] | None = None
+        self._stream_cut = False
         self._iteration_count = 0
         self._last_finish_reason: str | None = None
         self._consecutive_length_stops = 0
@@ -386,6 +410,69 @@ class Agent:
         """Remove and return all queued items in FIFO order."""
         return self._steer_queue.drain()
 
+    # -- interrupt (LIM-53) ---------------------------------------------------
+
+    def interrupt(self) -> None:
+        """Interrupt the current turn / compact at the next consistency point.
+
+        Non-blocking; safe to call from the UI at any time (a no-op when
+        idle — the flag is reset at the next run()/compact() entry). Two
+        layers, both required: the flag lets chunk-driven code stop
+        gracefully with partial content, and cancelling the stream pump
+        task covers stalled reads where no chunk ever arrives. In-flight
+        bash process trees are killed immediately; file tools are not
+        cancellable by design (they finish and record real results).
+        """
+        self._interrupt_requested = True
+        task = self._stream_task
+        if task is not None and not task.done():
+            task.cancel()
+        self.registry.cancel_active()
+
+    @property
+    def was_interrupted(self) -> bool:
+        """Whether the last turn ended by user interrupt.
+
+        Reset at run() entry; consumed by the goal driver at the turn
+        boundary (checked BEFORE the leftover-steer drain, RFC LIM-53).
+        """
+        return self._turn_interrupted
+
+    def _mark_interrupted(self, phase: str, **extra: Any) -> InterruptEvent | None:
+        """Consume a pending interrupt request; returns the event, once per turn."""
+        if not self._interrupt_requested or self._turn_interrupted:
+            return None
+        self._turn_interrupted = True
+        self.trace.log(
+            "turn_interrupted",
+            turn=self._turn_count,
+            iteration=self._iteration_count,
+            phase=phase,
+            **extra,
+        )
+        return InterruptEvent(phase=phase)
+
+    async def _anext_cancellable(self, stream: AsyncIterator[Any]) -> Any:
+        """Next event of an LLM stream, interruptibly (RFC LIM-53).
+
+        Raises StopAsyncIteration at stream end (as usual) and
+        _StreamInterrupted when interrupt() cancelled the pump — the only
+        way out of a stalled read where no chunk ever arrives.
+        """
+        task = asyncio.ensure_future(stream.__anext__())
+        self._stream_task = task
+        try:
+            return await task
+        except asyncio.CancelledError:
+            if self._interrupt_requested:
+                # interrupt() cancelled the pump (stalled-read layer).
+                raise _StreamInterrupted from None
+            # External cancellation of the turn worker itself (app quit):
+            # must keep propagating — swallowing it would hang shutdown.
+            raise
+        finally:
+            self._stream_task = None
+
     def has_pending_steer(self) -> bool:
         return len(self._steer_queue) > 0
 
@@ -439,6 +526,10 @@ class Agent:
         self._consecutive_length_stops = 0
         self._auto_compaction_failed_this_turn = False
         self._auto_compact_noop_notified = False
+        # RFC LIM-53: an interrupt requested while idle must not leak into
+        # this turn (one of the two reset points; compact() is the other).
+        self._interrupt_requested = False
+        self._turn_interrupted = False
         self._turn_count += 1
         self._turn_start = time.monotonic()
 
@@ -465,8 +556,15 @@ class Agent:
             # A turn killed mid-stream (worker cancelled on app quit, or the
             # generator closed) never logs llm_response/llm_error — the
             # turn_end status is the only trace of what happened, so it
-            # must not claim "completed".
-            self._log_turn_end("completed" if completed else "interrupted")
+            # must not claim "completed". A turn the user interrupted
+            # (RFC LIM-53) breaks gracefully, so without the flag check it
+            # would be logged "completed" — trace must distinguish both.
+            status = (
+                "interrupted"
+                if (self._turn_interrupted or not completed)
+                else "completed"
+            )
+            self._log_turn_end(status)
             try:
                 await self._save_session()
             except Exception as e:  # noqa: BLE001
@@ -554,6 +652,11 @@ class Agent:
                         trigger="auto",
                         reason=f"自动压缩异常：{e}",
                     )
+            # RFC LIM-53: an interrupt consumed inside auto-compaction ends
+            # the turn here — before the steer drain, so queued messages
+            # stay queued.
+            if self._turn_interrupted:
+                break
             # Loop-top steer drain (RFC LIM-20): history is consistent here
             # (previous batch's tool results are all recorded) and no request
             # is in flight — the same safety argument as loop-top compaction.
@@ -590,6 +693,11 @@ class Agent:
                 # as the final response streamed keep the turn alive as a
                 # follow-up — a fresh user input, so the iteration budget
                 # resets like run() does per input.
+                # RFC LIM-53: an interrupted turn ends here instead —
+                # queued steers stay queued for the next run()'s head
+                # fallback drain, never auto-injected by the interrupt.
+                if self._turn_interrupted:
+                    break
                 pending = self.drain_steer()
                 if not pending:
                     break
@@ -673,6 +781,10 @@ class Agent:
                 yield ToolCallRequest(id=tc["id"], name=name, arguments=arguments)
             async for event in self._execute_tool_calls(last):
                 yield event
+            if self._turn_interrupted:
+                # RFC LIM-53: batch results (real or placeholder) are all
+                # recorded; end the turn instead of starting another call.
+                break
 
     async def _execute_tool_calls(self, assistant: Message) -> AsyncIterator[AgentEvent]:
         """Execute one batch of tool calls.
@@ -689,29 +801,55 @@ class Agent:
         """
         tool_calls = assistant.tool_calls or []
         results: dict[str, ToolResult] = {}
+        unexecuted: list[str] = []
 
         if self.config.tools.parallel and len(tool_calls) > 1:
+
             async def run_one(tc: dict[str, Any]) -> tuple[dict[str, Any], ToolResult]:
                 result = await self._execute_tool_safe(
                     tc["id"], tc["function"]["name"], tc["function"]["arguments"]
                 )
                 return tc, result
 
-            futures = [asyncio.ensure_future(run_one(tc)) for tc in tool_calls]
-            for future in asyncio.as_completed(futures):
-                tc, result = await future
-                results[tc["id"]] = result
-                yield ToolResultEvent(
-                    id=tc["id"],
-                    name=tc["function"]["name"],
-                    result=result,
-                    arguments=tc["function"]["arguments"],
-                )
+            if self._interrupt_requested:
+                # RFC LIM-53 pre-flight, symmetric with the sequential
+                # branch: ESC landed between the end of the stream and the
+                # start of the batch (cancel_active() had nothing to kill
+                # yet) — no call starts, every call gets the placeholder.
+                for tc in tool_calls:
+                    result = ToolResult(success=False, error=_NOT_EXECUTED_MESSAGE)
+                    results[tc["id"]] = result
+                    unexecuted.append(tc["id"])
+                    yield ToolResultEvent(
+                        id=tc["id"],
+                        name=tc["function"]["name"],
+                        result=result,
+                        arguments=tc["function"]["arguments"],
+                    )
+            else:
+                futures = [asyncio.ensure_future(run_one(tc)) for tc in tool_calls]
+                for future in asyncio.as_completed(futures):
+                    tc, result = await future
+                    results[tc["id"]] = result
+                    yield ToolResultEvent(
+                        id=tc["id"],
+                        name=tc["function"]["name"],
+                        result=result,
+                        arguments=tc["function"]["arguments"],
+                    )
         else:
             for tc in tool_calls:
-                result = await self._execute_tool_safe(
-                    tc["id"], tc["function"]["name"], tc["function"]["arguments"]
-                )
+                if self._interrupt_requested:
+                    # RFC LIM-53: never-started calls get a placeholder.
+                    # Only genuinely un-executed calls get it — started
+                    # tools always record their real result, so history
+                    # and disk cannot diverge.
+                    result = ToolResult(success=False, error=_NOT_EXECUTED_MESSAGE)
+                    unexecuted.append(tc["id"])
+                else:
+                    result = await self._execute_tool_safe(
+                        tc["id"], tc["function"]["name"], tc["function"]["arguments"]
+                    )
                 results[tc["id"]] = result
                 yield ToolResultEvent(
                     id=tc["id"],
@@ -725,6 +863,15 @@ class Agent:
             result = results[tc["id"]]
             content, attachments = self._gate_tool_attachments(result)
             self._history.record_result(tc["id"], content, attachments)
+
+        # RFC LIM-53: an interrupt that arrived during the batch surfaces
+        # now — every call already has its result recorded above (real for
+        # started tools, placeholder for never-started ones).
+        event = self._mark_interrupted(
+            "tool_batch", unexecuted_tool_call_ids=unexecuted
+        )
+        if event is not None:
+            yield event
 
     def _gate_tool_attachments(
         self, result: ToolResult
@@ -809,6 +956,46 @@ class Agent:
             )
             self._history.record_result(tc["id"], message)
 
+    async def _stream_events(
+        self,
+        messages: list[Message],
+        tools: list[dict[str, Any]],
+        on_request: RequestHook | None,
+    ) -> AsyncIterator[Any]:
+        """Yield events from an LLM stream, interruptibly (RFC LIM-53).
+
+        Sets ``self._stream_cut`` when the stream was cut short by an
+        interrupt — callers use it (not the flag alone) to tell a cut
+        stream apart from one that COMPLETED before the ESC landed (the
+        flag may be set in the synchronous window between stream end and
+        the tool batch; the completed response must be kept then). Both
+        interrupt layers live here: the flag check between chunks
+        (graceful, keeps partial content) and the cancellable pump task
+        (covers stalled reads).
+        """
+        self._stream_cut = False
+        stream = self.llm_client.chat(messages, tools=tools, on_request=on_request)
+        try:
+            while True:
+                if self._interrupt_requested:
+                    self._stream_cut = True
+                    return
+                try:
+                    event = await self._anext_cancellable(stream)
+                except StopAsyncIteration:
+                    return
+                except _StreamInterrupted:
+                    self._stream_cut = True
+                    return
+                yield event
+        finally:
+            aclose = getattr(stream, "aclose", None)
+            if aclose is not None:
+                try:
+                    await aclose()
+                except Exception:  # noqa: BLE001 - cleanup must not mask the outcome
+                    pass
+
     async def _call_llm(self) -> AsyncIterator[AgentEvent]:
         tool_definitions = self.registry.definitions()
         assistant_content = ""
@@ -825,8 +1012,8 @@ class Agent:
                 body=body,
             )
 
-        async for event in self.llm_client.chat(
-            self.messages, tools=tool_definitions, on_request=_trace_request
+        async for event in self._stream_events(
+            self.messages, tool_definitions, _trace_request
         ):
             if isinstance(event, TextChunk):
                 assistant_content += event.text
@@ -852,6 +1039,26 @@ class Agent:
                 )
             elif isinstance(event, CompletionMeta):
                 meta = event
+
+        if self._stream_cut:
+            # RFC LIM-53: the stream was cut mid-response. The partial
+            # response is appended content-only — partial tool-call
+            # arguments may be truncated, and truncated thinking cannot be
+            # replayed (its signature is incomplete), so both are dropped.
+            # Dialect replays tolerate reasoning=None (Anthropic skips the
+            # thinking block; Kimi replays reasoning_content as ""). A
+            # stream that COMPLETED before the ESC landed takes the normal
+            # path below; the batch pre-flight handles that interrupt.
+            if assistant_content:
+                self.messages.append(
+                    Message(role="assistant", content=assistant_content)
+                )
+            event = self._mark_interrupted(
+                "llm_stream", content_chars=len(assistant_content)
+            )
+            if event is not None:
+                yield event
+            return
 
         usage = meta.usage if meta else None
         totals = normalize_usage(usage)
@@ -910,13 +1117,15 @@ class Agent:
 
         text = ""
         meta: CompletionMeta | None = None
-        async for event in self.llm_client.chat(
-            prompt, tools=[], on_request=_trace_request
-        ):
+        async for event in self._stream_events(prompt, [], _trace_request):
             if isinstance(event, TextChunk):
                 text += event.text
             elif isinstance(event, CompletionMeta):
                 meta = event
+        if self._interrupt_requested:
+            # RFC LIM-53: the summary call was interrupted; compact()
+            # reports it as an interruption, not a summary failure.
+            raise _StreamInterrupted
         self.trace.log(
             "llm_response",
             turn=self._turn_count,
@@ -939,6 +1148,12 @@ class Agent:
         :meth:`run`), while ``/compact`` can always be retried by hand.
         """
         cfg = self._compaction_config
+        if trigger == "manual":
+            # RFC LIM-53: /compact bypasses run(), so it resets the flag at
+            # its own entry — an interrupt requested before it started must
+            # not leak in. Auto-compact keeps a pending flag so ESC
+            # mid-turn is honored at this consistency point.
+            self._interrupt_requested = False
         before = self._estimated_next_prompt_tokens()
         split = find_split_point(self.messages, cfg.keep_recent_tokens)
         if split is None:
@@ -972,6 +1187,19 @@ class Agent:
             summary = await self._generate_summary(prompt)
             if not summary.strip():
                 error = "empty response"
+        except _StreamInterrupted:
+            # RFC LIM-53: user interrupt — history is untouched (the
+            # rewrite below never runs); report and stop.
+            event = self._mark_interrupted("compact")
+            if event is not None:
+                yield event
+            yield CompactionEvent(
+                compacted=False,
+                trigger=trigger,
+                before_tokens=before,
+                reason="已被用户打断（ESC）",
+            )
+            return
         except Exception as e:  # noqa: BLE001
             error = str(e)
         if error is not None:

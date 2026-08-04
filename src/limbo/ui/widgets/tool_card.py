@@ -20,11 +20,13 @@ _STATE_SYMBOLS = {
     "running": "…",
     "success": "✓",
     "error": "✗",
+    "cancelled": "⏹",
 }
 _STATE_LABELS = {
     "running": "运行中",
     "success": "",
     "error": "失败",
+    "cancelled": "已打断",
 }
 
 # Argument keys worth showing in the one-line summary, in priority order.
@@ -83,6 +85,14 @@ class ToolCard(Vertical):
     def set_error(self, error: str) -> None:
         self._set_state("error")
         self._set_body(error)
+
+    def set_cancelled(self) -> None:
+        """Mark the call as interrupted by the user (RFC LIM-53).
+
+        No result will ever arrive for this call (the stream was cut
+        mid-tool-call), so there is no body to show.
+        """
+        self._set_state("cancelled")
 
     # -- expansion ----------------------------------------------------------
 
