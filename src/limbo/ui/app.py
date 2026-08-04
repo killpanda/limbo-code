@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 from textual import events
@@ -64,8 +65,23 @@ class LimboApp(App[None]):
         there. Native tools (``pbcopy`` etc.) work in every terminal; OSC 52
         is kept as a fallback for SSH/remote sessions where the local
         clipboard tool would target the wrong machine.
+
+        The native write runs in a worker thread (same discipline as the
+        paste path in ``InputWidget``): a synchronous ``subprocess.run`` on
+        the event loop would freeze the UI for the whole PowerShell cold
+        start on Windows, or up to ``_CMD_TIMEOUT`` on a hung backend.
         """
-        if write_clipboard_text(text):
+        # Keep App.clipboard in sync on the native path too (Textual only
+        # sets it on its own OSC 52 path).
+        self._clipboard = text
+        self.run_worker(
+            self._copy_to_clipboard_native(text),
+            group="clipboard-copy",
+            exclusive=True,
+        )
+
+    async def _copy_to_clipboard_native(self, text: str) -> None:
+        if await asyncio.to_thread(write_clipboard_text, text):
             return
         super().copy_to_clipboard(text)
 

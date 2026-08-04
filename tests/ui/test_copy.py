@@ -63,6 +63,23 @@ def test_write_backend_error_returns_false(monkeypatch):
 
 # -- App integration -------------------------------------------------------------
 
+
+def _native_stub(written: list[str], ok: bool = True):
+    """A write_clipboard_text stand-in that records calls (thread-safe enough
+    for the single writer these tests produce)."""
+
+    def stub(text: str) -> bool:
+        written.append(text)
+        return ok
+
+    return stub
+
+
+async def _drain_clipboard_worker(pilot) -> None:
+    """Let the off-thread clipboard write finish before asserting."""
+    await pilot.app.workers.wait_for_complete()
+    await pilot.pause()
+
 # The startup banner art occupies the top rows; chat messages render below it.
 # A drag across row 3 of a fresh app selects banner art, which is fine for
 # mechanism tests — what matters is that *something* selectable lands in the
@@ -73,20 +90,52 @@ def test_write_backend_error_returns_false(monkeypatch):
 async def test_copy_to_clipboard_prefers_native_tool(monkeypatch, tmp_path):
     """copy_to_clipboard must not rely on OSC 52 alone (Terminal.app drops it)."""
     written: list[str] = []
-    monkeypatch.setattr(
-        "limbo.ui.app.write_clipboard_text", lambda text: written.append(text) or True
-    )
+    monkeypatch.setattr("limbo.ui.app.write_clipboard_text", _native_stub(written))
     app = LimboApp(workdir=".", session_dir=tmp_path / "sessions")
     async with app.run_test(size=(80, 24)) as pilot:
         app.copy_to_clipboard("native-wins")
-        await pilot.pause()
+        await _drain_clipboard_worker(pilot)
     assert written == ["native-wins"]
+
+
+@pytest.mark.asyncio
+async def test_copy_to_clipboard_keeps_app_clipboard_in_sync(monkeypatch, tmp_path):
+    """App.clipboard must reflect the text even when the native backend wins."""
+    written: list[str] = []
+    monkeypatch.setattr("limbo.ui.app.write_clipboard_text", _native_stub(written))
+    app = LimboApp(workdir=".", session_dir=tmp_path / "sessions")
+    async with app.run_test(size=(80, 24)) as pilot:
+        app.copy_to_clipboard("in-sync")
+        await _drain_clipboard_worker(pilot)
+    assert app.clipboard == "in-sync"
+
+
+@pytest.mark.asyncio
+async def test_native_write_runs_off_event_loop_thread(monkeypatch, tmp_path):
+    """Regression (review): the subprocess write must not block the UI loop."""
+    import threading
+
+    threads: list[int] = []
+
+    def stub(text: str) -> bool:
+        threads.append(threading.get_ident())
+        return True
+
+    monkeypatch.setattr("limbo.ui.app.write_clipboard_text", stub)
+    app = LimboApp(workdir=".", session_dir=tmp_path / "sessions")
+    async with app.run_test(size=(80, 24)) as pilot:
+        app.copy_to_clipboard("off-thread")
+        await _drain_clipboard_worker(pilot)
+    assert threads and threads[0] != threading.main_thread().ident
 
 
 @pytest.mark.asyncio
 async def test_copy_to_clipboard_falls_back_to_osc52(monkeypatch, tmp_path):
     """Without a native backend (e.g. SSH), OSC 52 is still emitted."""
-    monkeypatch.setattr("limbo.ui.app.write_clipboard_text", lambda text: False)
+    written: list[str] = []
+    monkeypatch.setattr(
+        "limbo.ui.app.write_clipboard_text", _native_stub(written, ok=False)
+    )
     app = LimboApp(workdir=".", session_dir=tmp_path / "sessions")
     async with app.run_test(size=(80, 24)) as pilot:
         osc52: list[str] = []
@@ -100,7 +149,7 @@ async def test_copy_to_clipboard_falls_back_to_osc52(monkeypatch, tmp_path):
 
         monkeypatch.setattr(driver, "write", spy_write)
         app.copy_to_clipboard("fallback")
-        await pilot.pause()
+        await _drain_clipboard_worker(pilot)
     assert len(osc52) == 1
 
 
@@ -113,9 +162,7 @@ async def test_drag_selection_auto_copies_on_mouse_up(monkeypatch, tmp_path):
     copy runs.
     """
     written: list[str] = []
-    monkeypatch.setattr(
-        "limbo.ui.app.write_clipboard_text", lambda text: written.append(text) or True
-    )
+    monkeypatch.setattr("limbo.ui.app.write_clipboard_text", _native_stub(written))
     app = LimboApp(workdir=".", session_dir=tmp_path / "sessions")
     async with app.run_test(size=(80, 24)) as pilot:
         chat = app.screen.query_one(ChatWidget)
@@ -125,7 +172,7 @@ async def test_drag_selection_auto_copies_on_mouse_up(monkeypatch, tmp_path):
         await pilot.mouse_down(message, offset=(0, 0))
         await pilot.hover(message, offset=(20, 0))
         await pilot.mouse_up(message, offset=(20, 0))
-        await pilot.pause()
+        await _drain_clipboard_worker(pilot)
     assert written, "selection end must push the selected text to the clipboard"
     assert "limbo copy regression" in written[-1]
 
@@ -134,9 +181,7 @@ async def test_drag_selection_auto_copies_on_mouse_up(monkeypatch, tmp_path):
 async def test_ctrl_c_copies_selection(monkeypatch, tmp_path):
     """The Textual screen binding ctrl+c -> copy_text must reach native tools."""
     written: list[str] = []
-    monkeypatch.setattr(
-        "limbo.ui.app.write_clipboard_text", lambda text: written.append(text) or True
-    )
+    monkeypatch.setattr("limbo.ui.app.write_clipboard_text", _native_stub(written))
     app = LimboApp(workdir=".", session_dir=tmp_path / "sessions")
     async with app.run_test(size=(80, 24)) as pilot:
         chat = app.screen.query_one(ChatWidget)
@@ -146,10 +191,10 @@ async def test_ctrl_c_copies_selection(monkeypatch, tmp_path):
         await pilot.mouse_down(message, offset=(0, 0))
         await pilot.hover(message, offset=(15, 0))
         await pilot.mouse_up(message, offset=(15, 0))
-        await pilot.pause()
+        await _drain_clipboard_worker(pilot)
         written.clear()  # ignore the auto-copy from the drag itself
         await pilot.press("ctrl+c")
-        await pilot.pause()
+        await _drain_clipboard_worker(pilot)
     assert written and "limbo ctrl-c" in written[-1]
 
 
@@ -157,11 +202,9 @@ async def test_ctrl_c_copies_selection(monkeypatch, tmp_path):
 async def test_plain_click_does_not_clobber_clipboard(monkeypatch, tmp_path):
     """A click without a drag must not copy (selection is empty)."""
     written: list[str] = []
-    monkeypatch.setattr(
-        "limbo.ui.app.write_clipboard_text", lambda text: written.append(text) or True
-    )
+    monkeypatch.setattr("limbo.ui.app.write_clipboard_text", _native_stub(written))
     app = LimboApp(workdir=".", session_dir=tmp_path / "sessions")
     async with app.run_test(size=(80, 24)) as pilot:
         await pilot.click(offset=(10, 10))
-        await pilot.pause()
+        await _drain_clipboard_worker(pilot)
     assert written == []
