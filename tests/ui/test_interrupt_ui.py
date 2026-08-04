@@ -18,6 +18,7 @@ from limbo.models import TextChunk, ToolCallEvent
 from limbo.ui.app import LimboApp
 from limbo.ui.screens.main import MainScreen
 from limbo.ui.widgets.chat import ChatWidget
+from limbo.ui.widgets.input import InputWidget
 from limbo.ui.widgets.status_bar import StatusBar
 
 
@@ -109,6 +110,72 @@ async def test_esc_routes_to_verify_before_interrupt(tmp_path):
         assert verify_task.cancelled()
         assert "已取消验收命令" in chat.transcript_text()
         assert "⏹ 已打断" not in chat.transcript_text()
+
+
+@pytest.mark.asyncio
+async def test_esc_interrupts_when_input_not_focused(tmp_path):
+    """马越 acceptance feedback: ESC must work when the input widget does
+    not have focus (screen-level binding routes through the same chain)."""
+    client = GateMidStreamClient()
+    app = make_app(tmp_path, client)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = get_screen(pilot)
+        chat = screen.query_one("#chat", ChatWidget)
+        input_widget = screen.query_one("#input", InputWidget)
+
+        screen.run_worker(screen._handle_turn("go"))
+        await wait_until(pilot, lambda: "t1" in chat.tool_cards)
+
+        # Move focus off the input (e.g. the user clicked the chat flow).
+        chat.focus()
+        await pilot.pause()
+        assert screen.app.focused is not input_widget
+
+        await pilot.press("escape")
+        await wait_until(pilot, lambda: not screen.driver.running)
+
+        assert chat.tool_cards["t1"].state == "cancelled"
+        assert "⏹ 已打断" in chat.transcript_text()
+        assert len(client.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_esc_unfocused_falls_back_to_queue_cancel(tmp_path):
+    """Unfocused ESC with no running turn still cancels the newest queued
+    steer (the fallback layer keeps working from any focus)."""
+    client = GateMidStreamClient()
+    app = make_app(tmp_path, client)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = get_screen(pilot)
+        chat = screen.query_one("#chat", ChatWidget)
+        input_widget = screen.query_one("#input", InputWidget)
+
+        screen.run_worker(screen._handle_turn("go"))
+        await wait_until(pilot, lambda: len(client.calls) == 1)
+        input_widget.text = "排队消息"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert screen.agent.queued_count == 1
+
+        # Interrupt the turn first (unfocused).
+        chat.focus()
+        await pilot.pause()
+        await pilot.press("escape")
+        await wait_until(pilot, lambda: not screen.driver.running)
+        assert screen.agent.queued_count == 1
+
+        # The turn's finally-chain hands focus back to the input; move it
+        # off again (user clicks the chat after the turn ends), then ESC
+        # still reaches the queue-cancel fallback.
+        chat.focus()
+        await pilot.pause()
+        assert screen.app.focused is not input_widget
+        await pilot.press("escape")
+        await pilot.pause()
+        assert screen.agent.queued_count == 0
+        assert "❯ 排队消息（已取消）" in chat.transcript_text()
 
 
 @pytest.mark.asyncio

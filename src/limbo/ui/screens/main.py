@@ -73,6 +73,12 @@ class MainScreen(Screen[None]):
     BINDINGS = [
         Binding("ctrl+o", "toggle_tools", "展开/收起工具输出"),
         Binding("ctrl+g", "game2048", "2048 小游戏"),
+        # Screen-level ESC (LIM-53): the input widget's priority binding
+        # wins while it is focused (slash-menu close lives there); this
+        # binding makes ESC work when focus is elsewhere (e.g. the chat
+        # was clicked). Modal screens on top handle ESC in their own
+        # bindings before this screen ever sees it.
+        Binding("escape", "handle_escape", show=False),
     ]
 
     def __init__(
@@ -643,6 +649,11 @@ class MainScreen(Screen[None]):
     def action_toggle_tools(self) -> None:
         self.query_one("#chat", ChatWidget).toggle_tool_bodies()
 
+    def action_handle_escape(self) -> None:
+        """Screen-level ESC binding: fires only when the input widget is
+        NOT focused (its priority binding consumes ESC first otherwise)."""
+        self.handle_escape()
+
     def _btw(self, question: str) -> None:
         """Open the /btw side-question overlay.
 
@@ -764,14 +775,16 @@ class MainScreen(Screen[None]):
     def handle_escape(self) -> None:
         """ESC routing chain (RFC LIM-53), in priority order.
 
-        The slash-menu layer lives in the input widget (it closes the menu
-        and never reaches here); modal screens handle ESC in their own
-        bindings. What remains, highest priority first: cancel an in-flight
-        verify subprocess (LIM-40), interrupt the running turn/compact
-        worker (LIM-53), then fall back to cancelling the newest queued
-        steer message (LIM-20). Note the deliberate behavior change: while
-        a turn is running, ESC interrupts the turn — queued-steer cancel
-        is the card's ✕ affordance during that window.
+        Entry points: the input widget's priority binding (input focused —
+        it closes an open slash menu first and only forwards otherwise)
+        and this screen's own ``escape`` binding (focus anywhere else).
+        Modal screens handle ESC in their own bindings. What remains,
+        highest priority first: cancel an in-flight verify subprocess
+        (LIM-40), interrupt the running turn/compact worker (LIM-53),
+        then fall back to cancelling the newest queued steer message
+        (LIM-20). Note the deliberate behavior change: while a turn is
+        running, ESC interrupts the turn — queued-steer cancel is the
+        card's ✕ affordance during that window.
         """
         if self.driver.verifying:
             if self.driver.cancel_verify():
