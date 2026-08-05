@@ -4,12 +4,20 @@
 results — image bytes, file paths, text, or empty/unavailable — so the
 input widget can attach images/files and fall back to plain text pastes.
 
+``write_clipboard_text()`` copies selected TUI text back to the OS
+clipboard (LIM-54). Textual's built-in ``App.copy_to_clipboard`` only
+emits an OSC 52 escape, which macOS Terminal.app silently ignores, so
+on macOS the copy never reaches the system clipboard. Going through the
+native tool (``pbcopy``) works in every terminal.
+
 Backends are thin wrappers around OS tools, each with a short timeout and
-best-effort semantics (anything unexpected degrades to ``ClipboardEmpty``):
+best-effort semantics (anything unexpected degrades to ``ClipboardEmpty`` /
+``False``):
 
 - macOS: ``osascript`` (clipboard info / class extraction) + ``pbpaste``
-- Linux: ``wl-paste`` (Wayland) or ``xclip`` (X11)
-- Windows: PowerShell ``Get-Clipboard``
+  / ``pbcopy``
+- Linux: ``wl-paste``/``wl-copy`` (Wayland) or ``xclip`` (X11)
+- Windows: PowerShell ``Get-Clipboard`` / ``Set-Clipboard``
 """
 
 from __future__ import annotations
@@ -68,6 +76,67 @@ def read_clipboard() -> ClipboardContent:
     except (OSError, subprocess.SubprocessError):
         pass
     return ClipboardEmpty()
+
+
+def write_clipboard_text(text: str) -> bool:
+    """Copy ``text`` to the OS clipboard via native tools.
+
+    Returns True when a native backend accepted the text, False when no
+    backend is available (callers should then fall back to OSC 52).
+    """
+    if not text:
+        return False
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            return _write_macos(text)
+        if system == "Linux":
+            return _write_linux(text)
+        if system == "Windows":
+            return _write_windows(text)
+    except (OSError, subprocess.SubprocessError):
+        pass
+    return False
+
+
+def _write_cmd(args: list[str], text: str) -> bool:
+    """Pipe ``text`` into a clipboard writer tool; False on any failure."""
+    if shutil.which(args[0]) is None:
+        return False
+    try:
+        result = subprocess.run(
+            args,
+            input=text.encode("utf-8"),
+            capture_output=True,
+            timeout=_CMD_TIMEOUT,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def _write_macos(text: str) -> bool:
+    return _write_cmd(["pbcopy"], text)
+
+
+def _write_linux(text: str) -> bool:
+    if os.environ.get("WAYLAND_DISPLAY") and shutil.which("wl-copy"):
+        return _write_cmd(["wl-copy"], text)
+    if shutil.which("xclip"):
+        # xclip forks to the background and serves the selection until it is
+        # replaced, so the subprocess returns immediately.
+        return _write_cmd(["xclip", "-selection", "clipboard"], text)
+    return False
+
+
+def _write_windows(text: str) -> bool:
+    exe = shutil.which("powershell") or shutil.which("pwsh")
+    if exe is None:
+        return False
+    return _write_cmd(
+        [exe, "-NoProfile", "-NonInteractive", "-Command", _PS_SET_TEXT], text
+    )
 
 
 def save_clipboard_image(data: bytes, ext: str = "png") -> Path:
@@ -278,6 +347,12 @@ _PS_GET_FILES = (
 _PS_GET_TEXT = (
     "Add-Type -AssemblyName System.Windows.Forms;"
     "Write-Output ([Windows.Forms.Clipboard]::GetText())"
+)
+
+_PS_SET_TEXT = (
+    "Add-Type -AssemblyName System.Windows.Forms;"
+    "$text = [Console]::In.ReadToEnd();"
+    "[Windows.Forms.Clipboard]::SetText($text)"
 )
 
 
