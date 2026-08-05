@@ -20,6 +20,9 @@ from limbo.ui.widgets.chat import ChatWidget
 
 def test_write_macos_uses_pbcopy(monkeypatch):
     monkeypatch.setattr(clipboard.platform, "system", lambda: "Darwin")
+    # CI runners are Linux without pbcopy; _write_cmd short-circuits on
+    # shutil.which, so it must be mocked too.
+    monkeypatch.setattr(clipboard.shutil, "which", lambda _: "/usr/bin/pbcopy")
     calls: list[tuple[list[str], bytes]] = []
 
     def fake_run(args, input=None, **kw):
@@ -52,6 +55,9 @@ def test_write_empty_text_is_noop(monkeypatch):
 
 def test_write_backend_error_returns_false(monkeypatch):
     monkeypatch.setattr(clipboard.platform, "system", lambda: "Darwin")
+    # Keep which() present so the failure is exercised at returncode=1,
+    # not at the missing-tool short-circuit.
+    monkeypatch.setattr(clipboard.shutil, "which", lambda _: "/usr/bin/pbcopy")
 
     class Result:
         returncode = 1
