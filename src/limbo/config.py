@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import warnings
+from enum import Enum
 from pathlib import Path
 from typing import Any
 
@@ -132,12 +133,45 @@ class ProviderOverride(BaseModel):
     headers: dict[str, str] = Field(default_factory=dict)
 
 
+class KittyKeyboardMode(str, Enum):
+    """How Limbo negotiates Textual's kitty keyboard protocol.
+
+    Textual 8.2.8 requests the kitty keyboard protocol with ``REPORT_ALL_KEYS``.
+    Inside the herdr multiplexer, herdr mirrors that request to the host
+    terminal (e.g. Ghostty), and Ghostty then encodes IME commits as the
+    physical commit key (space) while dropping the composed text — typing
+    Chinese turns into spaces (pasting is unaffected, it bypasses the key
+    encoder). Disabling the protocol makes herdr negotiate IME-compatible host
+    flags so committed IME text arrives as raw UTF-8.
+    """
+
+    # Disable only inside the herdr multiplexer (detected via HERDR_ENV);
+    # keep the protocol everywhere else. Safe default for CJK users.
+    AUTO = "auto"
+    # Always request the kitty keyboard protocol (Textual's default behavior).
+    ENABLED = "enabled"
+    # Never request it — forces raw/legacy terminal input everywhere.
+    DISABLED = "disabled"
+
+    def disable_textual_kitty_key(self, *, in_herdr: bool) -> bool:
+        """Whether Textual's kitty keyboard protocol should be disabled."""
+        return self is KittyKeyboardMode.DISABLED or (
+            self is KittyKeyboardMode.AUTO and in_herdr
+        )
+
+
 class UIConfig(BaseModel):
     # Theme name: built-in "limbo-dark" (default) / "limbo-light", or any
     # Textual built-in theme (e.g. "textual-dark", "dracula", "nord").
     theme: str | None = None
     # Show the startup ASCII-art banner on fresh sessions.
     show_banner: bool = True
+    # Kitty keyboard protocol handling (see KittyKeyboardMode):
+    #   auto     - enable normally, except inside the herdr multiplexer where
+    #              it breaks IME/Chinese input (default)
+    #   enabled  - always request the kitty keyboard protocol
+    #   disabled - never request it (forces raw/legacy terminal input)
+    kitty_keyboard: KittyKeyboardMode = KittyKeyboardMode.AUTO
 
 
 class SafetyConfig(BaseModel):
