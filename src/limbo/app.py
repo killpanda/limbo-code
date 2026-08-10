@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -15,9 +16,22 @@ from limbo.sessions import (
     latest_session,
     load_session,
 )
-from limbo.ui.app import LimboApp
 
 DEFAULT_SESSION_DIR = Path.home() / ".limbo" / "sessions"
+
+
+def _apply_kitty_keyboard_workaround(config) -> None:
+    """Apply the `ui.kitty_keyboard` setting before Textual initializes.
+
+    Textual reads TEXTUAL_DISABLE_KITTY_KEY at import time, so this must run
+    before the first `textual` import. See KittyKeyboardMode for why typing
+    Chinese inside the herdr multiplexer turns into spaces when the kitty
+    keyboard protocol is enabled.
+    """
+    if config.ui.kitty_keyboard.disable_textual_kitty_key(
+        in_herdr=bool(os.environ.get("HERDR_ENV"))
+    ):
+        os.environ["TEXTUAL_DISABLE_KITTY_KEY"] = "1"
 
 
 def main() -> int:
@@ -55,6 +69,7 @@ def main() -> int:
     args = parser.parse_args()
 
     config = load_config()
+    _apply_kitty_keyboard_workaround(config)
     if args.model:
         config.llm.model = args.model
     spec = resolve_model(config.llm.model)
@@ -96,6 +111,8 @@ def main() -> int:
         meta, _, _ = load_session(resume)
         if meta.workdir and Path(meta.workdir).is_dir():
             workdir = Path(meta.workdir)
+
+    from limbo.ui.app import LimboApp  # noqa: I001, PLC0415 - deferred so the kitty keyboard workaround runs first
 
     app = LimboApp(
         workdir=workdir,

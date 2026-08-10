@@ -4,7 +4,12 @@ from pathlib import Path
 
 import pytest
 
-from limbo.config import Config, load_config, save_model_to_config
+from limbo.config import (
+    Config,
+    KittyKeyboardMode,
+    load_config,
+    save_model_to_config,
+)
 
 
 def test_default_config():
@@ -218,3 +223,28 @@ def test_save_model_unwritable_path_returns_false(tmp_path):
         assert save_model_to_config("glm-4.7", path) is False
     finally:
         os.chmod(tmp_path, 0o700)
+
+
+def test_kitty_keyboard_default_is_auto():
+    cfg = Config()
+    assert cfg.ui.kitty_keyboard == KittyKeyboardMode.AUTO
+
+
+def test_kitty_keyboard_mode_from_toml(tmp_path):
+    path = tmp_path / "kitty.toml"
+    path.write_text('[ui]\nkitty_keyboard = "disabled"\n')
+    assert load_config(path).ui.kitty_keyboard is KittyKeyboardMode.DISABLED
+
+    path.write_text('[ui]\nkitty_keyboard = "enabled"\n')
+    assert load_config(path).ui.kitty_keyboard is KittyKeyboardMode.ENABLED
+
+
+def test_kitty_keyboard_mode_disable_decision():
+    # auto: disable only inside the herdr multiplexer (IME fix), keep the
+    # kitty keyboard protocol everywhere else.
+    assert KittyKeyboardMode.AUTO.disable_textual_kitty_key(in_herdr=True)
+    assert not KittyKeyboardMode.AUTO.disable_textual_kitty_key(in_herdr=False)
+    # enabled: never disable (opt out of the workaround).
+    assert not KittyKeyboardMode.ENABLED.disable_textual_kitty_key(in_herdr=True)
+    # disabled: always force raw/legacy input.
+    assert KittyKeyboardMode.DISABLED.disable_textual_kitty_key(in_herdr=False)

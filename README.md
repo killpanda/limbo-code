@@ -169,6 +169,23 @@ Optional tool settings:
 bash_enabled = true
 ```
 
+Optional UI settings:
+
+```toml
+[ui]
+kitty_keyboard = "auto"   # auto (default) | enabled | disabled
+```
+
+`kitty_keyboard` controls Textual's kitty keyboard protocol. The default
+`auto` disables it only when Limbo runs inside the **herdr** multiplexer:
+herdr mirrors a pane's `REPORT_ALL_KEYS` request to the host terminal
+(e.g. Ghostty), and Ghostty then encodes IME commits as the physical commit
+key (space) while dropping the composed text — typing Chinese turns into
+spaces (pasting is unaffected). With the protocol disabled, herdr keeps
+IME-compatible host flags and committed IME text arrives as raw UTF-8. Use
+`enabled` to always keep the protocol (e.g. in a direct Ghostty/kitty
+terminal), or `disabled` to force raw/legacy input everywhere.
+
 ### Session storage
 
 Conversations are saved as JSONL files in `~/.limbo/sessions/` so you can
