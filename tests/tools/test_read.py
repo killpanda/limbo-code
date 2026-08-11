@@ -28,44 +28,24 @@ def test_read_with_offset_and_limit(workdir):
     assert result.output == "line2\nline3\n"
 
 
-def test_read_outside_workdir(workdir):
+def test_read_outside_workdir(workdir, tmp_path):
+    """No workdir fence: files outside the workdir are readable."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "data.txt").write_text("external")
     tool = ReadTool(workdir=workdir)
-    result = tool.execute({"path": "../etc/passwd"})
-    assert result.success is False
-    assert "outside working directory" in result.error.lower()
+    result = tool.execute({"path": str(outside / "data.txt")})
+    assert result.success is True
+    assert result.output == "external"
 
 
-def test_read_sensitive_file(workdir):
+def test_read_dotenv_file(workdir):
+    """No sensitive-file list: .env reads like any other file."""
     (workdir / ".env").write_text("SECRET=1")
     tool = ReadTool(workdir=workdir)
-    result = tool.execute({"path": ".env"})
-    assert result.success is False
-    assert "sensitive" in result.error.lower()
-
-
-def test_read_custom_sensitive_files(workdir):
-    (workdir / "secret.txt").write_text("SECRET=1")
-    tool = ReadTool(workdir=workdir, sensitive_files=["secret.txt"])
-    result = tool.execute({"path": "secret.txt"})
-    assert result.success is False
-    assert "sensitive" in result.error.lower()
-
-
-def test_read_non_sensitive_file_not_in_custom_list(workdir):
-    (workdir / ".env").write_text("SECRET=1")
-    tool = ReadTool(workdir=workdir, sensitive_files=["secret.txt"])
     result = tool.execute({"path": ".env"})
     assert result.success is True
-
-
-def test_read_blocks_ssh_path(workdir):
-    ssh_dir = workdir / ".ssh"
-    ssh_dir.mkdir()
-    (ssh_dir / "config").write_text("Host example")
-    tool = ReadTool(workdir=workdir)
-    result = tool.execute({"path": ".ssh/config"})
-    assert result.success is False
-    assert "sensitive" in result.error.lower()
+    assert result.output == "SECRET=1"
 
 
 def test_read_rejects_negative_offset(workdir):
@@ -84,24 +64,24 @@ def test_read_rejects_negative_limit(workdir):
     assert "positive" in result.error.lower()
 
 
-def test_read_does_not_follow_symlink_to_outside_file(workdir):
-    """A symlink inside the workdir must not expose files outside it."""
+def test_read_follows_symlink_to_outside_file(workdir):
+    """No workdir fence: a symlink pointing outside the workdir resolves."""
     import os
 
     outside = workdir.parent / f"read_outside_{workdir.name}"
     outside.mkdir()
-    (outside / "secret.txt").write_text("secret")
+    (outside / "data.txt").write_text("external")
 
     link = workdir / "outside_link"
     try:
-        os.symlink(outside / "secret.txt", link)
+        os.symlink(outside / "data.txt", link)
     except OSError:
         pytest.skip("Symlinks not supported on this platform")
 
     tool = ReadTool(workdir=workdir)
     result = tool.execute({"path": "outside_link"})
-    assert result.success is False
-    assert "outside working directory" in result.error.lower()
+    assert result.success is True
+    assert result.output == "external"
 
 
 def test_read_broken_symlink_returns_invalid_path(workdir):
@@ -184,30 +164,6 @@ def test_read_allows_offloaded_bash_output_in_tmpdir(workdir):
         offload.unlink(missing_ok=True)
 
 
-def test_read_offload_whitelist_rejects_other_tmp_paths(workdir):
-    """Only limbo-output-*.log directly inside tmpdir is whitelisted."""
-    tmpdir = Path(tempfile.gettempdir())
-    victims = [
-        tmpdir / "other.log",  # not a limbo offload name
-        tmpdir / "limbo-output-x.txt",  # wrong extension
-    ]
-    sub = tmpdir / "limbo-sub"
-    sub.mkdir(exist_ok=True)
-    victims.append(sub / "limbo-output-x.log")  # not directly inside tmpdir
-    try:
-        for victim in victims:
-            victim.write_text("secret")
-        tool = ReadTool(workdir=workdir)
-        for victim in victims:
-            result = tool.execute({"path": str(victim)})
-            assert result.success is False, victim
-            assert "outside working directory" in (result.error or "").lower()
-    finally:
-        for victim in victims:
-            victim.unlink(missing_ok=True)
-        sub.rmdir()
-
-
 def test_read_rejects_files_above_max_size(workdir):
     """Files larger than the generous cap must be refused before reading."""
     big = workdir / "huge.txt"
@@ -216,31 +172,6 @@ def test_read_rejects_files_above_max_size(workdir):
     result = tool.execute({"path": "huge.txt"})
     assert result.success is False
     assert "too large" in result.error.lower()
-
-
-def test_granted_root_allows_read_outside_workdir(workdir, tmp_path):
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (outside / "data.txt").write_text("external")
-    shared: set[Path] = set()
-    tool = ReadTool(workdir=workdir, allowed_roots=shared)
-    result = tool.execute({"path": str(outside / "data.txt")})
-    assert result.success is False
-    shared.add(outside.resolve())
-    result = tool.execute({"path": str(outside / "data.txt")})
-    assert result.success is True
-    assert result.output == "external"
-
-
-def test_sensitive_blacklist_wins_over_granted_root(workdir, tmp_path):
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    (outside / ".env").write_text("SECRET=1")
-    shared: set[Path] = {outside.resolve()}
-    tool = ReadTool(workdir=workdir, allowed_roots=shared)
-    result = tool.execute({"path": str(outside / ".env")})
-    assert result.success is False
-    assert "sensitive" in result.error
 
 
 # -- image attachments (pi parity) ----------------------------------------------

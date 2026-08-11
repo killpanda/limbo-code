@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from limbo.tools.bash import BashTool, is_dangerous
+from limbo.tools.bash import BashTool
 
 
 @pytest.fixture
@@ -108,31 +108,15 @@ def test_bash_rejects_non_positive_or_non_finite_timeout(workdir, bad):
     assert "invalid timeout" in result.error.lower()
 
 
-def test_is_dangerous_detects_rm():
-    assert is_dangerous("rm -rf /", ["rm"]) is True
-    assert is_dangerous("echo hello", ["rm"]) is False
-
-
-def test_is_dangerous_allows_benign_token_matches():
-    """Dangerous single-token patterns only match command-name positions."""
-    assert is_dangerous("echo rm", ["rm"]) is False
-    assert is_dangerous("git status | grep rm", ["rm"]) is False
-    assert is_dangerous("git status && rm -rf /", ["rm"]) is True
-    assert is_dangerous("echo ok; git reset --hard", ["git reset --hard"]) is True
-
-
-def test_is_dangerous_detects_background_operator():
-    """The background operator ``&`` should start a new command position."""
-    assert is_dangerous("echo hello & rm -rf /", ["rm"]) is True
-    assert is_dangerous("echo hello && rm -rf /", ["rm"]) is True
-    assert is_dangerous("echo hello & echo rm", ["rm"]) is False
-
-
-def test_bash_rejects_dangerous_command(workdir):
+def test_bash_no_command_filter(workdir):
+    """No dangerous-command filter: even pattern-listed commands run."""
+    target = workdir / "doomed"
+    target.mkdir()
+    (target / "f.txt").write_text("x")
     tool = BashTool(workdir=workdir)
-    result = tool.execute({"command": "rm -rf /"})
-    assert result.success is False
-    assert "blocked" in result.error.lower()
+    result = tool.execute({"command": f"rm -rf {target}"})
+    assert result.success is True
+    assert not target.exists()
 
 
 def test_bash_workdir_context(workdir):
@@ -142,30 +126,14 @@ def test_bash_workdir_context(workdir):
     assert str(workdir) in result.output
 
 
-def test_bash_safety_filter_is_heuristic(workdir):
-    """Document that the simple pattern matcher can be bypassed."""
+def test_bash_allows_redirection_in_quoted_string(workdir):
     tool = BashTool(workdir=workdir)
-    # Subshell / command substitution bypasses the top-level token check.
-    result = tool.execute({"command": "bash -c 'echo bypassed'"})
-    assert result.success is True
-    assert "bypassed" in result.output
-    assert "blocked" not in (result.error or "").lower()
-
-
-def test_is_dangerous_docstring_warns_about_bypasses():
-    assert "heuristic" in (is_dangerous.__doc__ or "").lower()
-    assert "bypass" in (is_dangerous.__doc__ or "").lower()
-
-
-def test_is_dangerous_allows_redirection_in_quoted_string():
-    tool = BashTool(workdir=Path("/tmp"))
     result = tool.execute({"command": 'echo "a > b"'})
     assert result.success is True
-    assert "blocked" not in (result.error or "").lower()
+    assert "a > b" in result.output
 
 
-def test_is_dangerous_allows_redirection_by_default(workdir):
-    """Redirection is not hard-blocked by default."""
+def test_bash_allows_redirection(workdir):
     target = workdir / "limbo-test-redir.txt"
     tool = BashTool(workdir=workdir)
     result = tool.execute({"command": f"echo a > {target}"})
@@ -173,63 +141,13 @@ def test_is_dangerous_allows_redirection_by_default(workdir):
     assert target.read_text().strip() == "a"
 
 
-def test_is_dangerous_blocks_git_reset_hard():
-    tool = BashTool(workdir=Path("/tmp"))
-    result = tool.execute({"command": "git reset --hard HEAD"})
-    assert result.success is False
-    assert "blocked" in result.error.lower()
-
-
-def test_is_dangerous_blocks_absolute_git_reset_path():
-    tool = BashTool(workdir=Path("/tmp"))
-    result = tool.execute({"command": "/usr/bin/git reset --hard HEAD"})
-    assert result.success is False
-    assert "blocked" in result.error.lower()
-
-
-def test_is_dangerous_allows_git_status(workdir):
+def test_bash_allows_git_status(workdir):
     import subprocess
 
     subprocess.run(["git", "init", str(workdir)], check=True, capture_output=True)
     tool = BashTool(workdir=workdir)
     result = tool.execute({"command": "git status"})
-    assert "blocked" not in (result.error or "").lower()
     assert result.success is True
-
-
-def test_is_dangerous_blocks_absolute_rm_path():
-    tool = BashTool(workdir=Path("/tmp"))
-    result = tool.execute({"command": "/bin/rm -rf /tmp/limbo-fake-target"})
-    assert result.success is False
-    assert "blocked" in result.error.lower()
-
-
-def test_is_dangerous_still_bypassed_by_subshell():
-    tool = BashTool(workdir=Path("/tmp"))
-    result = tool.execute({"command": "bash -c 'echo harmless'"})
-    assert result.success is True
-    assert "blocked" not in (result.error or "").lower()
-
-
-def test_is_dangerous_bypassed_by_options_and_assignments():
-    """Options and variable assignments before the command name bypass the filter.
-
-    These are documented limitations of the heuristic matcher; a robust fix
-    requires a real shell parser or sandbox and is out of MVP scope.
-    """
-    assert is_dangerous("git -C /tmp reset --hard HEAD", ["git reset --hard"]) is False
-    assert is_dangerous("VAR=1 rm -rf /tmp/limbo-fake-target", ["rm"]) is False
-
-
-def test_is_dangerous_never_raises_on_unbalanced_quotes():
-    """Malformed commands must not escape as bare exceptions (P1-5).
-
-    ``shlex.split`` raises ``ValueError`` on unbalanced quotes; the filter
-    falls back to whitespace tokenization so dangerous names are still
-    caught and harmless commands reach bash (which reports its own error).
-    """
-    assert is_dangerous('rm -rf "unbalanced', ["rm"]) is True
-    assert is_dangerous('echo "unbalanced', ["rm"]) is False
 
 
 def test_bash_unbalanced_quotes_returns_clean_error(workdir):
@@ -253,19 +171,6 @@ def test_bash_description_steers_scripts_to_write_tool():
     description = BashTool.description.lower()
     assert "heredoc" in description
     assert "write" in description
-
-
-def test_bash_custom_dangerous_patterns(workdir):
-    tool = BashTool(workdir=workdir, dangerous_patterns=["reboot"])
-    result = tool.execute({"command": "reboot"})
-    assert result.success is False
-    assert "blocked" in result.error.lower()
-
-
-def test_bash_allows_command_not_in_custom_patterns(workdir):
-    tool = BashTool(workdir=workdir, dangerous_patterns=["reboot"])
-    result = tool.execute({"command": "echo hello"})
-    assert result.success is True
 
 
 def test_bash_handles_non_utf8_output(workdir):

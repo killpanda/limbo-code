@@ -226,10 +226,6 @@ class Agent:
             self._meta, history, self._compactions = load_session(resume)
             self._session_file = resume
             self.messages.extend(repair_history(history))
-            # Restore session-scoped path grants recorded in the meta.
-            self.registry.add_allowed_roots(
-                Path(p) for p in self._meta.allowed_roots
-            )
             # Restore the iterative-summary chain across sessions.
             self._previous_summary = next(
                 (c.summary for c in reversed(self._compactions) if c.summary),
@@ -1272,8 +1268,6 @@ class Agent:
         # conversations.
         if not self._meta.title:
             self._meta.title = derive_title(self.messages)
-        # Persist the current grants so resume restores the same fence.
-        self._meta.allowed_roots = sorted(str(p) for p in self.registry.allowed_roots)
         save_session(self._session_file, self._meta, self.messages, self._compactions)
 
     async def _save_session(self) -> None:

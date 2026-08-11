@@ -18,9 +18,7 @@ from pathlib import Path
 
 from pydantic import BaseModel
 
-from limbo.config import DEFAULT_DANGEROUS_COMMANDS
 from limbo.tools.base import truncate_tail
-from limbo.tools.bash import is_dangerous
 
 # -- state --------------------------------------------------------------------
 
@@ -83,13 +81,11 @@ def parse_goal_args(arg: str) -> GoalCommand:
 
 @dataclass(frozen=True)
 class VerifyResult:
-    # None when the command never produced an exit code (timeout / cancel /
-    # refused by the dangerous-command filter).
+    # None when the command never produced an exit code (timeout / cancel).
     exit_code: int | None
     output_tail: str = ""
     timed_out: bool = False
     cancelled: bool = False
-    refused: bool = False
 
 
 async def _kill_process_tree(proc: asyncio.subprocess.Process) -> None:
@@ -124,7 +120,6 @@ async def run_verify(
     workdir: Path,
     *,
     timeout_ms: int = 600_000,
-    dangerous_patterns: list[str] | None = None,
 ) -> VerifyResult:
     """Run the acceptance command; the exit code is the loop's gate.
 
@@ -133,13 +128,6 @@ async def run_verify(
     GoalDriver.cancel_verify) kills the process tree and re-raises so the
     caller can turn it into a ``cancelled`` result.
     """
-    patterns = (
-        list(dangerous_patterns)
-        if dangerous_patterns is not None
-        else list(DEFAULT_DANGEROUS_COMMANDS)
-    )
-    if is_dangerous(command, patterns):
-        return VerifyResult(exit_code=None, refused=True)
     # Same shell dialect as the bash tool: bash -c, own process group.
     proc = await asyncio.create_subprocess_exec(
         shutil.which("bash") or "/bin/bash",

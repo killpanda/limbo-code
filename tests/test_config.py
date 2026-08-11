@@ -18,7 +18,6 @@ def test_default_config():
     assert cfg.llm.model == "deepseek-v4-pro"
     assert cfg.llm.max_iterations == 50
     assert cfg.tools.bash_enabled is True
-    assert ".ssh" in cfg.safety.sensitive_files
     assert cfg.providers == {}
 
 

@@ -496,13 +496,13 @@ async def test_skill_queued_cancel(tmp_path):
             )
 
 
-# -- interaction with LIM-19 path grants ----------------------------------------
+# -- interaction with LIM-19 queued steer --------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_queued_steer_message_grants_paths(tmp_path):
-    """A busy submission is genuine user input too: paths it references are
-    granted (LIM-19) even though the message itself is only queued."""
+async def test_queued_steer_message_delivered_verbatim(tmp_path):
+    """A busy submission is queued verbatim and delivered as the next turn's
+    user message once the in-flight turn ends."""
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "data.txt").write_text("external")
@@ -533,9 +533,6 @@ async def test_queued_steer_message_grants_paths(tmp_path):
 
         await type_and_submit(pilot, input_widget, f"顺便看看 {outside}")
         assert screen.agent.queued_count == 1
-        # The grant applies immediately, while the message is still queued.
-        assert outside.resolve() in screen.agent.registry.allowed_roots
-        assert "已允许访问" in chat.transcript_text()
 
         gate.set()
         await wait_until(pilot, lambda: len(client.calls) == 2 and "done" in chat.transcript_text())

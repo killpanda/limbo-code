@@ -7,11 +7,9 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from limbo.config import DEFAULT_SENSITIVE_FILES
 from limbo.models import ToolResult
 from limbo.tools.base import (
     BaseTool,
-    is_sensitive_path,
     truncate_output,
 )
 
@@ -44,18 +42,6 @@ class GrepTool(BaseTool):
         "required": ["pattern"],
     }
 
-    def __init__(
-        self,
-        workdir: Path,
-        sensitive_files: list[str] | None = None,
-        allowed_roots: set[Path] | None = None,
-    ):
-        super().__init__(workdir, allowed_roots=allowed_roots)
-        # Convenience guardrail (aligned with read/find): sensitive files
-        # are skipped so secrets don't leak into the model context by
-        # accident. Not a security boundary — bash is not covered.
-        self.sensitive_files = set(sensitive_files or DEFAULT_SENSITIVE_FILES)
-
     def run(self, arguments: dict[str, Any]) -> ToolResult:
         pattern = arguments.get("pattern", "")
         path = arguments.get("path", ".")
@@ -66,17 +52,6 @@ class GrepTool(BaseTool):
         limit = arguments.get("limit", MAX_MATCHES)
 
         target = self.resolve_existing(path)
-
-        if is_sensitive_path(target, self.sensitive_files):
-            return ToolResult(
-                success=False,
-                error=(
-                    "Refusing to search sensitive path. This is a convenience "
-                    "guardrail against accidental secret exposure, not a "
-                    "security boundary. Ask the user if access is genuinely "
-                    "needed."
-                ),
-            )
 
         # ripgrep is a hard dependency (pi parity): a single implementation
         # means one set of gitignore/glob/context semantics, no drift
@@ -115,13 +90,8 @@ class GrepTool(BaseTool):
             cmd.extend(["-C", str(context)])
         if glob:
             cmd.extend(["-g", glob])
-        # Exclude sensitive files (same guardrail as read). ``**/name``
-        # matches at any depth including the search root; for directory
-        # names (e.g. .ssh) rg skips the whole subtree.
-        for name in sorted(self.sensitive_files):
-            cmd.extend(["-g", f"!**/{name}"])
-        # Emit workdir-relative paths, consistent with find. A granted root
-        # outside the workdir is passed as an absolute path (rg accepts both).
+        # Emit workdir-relative paths when possible; targets outside the
+        # workdir are passed as absolute paths (rg accepts both).
         try:
             rel_target = target.relative_to(self.workdir)
         except ValueError:

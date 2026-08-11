@@ -42,13 +42,16 @@ def test_edit_non_unique(workdir):
     assert "unique" in result.error.lower()
 
 
-def test_edit_outside_workdir(workdir):
+def test_edit_outside_workdir(workdir, tmp_path):
+    """No workdir fence: files outside the workdir are editable."""
+    outside = tmp_path / "x.py"
+    outside.write_text("a = 1\n")
     tool = EditTool(workdir=workdir)
     result = tool.execute(
-        {"path": "../x.py", "old_text": "a", "new_text": "b"},
+        {"path": str(outside), "old_text": "a = 1", "new_text": "a = 2"},
     )
-    assert result.success is False
-    assert "outside" in result.error.lower()
+    assert result.success is True
+    assert outside.read_text() == "a = 2\n"
 
 
 def test_edit_no_change(workdir):
@@ -101,8 +104,9 @@ def test_edit_handles_read_error(workdir):
         target.chmod(0o644)
 
 
-def test_edit_rejects_symlink_escape(workdir):
-    outside = workdir.parent / "outside_edit_target.py"
+def test_edit_follows_symlink_to_outside(workdir, tmp_path):
+    """A symlink pointing outside the workdir resolves to its target."""
+    outside = tmp_path / "outside_edit_target.py"
     outside.write_text("x = 1\n")
     link = workdir / "escape_link.py"
     link.symlink_to(outside)
@@ -110,9 +114,8 @@ def test_edit_rejects_symlink_escape(workdir):
     result = tool.execute(
         {"path": "escape_link.py", "old_text": "x = 1", "new_text": "x = 42"},
     )
-    assert result.success is False
-    assert "outside" in result.error.lower()
-    assert outside.read_text() == "x = 1\n"
+    assert result.success is True
+    assert outside.read_text() == "x = 42\n"
 
 
 def test_edit_broken_symlink_returns_invalid_path(workdir):

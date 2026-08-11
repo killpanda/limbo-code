@@ -52,7 +52,6 @@ from limbo.model_switch import (
 from limbo.models import Attachment
 from limbo.sessions import derive_title, export_jsonl, export_markdown, list_sessions
 from limbo.skills import Skill, discover_skills
-from limbo.tools.bash import is_dangerous
 from limbo.ui.banner import startup_art_text
 from limbo.ui.commands import SlashCommand, SlashCommandRegistry
 from limbo.ui.screens.btw import BtwScreen
@@ -65,7 +64,6 @@ from limbo.ui.widgets.chat import ChatWidget, QueuedMessage
 from limbo.ui.widgets.command_menu import SlashCommandMenu
 from limbo.ui.widgets.input import InputWidget, PasteMarkersInvalid, UserSubmitted
 from limbo.ui.widgets.status_bar import StatusBar
-from limbo.user_paths import extract_grantable_paths
 
 
 class MainScreen(Screen[None]):
@@ -133,7 +131,6 @@ class MainScreen(Screen[None]):
             self.workdir,
             max_rounds=self.config.goal.max_rounds,
             verify_timeout_ms=self.config.goal.verify_timeout_ms,
-            dangerous_patterns=self.config.safety.dangerous_commands,
         )
 
     def _new_agent(self, resume: Path | None = None) -> Agent:
@@ -385,11 +382,6 @@ class MainScreen(Screen[None]):
 
     def _accept_verify(self, command: str) -> None:
         chat = self.query_one("#chat", ChatWidget)
-        if is_dangerous(command, self.config.safety.dangerous_commands):
-            chat.add_error(f"验收命令命中危险命令过滤，已拒绝：{command}")
-            chat.add_info("goal 保持单轮模式；/goal clear 退出")
-            self._report_state("idle")
-            return
         state = self.driver.set_verify(command)
         if state is None:
             return
@@ -755,39 +747,12 @@ class MainScreen(Screen[None]):
         if self._agent_busy:
             # Mid-turn submission (RFC LIM-20): queue for steer injection,
             # render optimistically — never start a second turn worker.
-            # Queued steer messages are genuine user input too: grant the
-            # paths they reference (LIM-19), since the model will see them
-            # at injection time just like a normal submission.
-            self._grant_user_paths(text, event.attachments)
             item_id = self.agent.steer(text, event.attachments)
             chat.add_queued_message(item_id, text, event.attachments)
             self._update_queue_status()
             return
         chat.add_user_message(text, event.attachments)
-        self._grant_user_paths(text, event.attachments)
         self.run_worker(self._handle_turn(text, event.attachments))
-
-    def _grant_user_paths(self, text: str, attachments: list[Attachment]) -> None:
-        """Implicit grants: existing paths in a human-submitted message (and
-        its attachments) widen the file-tool fence for this session.
-
-        Runs only on the real user-submit event — never on model text — so
-        the grant source is always genuine user input. Grants are visible
-        in the chat and traced; they persist in the session meta.
-        """
-        if not self.config.safety.auto_grant_user_paths:
-            return
-        candidates = extract_grantable_paths(text)
-        candidates.extend(
-            path
-            for attachment in attachments
-            if (path := Path(attachment.path)).exists()
-        )
-        new_roots = self.agent.registry.add_allowed_roots(candidates)
-        chat = self.query_one("#chat", ChatWidget)
-        for root in new_roots:
-            chat.add_info(f"↳ 已允许访问：{root}（本会话有效）")
-            self.agent.trace.log("path_grant", root=str(root), source="user_message")
 
     # -- steer queue UI (LIM-20) ---------------------------------------------
 
@@ -935,9 +900,7 @@ class MainScreen(Screen[None]):
             statusbar.set_state("verifying…", "tool")
         elif isinstance(event, GoalVerifyResultEvent):
             vresult = event.result
-            if vresult.refused:
-                chat.add_error("验收命令命中危险命令过滤，闭环暂停（goal 保持 active）")
-            elif vresult.cancelled:
+            if vresult.cancelled:
                 chat.add_info("验收已取消，闭环暂停（goal 保持 active）")
             elif vresult.timed_out:
                 chat.add_error("验收命令执行超时，将带入下一轮处理")

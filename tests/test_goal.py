@@ -189,7 +189,7 @@ def test_next_state_exhausted_at_budget():
 async def test_run_verify_exit_zero(workdir):
     result = await run_verify("exit 0", workdir)
     assert result.exit_code == 0
-    assert not (result.timed_out or result.cancelled or result.refused)
+    assert not (result.timed_out or result.cancelled)
 
 
 @pytest.mark.asyncio
@@ -216,23 +216,6 @@ async def test_run_verify_timeout_kills_process(workdir):
     result = await run_verify(f"{sleep} 30", workdir, timeout_ms=300)
     assert result.exit_code is None
     assert result.timed_out
-
-
-@pytest.mark.asyncio
-async def test_run_verify_dangerous_refused(workdir):
-    result = await run_verify("rm -rf /", workdir, dangerous_patterns=["rm"])
-    assert result.refused
-    assert result.exit_code is None
-
-
-@pytest.mark.asyncio
-async def test_run_verify_dangerous_default_fallback(workdir):
-    # No explicit patterns: falls back to DEFAULT_DANGEROUS_COMMANDS (the
-    # same posture as the bash tool), which includes "rm".
-    result = await run_verify("rm -rf /", workdir)
-    assert result.refused
-    result = await run_verify("git reset --hard", workdir)
-    assert result.refused
 
 
 @pytest.mark.asyncio

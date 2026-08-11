@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from limbo.compaction import is_summary_message, make_summary_message
 from limbo.goal import GoalState
@@ -55,9 +55,6 @@ class SessionMeta(BaseModel):
     title: str = ""
     created_at: str = ""
     updated_at: str = ""
-    # Session-scoped granted roots beyond the workdir (implicit user
-    # grants); restored on resume so the fence stays consistent.
-    allowed_roots: list[str] = Field(default_factory=list)
     # Active/finished closed-loop goal (LIM-40); restored on resume (D4/D6).
     goal: GoalState | None = None
     # Populated by list/load; not written to disk.

@@ -1,20 +1,17 @@
 """Base class and shared helpers for tools.
 
-The base module owns the rituals every tool used to repeat: workdir-scoped
-path resolution (raising ``ToolError`` instead of returning union types)
-and the output truncation policy.
+The base module owns the rituals every tool used to repeat: path
+resolution relative to the workdir (raising ``ToolError`` instead of
+returning union types) and the output truncation policy.
 
-The workdir scope and the sensitive-file list are *convenience guardrails*,
-not a security boundary: they keep the model from wandering outside the
-project or pulling secrets into the context by accident, and the user can
-widen the scope by mentioning paths in a message (session-scoped grants).
-``bash`` is intentionally not covered by either guardrail.
+There are deliberately no safety fences here: no workdir scope, no
+sensitive-file list, no command filter. Paths outside the workdir are
+honored as-is.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Collection
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -44,14 +41,8 @@ class BaseTool(ABC):
     description: str
     parameters: dict[str, Any]
 
-    def __init__(self, workdir: Path, allowed_roots: set[Path] | None = None):
+    def __init__(self, workdir: Path):
         self.workdir = workdir.resolve()
-        # Session-scoped extra roots the fence also accepts (e.g. paths a
-        # real user mentioned in a submitted message). Shared by reference
-        # with the ToolRegistry so late grants take effect immediately.
-        self.allowed_roots: set[Path] = (
-            allowed_roots if allowed_roots is not None else set()
-        )
 
     def execute(self, arguments: dict[str, Any]) -> ToolResult:
         try:
@@ -75,12 +66,11 @@ class BaseTool(ABC):
     # -- path resolution -------------------------------------------------------
 
     def resolve(self, raw_path: str, *, strict: bool = True) -> Path:
-        """Resolve ``raw_path`` against the workdir/allowed-roots guardrail.
+        """Resolve ``raw_path`` to an absolute path.
 
         ``~`` is expanded and absolute paths are honored as-is; relative
-        paths resolve under the workdir. Raises ``ToolError`` for paths
-        outside the guardrail, unresolvable paths, and (when ``strict``)
-        broken symlinks.
+        paths resolve under the workdir. Raises ``ToolError`` for
+        unresolvable paths and (when ``strict``) broken symlinks.
         """
         try:
             candidate = Path(raw_path).expanduser()
@@ -93,29 +83,10 @@ class BaseTool(ABC):
         except (OSError, RuntimeError) as e:
             raise ToolError(f"Invalid path: {e}") from e
 
-        if not self.is_within_scope(target):
-            raise ToolError(
-                f"Path is outside working directory ({self.workdir}). "
-                "This scope is a convenience guardrail, not a security "
-                "boundary. If access is genuinely needed, ask the user to "
-                "mention the path in a message to grant it."
-            )
-
         if strict and candidate.is_symlink() and not target.exists():
             raise ToolError("Invalid path: broken symlink")
 
         return target
-
-    def is_within_scope(self, path: Path) -> bool:
-        """True if a resolved path is inside the workdir or an allowed root."""
-        if is_within_workdir(path, self.workdir):
-            return True
-        # Snapshot: tools run in worker threads while the UI thread may add
-        # grants; iterating the live set could raise "changed size during
-        # iteration".
-        return any(
-            is_within_workdir(path, root) for root in tuple(self.allowed_roots)
-        )
 
     def resolve_existing(
         self, raw_path: str, *, noun: str = "Path", kind: str = "any"
@@ -133,25 +104,6 @@ class BaseTool(ABC):
     def resolve_creatable(self, raw_path: str) -> Path:
         """Resolve a path that may not exist yet (e.g. for writing)."""
         return self.resolve(raw_path, strict=False)
-
-def is_sensitive_path(path: Path, sensitive_files: Collection[str]) -> bool:
-    """True if ``path``'s name or any of its parts is on the sensitive list.
-
-    Convenience guardrail against accidentally pulling secrets (``.env``,
-    SSH keys) into the model context — not a security boundary (``bash``
-    is not covered by it). Shared by ``read``/``grep``/``find`` so the
-    guardrail behaves identically across file tools.
-    """
-    return any(part in sensitive_files for part in path.parts)
-
-
-def is_within_workdir(path: Path, workdir: Path) -> bool:
-    """Return True if resolved path is inside or equal to workdir."""
-    try:
-        path.resolve().relative_to(workdir.resolve())
-        return True
-    except ValueError:
-        return False
 
 
 def truncate_output(

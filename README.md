@@ -220,25 +220,18 @@ flight.
 
 ## Safety
 
-Limbo executes every tool call immediately, without asking for confirmation.
+Limbo executes every tool call immediately, without asking for confirmation,
+and has **no safety fences**: file tools (`read`, `edit`, `write`, `grep`,
+`find`, `ls`) are not scoped to the working directory — absolute paths and
+symlink targets outside it are honored as-is — and there is no
+sensitive-file blocklist, so `.env`, SSH keys, and the like are read and
+searched like any other file.
 
-File tools (`read`, `edit`, `write`, `grep`, `find`, `ls`) are scoped to the
-current working directory plus any session grants (paths the user mentions in
-a message), and `read`/`grep`/`find` skip a small blocklist of sensitive files
-(`.env`, SSH keys) to avoid leaking secrets into the model context by accident.
-**These are convenience guardrails against accidents, not a security boundary.**
-The path check resolves the path before each operation, so a symlink swapped
-between the check and the operation (a time-of-check-to-time-of-use race) could
-escape it.
-
-Bash is an exception: it is started in the working directory but is **not**
-covered by any of these guardrails. Commands can `cd ..`, use absolute paths,
-and read or write outside the workdir. Commands that match dangerous patterns
-such as `rm` or `git reset --hard` are **rejected outright** by a best-effort
-heuristic filter — ordinary shell constructs can bypass it, so it only
-protects against accidents. The pattern list is configurable but cannot be
-disabled from the UI. Only run Limbo with trusted commands and in
-repositories you can afford to modify or lose.
+Bash is likewise unrestricted: it is started in the working directory but
+can `cd ..`, use absolute paths, read or write anywhere, and no command is
+filtered out — `rm -rf` and `git reset --hard` run exactly as given. Only
+run Limbo with trusted models and in repositories you can afford to modify
+or lose.
 
 If you need to work with untrusted projects, disable the bash tool entirely:
 

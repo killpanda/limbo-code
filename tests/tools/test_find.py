@@ -54,27 +54,24 @@ def test_find_respects_gitignore(workdir_with_gitignore):
     assert "ignored_dir/x.py" not in result.output
 
 
-def test_find_rejects_path_outside_workdir(workdir):
+def test_find_allows_path_outside_workdir(workdir, tmp_path):
+    """No workdir fence: directories outside the workdir are searchable."""
+    outside = tmp_path / "outside"
+    (outside / "pkg").mkdir(parents=True)
+    (outside / "pkg" / "mod.py").write_text("x")
     tool = FindTool(workdir=workdir)
-    result = tool.execute({"pattern": "*.py", "path": ".."})
-    assert result.success is False
-    assert "outside" in result.error.lower()
+    result = tool.execute({"pattern": "**/*.py", "path": str(outside)})
+    assert result.success is True
+    assert str((outside / "pkg" / "mod.py").resolve()) in result.output
 
 
-def test_find_rejects_absolute_path_outside_workdir(workdir):
-    tool = FindTool(workdir=workdir)
-    result = tool.execute({"pattern": "*.py", "path": "/etc"})
-    assert result.success is False
-    assert "outside" in result.error.lower()
-
-
-def test_find_does_not_follow_symlink_to_outside_directory(workdir):
-    """A symlinked directory inside the workdir must not expose outside files."""
+def test_find_follows_symlink_to_outside_directory(workdir):
+    """No workdir fence: searching a symlinked dir lists its outside files."""
     import os
 
     outside = workdir.parent / f"find_outside_{workdir.name}"
     outside.mkdir()
-    (outside / "secret.py").write_text("secret")
+    (outside / "data.py").write_text("data")
 
     link = workdir / "outside_link"
     try:
@@ -82,12 +79,10 @@ def test_find_does_not_follow_symlink_to_outside_directory(workdir):
     except OSError:
         pytest.skip("Symlinks not supported on this platform")
 
-    (workdir / "inside.py").write_text("inside")
     tool = FindTool(workdir=workdir)
-    result = tool.execute({"pattern": "**/*.py"})
+    result = tool.execute({"pattern": "**/*.py", "path": "outside_link"})
     assert result.success is True
-    assert "inside.py" in result.output
-    assert "secret.py" not in result.output
+    assert "data.py" in result.output
 
 
 def test_find_broken_symlink_search_path_returns_invalid_path(workdir):
@@ -103,58 +98,3 @@ def test_find_broken_symlink_search_path_returns_invalid_path(workdir):
     assert "invalid path" in result.error.lower()
 
 
-def test_find_in_granted_root_outside_workdir(workdir, tmp_path):
-    outside = tmp_path / "outside"
-    (outside / "pkg").mkdir(parents=True)
-    (outside / "pkg" / "mod.py").write_text("x")
-    shared: set[Path] = {outside.resolve()}
-    tool = FindTool(workdir=workdir, allowed_roots=shared)
-    result = tool.execute({"pattern": "**/*.py", "path": str(outside)})
-    assert result.success is True
-    assert str((outside / "pkg" / "mod.py").resolve()) in result.output
-
-
-def test_find_outside_workdir_without_grant_fails(workdir, tmp_path):
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    tool = FindTool(workdir=workdir)
-    result = tool.execute({"pattern": "**/*.py", "path": str(outside)})
-    assert result.success is False
-    assert "outside working directory" in result.error
-
-
-def test_find_skips_sensitive_files(workdir):
-    """Sensitive files are hidden from results (aligned with read/grep)."""
-    (workdir / ".env").write_text("SECRET=1")
-    tool = FindTool(workdir=workdir)
-    result = tool.execute({"pattern": "**/*"})
-    assert result.success is True
-    assert ".env" not in result.output
-
-
-def test_find_skips_sensitive_directory(workdir):
-    ssh_dir = workdir / ".ssh"
-    ssh_dir.mkdir()
-    (ssh_dir / "id_rsa").write_text("KEY")
-    tool = FindTool(workdir=workdir)
-    result = tool.execute({"pattern": "**/*"})
-    assert result.success is True
-    assert ".ssh" not in result.output
-    assert "id_rsa" not in result.output
-
-
-def test_find_refuses_sensitive_target(workdir):
-    ssh_dir = workdir / ".ssh"
-    ssh_dir.mkdir()
-    tool = FindTool(workdir=workdir)
-    result = tool.execute({"pattern": "**/*", "path": ".ssh"})
-    assert result.success is False
-    assert "sensitive" in result.error.lower()
-
-
-def test_find_custom_sensitive_files(workdir):
-    (workdir / "secret.txt").write_text("SECRET=1")
-    tool = FindTool(workdir=workdir, sensitive_files=["secret.txt"])
-    result = tool.execute({"pattern": "**/*"})
-    assert result.success is True
-    assert "secret.txt" not in result.output
