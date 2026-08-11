@@ -345,6 +345,11 @@ class Agent:
         return self._meta.id
 
     @property
+    def session_path(self) -> Path:
+        """Path of the current session JSONL file."""
+        return self._session_file
+
+    @property
     def session_meta(self) -> SessionMeta:
         """Metadata of the current session (title filled in on first save)."""
         if not self._meta.title:

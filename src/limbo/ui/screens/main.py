@@ -41,6 +41,7 @@ from limbo.goal_driver import (
     GoalVerifyResultEvent,
     GoalVerifyStarted,
 )
+from limbo.integrations import AgentState, create_reporters
 from limbo.llm.client import LLMClient
 from limbo.llm.factory import create_llm_client
 from limbo.model_switch import (
@@ -111,6 +112,9 @@ class MainScreen(Screen[None]):
         self._compact_busy = False
         self._commands = SlashCommandRegistry()
         self._register_builtin_commands()
+        # External tool integrations (Herdr, ...): an empty composite
+        # outside any integrated environment, so all calls are no-ops.
+        self._integrations = create_reporters()
 
     @property
     def _agent_busy(self) -> bool:
@@ -138,6 +142,20 @@ class MainScreen(Screen[None]):
             workdir=self.workdir,
             session_dir=self.session_dir,
             resume=resume,
+        )
+
+    # -- External tool integrations (no-op outside integrated environments) --
+
+    def _report_state(
+        self, state: AgentState, *, message: str | None = None
+    ) -> None:
+        """Report semantic lifecycle state to active integrations."""
+        self._integrations.report(state, message=message)
+
+    def _report_session(self) -> None:
+        """Report the current session identity (startup, /new, /sessions)."""
+        self._integrations.report_session(
+            self.agent.session_id, str(self.agent.session_path)
         )
 
     def compose(self) -> ComposeResult:
@@ -169,6 +187,8 @@ class MainScreen(Screen[None]):
             )
         self._refresh_goal_indicator()  # D6: silent resume, badge only
         self.query_one("#input", InputWidget).focus()
+        self._report_session()
+        self._report_state("idle")
 
     # -- slash command menu ---------------------------------------------------
 
@@ -332,6 +352,7 @@ class MainScreen(Screen[None]):
         self._pending_proposals = parsed or []
         if not self._pending_proposals:
             chat.add_info("未能解析模型的验收提议，请手动输入或跳过")
+        self._report_state("blocked", message="等待确认 /goal 验收命令")
         self.app.push_screen(
             VerifyPicker(self._pending_proposals), self._on_verify_picked
         )
@@ -345,6 +366,7 @@ class MainScreen(Screen[None]):
         if choice is None:
             chat.add_info("已跳过自动验收（单轮模式）；/goal clear 可退出 goal")
             self._refresh_goal_indicator()
+            self._report_state("idle")
             return
         if choice == VERIFY_EDIT:
             # Prefill the best proposal for editing; the next submission is
@@ -356,6 +378,7 @@ class MainScreen(Screen[None]):
             input_widget.focus()
             self._editing_verify = True
             chat.add_info("编辑验收命令后回车确认（清空回车则跳过）")
+            self._report_state("blocked", message="等待编辑 /goal 验收命令")
             return
         self._accept_verify(choice)
 
@@ -364,6 +387,7 @@ class MainScreen(Screen[None]):
         if is_dangerous(command, self.config.safety.dangerous_commands):
             chat.add_error(f"验收命令命中危险命令过滤，已拒绝：{command}")
             chat.add_info("goal 保持单轮模式；/goal clear 退出")
+            self._report_state("idle")
             return
         state = self.driver.set_verify(command)
         if state is None:
@@ -484,6 +508,7 @@ class MainScreen(Screen[None]):
         input_widget.disabled = True
         self._compact_busy = True
         statusbar.set_state("compacting…", "thinking")
+        self._report_state("working")
         try:
             async for event in self.agent.compact(trigger="manual"):
                 await self._process_agent_event(event)
@@ -492,6 +517,7 @@ class MainScreen(Screen[None]):
             input_widget.disabled = False
             input_widget.focus()
             statusbar.set_state("idle")
+            self._report_state("idle")
 
     def _show_help(self) -> None:
         self.query_one("#chat", ChatWidget).add_info(self._commands.help_text())
@@ -549,6 +575,7 @@ class MainScreen(Screen[None]):
         self.agent = self._new_agent()
         chat.clear()
         chat.add_info(f"已开始新会话 {self.agent.session_id}")
+        self._report_session()
 
     def _find_skill(self, name: str) -> Skill | None:
         if self._commands.get(f"/{name}") is not None:
@@ -602,6 +629,7 @@ class MainScreen(Screen[None]):
         self._render_history()
         meta = self.agent.session_meta
         chat.add_info(f"已切换到会话 {meta.id} · {meta.title or '(无标题)'}")
+        self._report_session()
 
     def _render_history(self) -> None:
         """Render the agent's restored history into the chat flow.
@@ -684,6 +712,7 @@ class MainScreen(Screen[None]):
     async def on_unmount(self) -> None:
         """Close owned resources on shutdown: the LLM client's HTTP pool and
         the agent's trace file handle."""
+        self._integrations.release()
         self.agent.close()
         close = getattr(self.llm_client, "close", None)
         if close is not None:
@@ -707,6 +736,7 @@ class MainScreen(Screen[None]):
             self._editing_verify = False
             chat = self.query_one("#chat", ChatWidget)
             if text.startswith("/"):
+                self._report_state("idle")
                 self._handle_command(text)
                 return
             command = text.strip()
@@ -715,6 +745,7 @@ class MainScreen(Screen[None]):
                 self._accept_verify(command)
             else:
                 chat.add_info("已跳过自动验收（单轮模式）；/goal clear 可退出 goal")
+                self._report_state("idle")
             return
         if text.startswith("/"):
             self._handle_command(text)
@@ -825,6 +856,7 @@ class MainScreen(Screen[None]):
         # go to the steer queue instead of being blocked. Single-flight is
         # owned by the goal driver (``running`` is set eagerly on call).
         statusbar.set_state("thinking…", "thinking")
+        self._report_state("working")
         # driver.run() sets ``running`` eagerly at call time, so the badge
         # refresh below already sees the loop as executing (rainbow on).
         events = self.driver.run(user_input, attachments)
@@ -858,6 +890,7 @@ class MainScreen(Screen[None]):
             # the user can keep typing without clicking.
             input_widget.focus()
             statusbar.set_state("idle")
+            self._report_state("idle")
             self._refresh_goal_indicator()
             # M2: a proposal round that ends without leftover steers pops
             # the verify-command confirmation picker.

@@ -33,6 +33,8 @@ src/limbo/
 ├── goal_driver.py    # /goal orchestrator (frontend-agnostic, non-UI): turn → verify → next round
 ├── sessions.py       # Session JSONL save/load/list/export
 ├── trace.py          # Append-only JSONL run log (sessions/traces/)
+├── integrations/     # External mux/orchestrator lifecycle reporters: base.py (protocol
+│                     # + CompositeReporter + AgentState), herdr.py; create_reporters() fans out
 ├── skills.py         # SKILL.md discovery (user + project dirs)
 ├── user_paths.py     # Fence grants from paths in user messages
 ├── llm/              # catalog.py (provider/model specs), factory.py (dialect→client),
