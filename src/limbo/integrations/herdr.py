@@ -12,9 +12,12 @@ binary (``HERDR_BIN_PATH``, else PATH) are present.
 Reports are fire-and-forget CLI invocations — they must never block or
 break the UI, and a missing/broken ``herdr`` binary is silently ignored.
 
-``--source`` must stay stable and unique to this integration; ``--seq`` is
-strictly increasing so Herdr can drop reports that arrive out of order
-(turn-end and steer follow-up hand-offs race between workers).
+``--source`` must stay stable and unique to this integration; ``--seq``
+must be strictly increasing — Herdr keeps a per-(pane, source) watermark
+and silently drops anything at or below it, including ``release-agent``.
+The watermark survives process restarts, so the sequence starts from the
+wall clock (nanoseconds), not 1: a new Limbo process in a pane that
+previously ran one would otherwise never clear the old watermark.
 """
 
 from __future__ import annotations
@@ -22,6 +25,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+import time
 from collections.abc import Mapping
 
 from limbo.integrations.base import AgentState
@@ -33,10 +37,13 @@ AGENT = "limbo"
 class HerdrReporter:
     """Fire-and-forget lifecycle reporter bound to one Herdr pane."""
 
-    def __init__(self, pane_id: str, bin_path: str):
+    def __init__(self, pane_id: str, bin_path: str, start_seq: int | None = None):
         self._pane_id = pane_id
         self._bin_path = bin_path
-        self._seq = 0
+        # Start from the wall clock so a later process in the same pane
+        # clears the previous one's watermark (see module docstring).
+        self._seq = start_seq if start_seq is not None else time.time_ns()
+        self._released = False
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> HerdrReporter | None:
@@ -109,7 +116,17 @@ class HerdrReporter:
         self._run(cmd)
 
     def release(self) -> None:
-        """Release this source's lifecycle authority (on agent exit)."""
+        """Release this source's lifecycle authority (on agent exit).
+
+        Idempotent: ``on_unmount``, ``atexit``, and signal handlers all
+        call this on the way out; only the first call reports.
+        """
+        if self._released:
+            return
+        self._released = True
+        # seq matters here: Herdr drops a release at or below this source's
+        # watermark, so a seq-less release after sequenced reports is
+        # silently ignored.
         self._run(
             [
                 self._bin_path,
@@ -120,6 +137,8 @@ class HerdrReporter:
                 SOURCE,
                 "--agent",
                 AGENT,
+                "--seq",
+                str(self._next_seq()),
             ]
         )
 

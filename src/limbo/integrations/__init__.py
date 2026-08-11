@@ -10,8 +10,11 @@ call sites ever touch.
 
 from __future__ import annotations
 
+import atexit
 import os
+import signal
 from collections.abc import Mapping
+from types import FrameType
 
 from limbo.integrations.base import (
     AgentState,
@@ -26,6 +29,7 @@ __all__ = [
     "HerdrReporter",
     "IntegrationReporter",
     "create_reporters",
+    "install_exit_hooks",
 ]
 
 
@@ -41,3 +45,30 @@ def create_reporters(env: Mapping[str, str] | None = None) -> CompositeReporter:
     if (herdr := HerdrReporter.from_env(env)) is not None:
         reporters.append(herdr)
     return CompositeReporter(reporters)
+
+
+def install_exit_hooks(reporters: CompositeReporter) -> None:
+    """Release integration authority on every process-exit path.
+
+    A clean Textual quit releases via ``MainScreen.on_unmount``, but that
+    never runs when the process dies by signal — e.g. the pane is closed
+    or killed (SIGHUP/SIGTERM) — and Herdr would keep showing the agent
+    forever. Covered here: normal interpreter exit (``atexit``, which also
+    catches ``SystemExit`` and unhandled exceptions) and SIGHUP/SIGTERM
+    (released, then re-raised with the default disposition so the process
+    still dies by the original signal). Reporters are idempotent, so
+    several hooks firing on one exit path is harmless.
+    """
+    if not reporters:
+        return
+    atexit.register(reporters.release)
+
+    def _release_and_reraise(signum: int, frame: FrameType | None) -> None:
+        reporters.release()
+        signal.signal(signum, signal.SIG_DFL)
+        os.kill(os.getpid(), signum)
+
+    for name in ("SIGHUP", "SIGTERM"):
+        signum = getattr(signal, name, None)
+        if signum is not None:  # SIGHUP does not exist on Windows
+            signal.signal(signum, _release_and_reraise)
