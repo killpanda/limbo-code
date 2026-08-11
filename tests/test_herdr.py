@@ -29,9 +29,9 @@ def make_reporter(monkeypatch) -> tuple[HerdrReporter, list[list[str]]]:
         return _Proc()
 
     monkeypatch.setattr(subprocess, "Popen", fake_popen)
-    reporter = HerdrReporter.from_env(FULL_ENV)
-    assert reporter is not None
-    return reporter, calls
+    # Deterministic seq for assertions (production starts from the wall
+    # clock; see HerdrReporter.__init__).
+    return HerdrReporter("w1:p2", "/usr/local/bin/herdr", start_seq=0), calls
 
 
 def test_from_env_outside_herdr_is_none():
@@ -120,8 +120,9 @@ def test_report_session_command(monkeypatch):
 
 def test_release_command(monkeypatch):
     reporter, calls = make_reporter(monkeypatch)
+    reporter.report("working")  # seq 1
     reporter.release()
-    assert calls[0] == [
+    assert calls[1] == [
         "/usr/local/bin/herdr",
         "pane",
         "release-agent",
@@ -130,7 +131,25 @@ def test_release_command(monkeypatch):
         SOURCE,
         "--agent",
         AGENT,
+        "--seq",
+        # Herdr drops a release at or below this source's last seq.
+        "2",
     ]
+
+
+def test_default_seq_starts_from_wall_clock():
+    reporter = HerdrReporter("w1:p1", "/bin/herdr")
+    # A new process must clear the watermark a previous process left on
+    # the same pane — nanosecond epoch guarantees that.
+    assert reporter._next_seq() > 1_700_000_000_000_000_000
+
+
+def test_release_is_idempotent(monkeypatch):
+    reporter, calls = make_reporter(monkeypatch)
+    reporter.release()
+    reporter.release()
+    reporter.release()
+    assert len(calls) == 1
 
 
 def test_popen_failure_is_swallowed(monkeypatch):

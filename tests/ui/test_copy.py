@@ -86,6 +86,21 @@ async def _drain_clipboard_worker(pilot) -> None:
     await pilot.app.workers.wait_for_complete()
     await pilot.pause()
 
+
+async def _wait_laid_out(pilot, widget) -> None:
+    """Wait until the widget has a real layout region.
+
+    A single ``pilot.pause()`` after adding a message does not guarantee
+    the layout pass has run on a cold app (first app of the pytest
+    process, slow CI runner): the drag then lands on a zero-sized widget
+    and silently selects nothing.
+    """
+    for _ in range(50):
+        await pilot.pause()
+        if widget.region.width > 0 and widget.region.height > 0:
+            return
+    raise AssertionError("widget was never laid out")
+
 # The startup banner art occupies the top rows; chat messages render below it.
 # A drag across row 3 of a fresh app selects banner art, which is fine for
 # mechanism tests — what matters is that *something* selectable lands in the
@@ -175,6 +190,7 @@ async def test_drag_selection_auto_copies_on_mouse_up(monkeypatch, tmp_path):
         chat.add_assistant_message("limbo copy regression sentinel")
         await pilot.pause()
         message = chat.messages[-1]
+        await _wait_laid_out(pilot, message)
         await pilot.mouse_down(message, offset=(0, 0))
         await pilot.hover(message, offset=(20, 0))
         await pilot.mouse_up(message, offset=(20, 0))
@@ -194,6 +210,7 @@ async def test_ctrl_c_copies_selection(monkeypatch, tmp_path):
         chat.add_assistant_message("limbo ctrl-c sentinel")
         await pilot.pause()
         message = chat.messages[-1]
+        await _wait_laid_out(pilot, message)
         await pilot.mouse_down(message, offset=(0, 0))
         await pilot.hover(message, offset=(15, 0))
         await pilot.mouse_up(message, offset=(15, 0))

@@ -11,6 +11,7 @@ from textual.app import App
 from limbo.config import Config
 from limbo.llm.client import LLMClient
 from limbo.ui.clipboard import write_clipboard_text
+from limbo.ui.key_fixes import apply_key_fixes
 from limbo.ui.screens.main import MainScreen
 from limbo.ui.theme import BUILTIN_THEMES, DEFAULT_THEME, LIMBO_DARK
 
@@ -32,6 +33,7 @@ class LimboApp(App[None]):
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
+        apply_key_fixes()
         self.workdir = Path(workdir).resolve()
         self.config = config
         self.llm_client = llm_client

@@ -41,7 +41,7 @@ from limbo.goal_driver import (
     GoalVerifyResultEvent,
     GoalVerifyStarted,
 )
-from limbo.integrations import AgentState, create_reporters
+from limbo.integrations import AgentState, create_reporters, install_exit_hooks
 from limbo.llm.client import LLMClient
 from limbo.llm.factory import create_llm_client
 from limbo.model_switch import (
@@ -115,6 +115,7 @@ class MainScreen(Screen[None]):
         # External tool integrations (Herdr, ...): an empty composite
         # outside any integrated environment, so all calls are no-ops.
         self._integrations = create_reporters()
+        install_exit_hooks(self._integrations)
 
     @property
     def _agent_busy(self) -> bool:
