@@ -54,6 +54,7 @@ from limbo.sessions import derive_title, export_jsonl, export_markdown, list_ses
 from limbo.skills import Skill, discover_skills
 from limbo.ui.banner import startup_art_text
 from limbo.ui.commands import SlashCommand, SlashCommandRegistry
+from limbo.ui.path_input import attachments_from_text, looks_like_path
 from limbo.ui.screens.btw import BtwScreen
 from limbo.ui.screens.game2048 import Game2048Screen
 from limbo.ui.screens.model_picker import ModelPicker
@@ -203,11 +204,22 @@ class MainScreen(Screen[None]):
             matches = [
                 c for c in self._slash_candidates() if c.name.startswith(text)
             ]
+            menu = self.query_one("#slash-menu", SlashCommandMenu)
             if matches:
-                menu = self.query_one("#slash-menu", SlashCommandMenu)
                 menu.show_commands(matches)
                 self._slash_menu_open = True
                 return
+            # No command matches: show a passive hint instead of letting the
+            # user discover the outcome on submit. The menu-open flag stays
+            # False, so Enter/arrows/Esc keep their normal behavior.
+            if Path(text).expanduser().is_file():
+                menu.show_hint("📎 路径已识别 · 回车将作为附件发送")
+            elif looks_like_path(text):
+                menu.show_hint("无匹配命令 · 将作为普通文本发送")
+            else:
+                menu.show_hint("无匹配命令 · /help 查看全部命令")
+            self._slash_menu_open = False
+            return
         self.slash_menu_close()
 
     def _slash_candidates(self) -> list:
@@ -458,7 +470,15 @@ class MainScreen(Screen[None]):
             )
         )
 
-    def _handle_command(self, text: str) -> None:
+    def _handle_command(self, text: str) -> bool:
+        """Dispatch a slash command; False means "treat as a normal message".
+
+        False is returned only for '/'-leading text that is neither a known
+        command nor a skill but looks like a file path — the caller then
+        sends it as a plain message (auto-attaching existing files).
+        Everything else (executed, busy-rejected, unknown-command error)
+        returns True.
+        """
         chat = self.query_one("#chat", ChatWidget)
         name, _, arg = text.partition(" ")
         arg = arg.strip()
@@ -470,14 +490,20 @@ class MainScreen(Screen[None]):
             # (on_user_submitted and slash_menu_complete) are covered.
             if self._agent_busy and not command.allow_when_busy:
                 self._reject_busy_command(command)
-                return
+                return True
             command.handler(arg)
-            return
+            return True
         skill = self._find_skill(name.removeprefix("/"))
         if skill is not None:
             self._invoke_skill(skill, arg)
-        else:
-            chat.add_info(f"未知命令 {name}，{self._commands.help_text()}")
+            return True
+        if looks_like_path(text):
+            return False
+        chat.add_info(
+            f"未知命令 {name} · /help 查看全部命令；"
+            "若想发送以 / 开头的文本，请在前面加一个空格"
+        )
+        return True
 
     def _reject_busy_command(self, command: SlashCommand) -> None:
         chat = self.query_one("#chat", ChatWidget)
@@ -728,7 +754,7 @@ class MainScreen(Screen[None]):
             # message. A slash command cancels edit mode and runs normally.
             self._editing_verify = False
             chat = self.query_one("#chat", ChatWidget)
-            if text.startswith("/"):
+            if text.startswith("/") and not event.force_text:
                 self._report_state("idle")
                 self._handle_command(text)
                 return
@@ -740,19 +766,23 @@ class MainScreen(Screen[None]):
                 chat.add_info("已跳过自动验收（单轮模式）；/goal clear 可退出 goal")
                 self._report_state("idle")
             return
-        if text.startswith("/"):
-            self._handle_command(text)
-            return
+        attachments = event.attachments
+        if text.startswith("/") and not event.force_text:
+            if self._handle_command(text):
+                return
+            # '/'-leading input that is not a command but looks like a path:
+            # fall through as a normal message, auto-attaching existing files.
+            attachments = [*attachments, *attachments_from_text(text)]
         chat = self.query_one("#chat", ChatWidget)
         if self._agent_busy:
             # Mid-turn submission (RFC LIM-20): queue for steer injection,
             # render optimistically — never start a second turn worker.
-            item_id = self.agent.steer(text, event.attachments)
-            chat.add_queued_message(item_id, text, event.attachments)
+            item_id = self.agent.steer(text, attachments)
+            chat.add_queued_message(item_id, text, attachments)
             self._update_queue_status()
             return
-        chat.add_user_message(text, event.attachments)
-        self.run_worker(self._handle_turn(text, event.attachments))
+        chat.add_user_message(text, attachments)
+        self.run_worker(self._handle_turn(text, attachments))
 
     # -- steer queue UI (LIM-20) ---------------------------------------------
 
