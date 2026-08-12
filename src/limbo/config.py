@@ -20,11 +20,6 @@ from toml import TomlDecodeError
 
 DEFAULT_CONFIG_PATH = Path.home() / ".limbo" / "config.toml"
 
-# Single source of truth for safety defaults; tools fall back to these when
-# constructed without explicit values.
-DEFAULT_DANGEROUS_COMMANDS = ["rm", "git reset --hard"]
-DEFAULT_SENSITIVE_FILES = [".env", "id_rsa", "id_ed25519", ".ssh"]
-
 
 class LLMConfig(BaseModel):
     api_key: str | None = None
@@ -174,19 +169,6 @@ class UIConfig(BaseModel):
     kitty_keyboard: KittyKeyboardMode = KittyKeyboardMode.AUTO
 
 
-class SafetyConfig(BaseModel):
-    dangerous_commands: list[str] = Field(
-        default_factory=lambda: list(DEFAULT_DANGEROUS_COMMANDS)
-    )
-    sensitive_files: list[str] = Field(
-        default_factory=lambda: list(DEFAULT_SENSITIVE_FILES)
-    )
-    # Implicit grants: paths a real user mentions in a submitted message
-    # widen the file-tool fence for the session (directories grant their
-    # subtree, files grant themselves; only existing paths count).
-    auto_grant_user_paths: bool = True
-
-
 class ToolsConfig(BaseModel):
     bash_enabled: bool = True
     # Execute multiple tool calls from one assistant turn concurrently.
@@ -235,7 +217,6 @@ class GoalSettings(BaseModel):
 class Config(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
-    safety: SafetyConfig = Field(default_factory=SafetyConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     compaction: CompactionSettings = Field(default_factory=CompactionSettings)
     goal: GoalSettings = Field(default_factory=GoalSettings)

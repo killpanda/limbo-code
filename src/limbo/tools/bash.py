@@ -4,9 +4,7 @@ from __future__ import annotations
 
 import math
 import os
-import re
 import secrets
-import shlex
 import shutil
 import subprocess
 import sys
@@ -15,7 +13,6 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from limbo.config import DEFAULT_DANGEROUS_COMMANDS
 from limbo.models import ToolResult
 from limbo.tools.base import (
     DEFAULT_MAX_BYTES,
@@ -192,9 +189,7 @@ class BashTool(BaseTool):
         f"{DEFAULT_MAX_BYTES // 1024}KB (whichever is hit first). If truncated, "
         "the full output is saved to a temp file and its path is shown. "
         "Note: bash is not sandboxed — it can access files outside the working "
-        "directory, and the file tools' guardrails do not apply to it. "
-        "Destructive commands are blocked; if a command you need is blocked, "
-        "ask the user to run it manually. "
+        "directory. "
         "For multi-line scripts, write the script to a file with the write "
         "tool and execute that file (e.g. python script.py) instead of using "
         "heredocs."
@@ -211,11 +206,8 @@ class BashTool(BaseTool):
         "required": ["command"],
     }
 
-    def __init__(self, workdir: Path, dangerous_patterns: list[str] | None = None):
+    def __init__(self, workdir: Path):
         super().__init__(workdir)
-        self.dangerous_patterns = dangerous_patterns or list(
-            DEFAULT_DANGEROUS_COMMANDS
-        )
         # In-flight processes, for ESC interruption (RFC LIM-53). cancel()
         # runs on the event loop while run() blocks in a worker thread, so
         # both sets are guarded by the same lock; ``_cancelled`` keys are
@@ -241,12 +233,6 @@ class BashTool(BaseTool):
 
         if not command:
             return ToolResult(success=False, error="No command provided.")
-
-        if is_dangerous(command, self.dangerous_patterns):
-            return ToolResult(
-                success=False,
-                error=f"Command blocked by safety policy: {command}",
-            )
 
         # No default timeout and no upper cap (pi parity): a command runs to
         # completion unless the caller passes a timeout.
@@ -354,73 +340,3 @@ class BashTool(BaseTool):
                 error="Invalid timeout: must be a positive number of seconds",
             )
         return timeout
-
-
-_CONTROL_OPERATOR_RE = re.compile(r"(;|&&|&|\|\||\|)")
-
-
-def _tokenize_command(command: str) -> list[str]:
-    """Split a command into tokens, treating shell control operators as separate tokens.
-
-    Falls back to naive whitespace splitting when ``shlex`` cannot parse the
-    command (e.g. unbalanced quotes): the filter is a best-effort heuristic
-    and must never raise on malformed input.
-    """
-    try:
-        raw_tokens = shlex.split(command)
-    except ValueError:
-        raw_tokens = command.split()
-    tokens: list[str] = []
-    for raw in raw_tokens:
-        for part in _CONTROL_OPERATOR_RE.split(raw):
-            if part:
-                tokens.append(part)
-    return tokens
-
-
-def is_dangerous(command: str, patterns: list[str]) -> bool:
-    """Return True if command matches a dangerous pattern.
-
-    Single-token patterns are matched only in command-name positions: the first
-    token of the command or the first token after a shell control operator
-    (``;``, ``&&``, ``&``, ``||``, ``|``). Multi-token patterns are matched
-    against the leading tokens starting at each command position.
-
-    .. note::
-        This is a best-effort heuristic against accidental destruction, not
-        a security boundary. It tokenizes the top-level command, so
-        subshells, command substitution, variable indirection, and similar
-        shell constructs can bypass it. Commands that ``shlex`` cannot
-        parse fall back to whitespace tokenization instead of raising.
-    """
-    tokens = _tokenize_command(command)
-    control_operators = {";", "&&", "&", "||", "|"}
-    command_starts = [0]
-    for i in range(1, len(tokens)):
-        if tokens[i - 1] in control_operators:
-            command_starts.append(i)
-
-    for pattern in patterns:
-        if not pattern:
-            continue
-        pattern_tokens = _tokenize_command(pattern)
-        for start in command_starts:
-            if start >= len(tokens):
-                continue
-            if len(pattern_tokens) == 1:
-                name = pattern_tokens[0]
-                token = tokens[start]
-                if token == name or Path(token).name == name:
-                    return True
-            else:
-                first_pattern = pattern_tokens[0]
-                first_token = tokens[start]
-                first_matches = (
-                    first_token == first_pattern
-                    or Path(first_token).name == Path(first_pattern).name
-                )
-                if first_matches and tokens[
-                    start + 1 : start + len(pattern_tokens)
-                ] == pattern_tokens[1:]:
-                    return True
-    return False

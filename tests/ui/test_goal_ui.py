@@ -186,28 +186,6 @@ async def test_goal_proposal_none_means_no_gate(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_goal_proposal_dangerous_command_rejected(tmp_path, monkeypatch):
-    client = GatedClient()
-    client.add([TextChunk(
-        text="<verify_proposal><command>rm -rf build/</command></verify_proposal>"
-    )])
-    app = make_app(tmp_path, client)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        screen = get_screen(pilot)
-        chat = screen.query_one("#chat", ChatWidget)
-        input_widget = screen.query_one("#input", InputWidget)
-
-        await type_and_submit(pilot, input_widget, "/goal 清理构建产物")
-        await wait_picker(pilot)
-        await pilot.press("enter")  # accept the dangerous proposal
-        await wait_until(pilot, lambda: "危险命令" in chat.transcript_text())
-        state = screen.driver.status()
-        assert state is not None and state.verify_command == ""
-        assert len(client.calls) == 1  # rejected, no work turn
-
-
-@pytest.mark.asyncio
 async def test_goal_badge_rainbow_while_running(tmp_path, monkeypatch):
     gate = asyncio.Event()
     client = GatedClient()

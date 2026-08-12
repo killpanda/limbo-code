@@ -73,20 +73,10 @@ def test_resolve_existing_kind_checks(tool, tmp_path):
         tool.resolve_existing("f.txt", kind="dir")
 
 
-def test_resolve_rejects_outside_workdir(tool):
-    with pytest.raises(ToolError, match="outside working directory"):
-        tool.resolve("../escape.txt")
-
-
-def test_resolve_error_names_workdir_and_does_not_teach_bypass(tool):
-    with pytest.raises(ToolError) as exc_info:
-        tool.resolve("../escape.txt")
-    message = str(exc_info.value)
-    assert str(tool.workdir) in message
-    # The error must not instruct the model to switch tools to bypass the
-    # guardrail; it points at user authorization instead.
-    assert "bash" not in message
-    assert "ask the user" in message
+def test_resolve_allows_outside_workdir(tool):
+    """No workdir fence: relative escapes and absolute paths resolve as-is."""
+    resolved = tool.resolve("../escape.txt")
+    assert resolved == (tool.workdir / "../escape.txt").resolve()
 
 
 def test_resolve_expands_tilde(tmp_path, monkeypatch):
@@ -98,59 +88,6 @@ def test_resolve_expands_tilde(tmp_path, monkeypatch):
     tool = DummyTool(workdir)
     # ~/proj/f.txt lands inside the workdir once ~ is expanded.
     assert tool.resolve("~/proj/f.txt") == workdir / "f.txt"
-
-
-class TestAllowedRoots:
-    @pytest.fixture
-    def setup(self, tmp_path: Path):
-        workdir = tmp_path / "workdir"
-        workdir.mkdir()
-        (workdir / "f.txt").write_text("x")
-        outside = tmp_path / "outside"
-        (outside / "sub").mkdir(parents=True)
-        (outside / "sub" / "f.txt").write_text("x")
-        (outside / "top.txt").write_text("y")
-        return DummyTool(workdir), outside
-
-    def test_granted_directory_allows_subtree(self, setup):
-        tool, outside = setup
-        tool.allowed_roots.add(outside.resolve())
-        assert tool.resolve(str(outside / "sub" / "f.txt")) == (
-            outside / "sub" / "f.txt"
-        ).resolve()
-
-    def test_granted_file_allows_only_itself(self, setup):
-        tool, outside = setup
-        tool.allowed_roots.add((outside / "top.txt").resolve())
-        assert tool.resolve(str(outside / "top.txt")) == (outside / "top.txt").resolve()
-        with pytest.raises(ToolError, match="outside working directory"):
-            tool.resolve(str(outside / "sub" / "f.txt"))
-
-    def test_ungranted_path_still_rejected(self, setup):
-        tool, outside = setup
-        tool.allowed_roots.add(outside.resolve())
-        with pytest.raises(ToolError, match="outside working directory"):
-            tool.resolve("../elsewhere.txt")
-
-    def test_is_within_scope(self, setup):
-        tool, outside = setup
-        assert tool.is_within_scope(tool.workdir / "f.txt")
-        assert not tool.is_within_scope(outside / "top.txt")
-        tool.allowed_roots.add(outside.resolve())
-        assert tool.is_within_scope(outside / "top.txt")
-
-    def test_late_grant_takes_effect_via_shared_set(self, setup):
-        """The registry shares one set with all tools; a grant added after
-        tool construction must be honored on the next call."""
-        tool, outside = setup
-        shared: set[Path] = set()
-        shared_tool = DummyTool(tool.workdir, allowed_roots=shared)
-        with pytest.raises(ToolError, match="outside working directory"):
-            shared_tool.resolve(str(outside / "top.txt"))
-        shared.add(outside.resolve())
-        assert shared_tool.resolve(str(outside / "top.txt")) == (
-            outside / "top.txt"
-        ).resolve()
 
 
 def test_resolve_creatable_allows_missing(tool):

@@ -39,18 +39,15 @@ def test_grep_fixed_string(workdir):
     assert "a.py" in result.output
 
 
-def test_grep_rejects_path_outside_workdir(workdir):
+def test_grep_allows_path_outside_workdir(workdir, tmp_path):
+    """No workdir fence: directories outside the workdir are searchable."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "x.py").write_text("def foo():\n    pass\n")
     tool = GrepTool(workdir=workdir)
-    result = tool.execute({"pattern": "foo", "path": ".."})
-    assert result.success is False
-    assert "outside" in result.error.lower()
-
-
-def test_grep_rejects_absolute_path_outside_workdir(workdir):
-    tool = GrepTool(workdir=workdir)
-    result = tool.execute({"pattern": "foo", "path": "/etc"})
-    assert result.success is False
-    assert "outside" in result.error.lower()
+    result = tool.execute({"pattern": "def foo", "path": str(outside)})
+    assert result.success is True
+    assert "x.py" in result.output
 
 
 def test_grep_requires_ripgrep(workdir, monkeypatch):
@@ -86,41 +83,15 @@ def test_grep_limit_is_per_file(workdir):
     assert "b.py" in result.output
 
 
-def test_grep_skips_sensitive_files(workdir):
-    """Sensitive files are excluded from search results (aligned with read)."""
+def test_grep_includes_dotenv_files(workdir):
+    """No sensitive-file list: .env is searchable like any other file."""
     (workdir / ".env").write_text("SECRET=topsecret\n")
     tool = GrepTool(workdir=workdir)
-    result = tool.execute({"pattern": "SECRET"})
-    assert result.success is True
-    assert ".env" not in result.output
-    assert "topsecret" not in result.output
-
-
-def test_grep_skips_sensitive_directory(workdir):
-    ssh_dir = workdir / ".ssh"
-    ssh_dir.mkdir()
-    (ssh_dir / "config").write_text("Host secret-host\n")
-    tool = GrepTool(workdir=workdir)
-    result = tool.execute({"pattern": "secret-host"})
-    assert result.success is True
-    assert "secret-host" not in result.output
-
-
-def test_grep_refuses_sensitive_target(workdir):
-    (workdir / ".env").write_text("SECRET=topsecret\n")
-    tool = GrepTool(workdir=workdir)
+    # rg skips hidden files in directory searches, so target the file
+    # directly — the point is that .env is no longer refused/excluded.
     result = tool.execute({"pattern": "SECRET", "path": ".env"})
-    assert result.success is False
-    assert "sensitive" in result.error.lower()
-
-
-def test_grep_custom_sensitive_files(workdir):
-    (workdir / "secret.txt").write_text("SECRET=topsecret\n")
-    tool = GrepTool(workdir=workdir, sensitive_files=["secret.txt"])
-    result = tool.execute({"pattern": "SECRET"})
     assert result.success is True
-    assert "topsecret" not in result.output
-    assert "a.py" not in result.output
+    assert "topsecret" in result.output
 
 
 def test_grep_broken_symlink_search_path_returns_invalid_path(workdir):

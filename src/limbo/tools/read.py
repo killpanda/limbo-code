@@ -2,18 +2,15 @@
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 from typing import Any
 
-from limbo.config import DEFAULT_SENSITIVE_FILES
 from limbo.models import Attachment, ToolResult
 from limbo.tools.base import (
     DEFAULT_MAX_BYTES,
     DEFAULT_MAX_LINES,
     BaseTool,
     ToolError,
-    is_sensitive_path,
     truncate_head,
 )
 
@@ -75,51 +72,9 @@ class ReadTool(BaseTool):
         "required": ["path"],
     }
 
-    def __init__(
-        self,
-        workdir: Path,
-        sensitive_files: list[str] | None = None,
-        allowed_roots: set[Path] | None = None,
-    ):
-        super().__init__(workdir, allowed_roots=allowed_roots)
-        self.sensitive_files = set(sensitive_files or DEFAULT_SENSITIVE_FILES)
-
-    @staticmethod
-    def _resolve_offload_path(raw_path: str) -> Path | None:
-        """Whitelist limbo's own offloaded bash output outside the workdir.
-
-        Bash offloading writes full command output to
-        ``$TMPDIR/limbo-output-<id>.log`` and tells the model to retrieve it
-        with read — but the workdir boundary would reject those paths.
-        Only files directly inside ``tempfile.gettempdir()`` whose name
-        matches what ``BashTool`` writes are allowed; everything else still
-        goes through the normal workdir check.
-        """
-        try:
-            target = Path(raw_path).expanduser().resolve(strict=False)
-            tmpdir = Path(tempfile.gettempdir()).resolve()
-        except (OSError, RuntimeError):
-            return None
-        if target.parent != tmpdir:
-            return None
-        if not (target.name.startswith("limbo-output-") and target.name.endswith(".log")):
-            return None
-        return target
-
     def run(self, arguments: dict[str, Any]) -> ToolResult:
         raw_path = arguments.get("path", "")
-        target = self._resolve_offload_path(raw_path) or self.resolve(raw_path)
-
-        if is_sensitive_path(target, self.sensitive_files):
-            return ToolResult(
-                success=False,
-                error=(
-                    "Refusing to read sensitive file. This is a convenience "
-                    "guardrail against accidental secret exposure, not a "
-                    "security boundary. Ask the user if access is genuinely "
-                    "needed."
-                ),
-            )
+        target = self.resolve(raw_path)
 
         if not target.exists():
             raise ToolError(f"File not found: {raw_path}")

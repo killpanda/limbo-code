@@ -18,7 +18,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from limbo.agent import Agent, AgentEvent, SteerEvent
-from limbo.config import DEFAULT_DANGEROUS_COMMANDS
 from limbo.goal import (
     STATUS_ACTIVE,
     STATUS_CLEARED,
@@ -93,18 +92,11 @@ class GoalDriver:
         *,
         max_rounds: int = 10,
         verify_timeout_ms: int = 600_000,
-        dangerous_patterns: list[str] | None = None,
     ) -> None:
         self._agent = agent
         self._workdir = workdir
         self._max_rounds = max_rounds
         self._verify_timeout_ms = verify_timeout_ms
-        # None falls back to the same default posture as the bash tool.
-        self._dangerous_patterns = (
-            list(dangerous_patterns)
-            if dangerous_patterns is not None
-            else list(DEFAULT_DANGEROUS_COMMANDS)
-        )
         self._running = False
         self._verify_task: asyncio.Task[VerifyResult] | None = None
         # Adopt the configured budget onto a restored goal (D4/D6: silent
@@ -261,14 +253,13 @@ class GoalDriver:
                     round=round_no,
                     timed_out=result.timed_out,
                     cancelled=result.cancelled,
-                    refused=result.refused,
                 )
                 yield GoalVerifyResultEvent(
                     result=result, round=round_no, max_rounds=state.max_rounds
                 )
-                if result.cancelled or result.refused:
-                    # User interrupt (Esc/clear) or a config change made the
-                    # command dangerous: stop the loop, goal stays active.
+                if result.cancelled:
+                    # User interrupt (Esc/clear): stop the loop, goal stays
+                    # active.
                     return
 
                 state = next_state(state, result)
@@ -303,7 +294,6 @@ class GoalDriver:
                 command,
                 self._workdir,
                 timeout_ms=self._verify_timeout_ms,
-                dangerous_patterns=self._dangerous_patterns,
             )
         )
         self._verify_task = task

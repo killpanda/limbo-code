@@ -49,11 +49,15 @@ def test_ls_empty_directory(workdir):
     assert result.output == "(empty directory)"
 
 
-def test_ls_rejects_paths_outside_workdir(workdir):
+def test_ls_allows_paths_outside_workdir(workdir, tmp_path):
+    """No workdir fence: directories outside the workdir are listable."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "x.txt").write_text("x")
     tool = LsTool(workdir=workdir)
-    assert tool.execute({"path": ".."}).success is False
-    assert tool.execute({"path": "../"}).success is False
-    assert tool.execute({"path": "/tmp"}).success is False
+    result = tool.execute({"path": str(outside)})
+    assert result.success is True
+    assert "x.txt" in result.output
 
 
 def test_ls_broken_symlink_returns_invalid_path(workdir):

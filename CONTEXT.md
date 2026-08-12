@@ -39,5 +39,7 @@ proposals should name modules with these terms.
 
 ## Safety
 
-- **Fence** — the workdir boundary on file tools, widened by session-scoped
-  **grants** (paths a real user mentions in a submitted message).
+Limbo has no safety fences: file tools are not scoped to the workdir,
+there is no sensitive-file list, and bash runs every command as given.
+Only run it with trusted models in repositories you can afford to modify
+or lose.

@@ -2,7 +2,7 @@
 
 **Limbo** is a minimal terminal AI coding agent (Python 3.11+, Textual). Users converse with an LLM in a TUI to explore, read, edit, and write code via 7 tools.
 
-**Tools execute immediately — no confirmation flow.** Convenience guardrails (not a security boundary): a workdir scope on file tools (+ session-scoped grants from user-mentioned paths), a sensitive-file skip list shared by `read`/`grep`/`find`, and a heuristic dangerous-command filter on `bash` (best-effort, rejects matches outright; `bash` is otherwise not covered by any guardrail).
+**Tools execute immediately — no confirmation flow, no safety fences.** File tools are not scoped to the workdir (absolute paths and symlinks are honored as-is), there is no sensitive-file skip list, and `bash` runs every command as given (no dangerous-command filter).
 
 ## Quick Start
 
@@ -20,7 +20,7 @@ still works for a runtime-only install.
 ```
 src/limbo/
 ├── app.py            # CLI entry: args, config, launch
-├── config.py         # Pydantic config: llm/ui/safety/tools/compaction/providers
+├── config.py         # Pydantic config: llm/ui/tools/compaction/providers
 ├── models.py         # Message, Attachment, ToolResult, LLMEvent
 ├── agent.py          # Conversation loop (see below)
 ├── attachments.py    # Attachment policy: vision gate, inline vs path-reference degrade
@@ -36,12 +36,11 @@ src/limbo/
 ├── integrations/     # External mux/orchestrator lifecycle reporters: base.py (protocol
 │                     # + CompositeReporter + AgentState), herdr.py; create_reporters() fans out
 ├── skills.py         # SKILL.md discovery (user + project dirs)
-├── user_paths.py     # Fence grants from paths in user messages
 ├── llm/              # catalog.py (provider/model specs), factory.py (dialect→client),
 │                     # openai_client.py, anthropic_client.py, responses_client.py, retry.py, sse.py,
 │                     # usage.py (token accounting: usage normalization + prompt-size estimation),
 │                     # scaffold.py (plumbing shared by dialect clients: credentials, retry, images)
-├── tools/            # base.py (BaseTool + path guardrail + truncation), registry.py (dispatch, grants),
+├── tools/            # base.py (BaseTool + path resolution + truncation), registry.py (dispatch),
 │                     # mutation_queue.py (per-file locks), ignore.py (.gitignore),
 │                     # read/bash/edit/write/grep/find/ls.py
 └── ui/               # app.py + app.tcss (ALL styles here; theme vars only, no bare hex),
@@ -70,12 +69,11 @@ Providers/models live in `llm/catalog.py`; unknown models get generic OpenAI-com
 [tools]      # bash_enabled = true, parallel = true
 [compaction] # enabled, reserve_tokens = 16384, keep_recent_tokens = 20000
 [goal]       # max_rounds = 10, verify_timeout_ms = 600000
-[safety]     # dangerous_commands, sensitive_files, auto_grant_user_paths
 [ui]         # theme, show_banner
 [providers.<id>]  # base_url / api_key / api_key_env / headers
 ```
 
-`/model` rebuilds the client mid-session (refused while busy) and persists via tomlkit. Sessions resume via `--continue` / `--resume` / `/sessions`; resume repairs dangling tool calls and restores grants. Trace events: `session_start`, `user_message`, `llm_request` (full body), `llm_response`, `tool_call`, `tool_result`, `compaction*`, `error`, `turn_end`. `/export [path]` merges meta + trace + message snapshot (Markdown if `.md`).
+`/model` rebuilds the client mid-session (refused while busy) and persists via tomlkit. Sessions resume via `--continue` / `--resume` / `/sessions`; resume repairs dangling tool calls. Trace events: `session_start`, `user_message`, `llm_request` (full body), `llm_response`, `tool_call`, `tool_result`, `compaction*`, `error`, `turn_end`. `/export [path]` merges meta + trace + message snapshot (Markdown if `.md`).
 
 Skills: `~/.limbo/skills/<name>/SKILL.md` (user) and `<workdir>/.agents/skills/<name>/SKILL.md` (project, wins collisions) — injected as a `<available_skills>` catalog in the system prompt and invocable via `/<name> [args]`.
 
