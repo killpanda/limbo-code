@@ -35,11 +35,23 @@ PASTE_MARKER_RE = re.compile(r"\[粘贴的文本 #(\d+)(?:，共 \d+ 行|，\d+ 
 
 
 class UserSubmitted(Message):
-    """Event emitted when the user submits a message."""
+    """Event emitted when the user submits a message.
 
-    def __init__(self, message: str, attachments: list[Attachment] | None = None):
+    ``force_text`` is the escape hatch for '/'-leading plain text: set when
+    the raw input had a leading space before the '/', telling the screen to
+    skip slash-command dispatch.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        attachments: list[Attachment] | None = None,
+        *,
+        force_text: bool = False,
+    ):
         self.message = message
         self.attachments = attachments or []
+        self.force_text = force_text
         super().__init__()
 
 
@@ -306,7 +318,12 @@ class InputWidget(TextArea):
         screen = self._menu_screen()
         if screen is not None and screen.slash_menu_complete(execute=True):
             return
-        text, invalid_ids = self._expand_paste_markers(self.text.strip())
+        raw = self.text
+        # Escape hatch: a leading space before a '/' forces plain text, so
+        # the message skips slash-command dispatch (the stripped text is
+        # what gets sent; the screen's unknown-command error hints at this).
+        force_text = raw[:1].isspace() and raw.lstrip().startswith("/")
+        text, invalid_ids = self._expand_paste_markers(raw.strip())
         if invalid_ids:
             self.post_message(PasteMarkersInvalid(invalid_ids))
         if text:
@@ -317,7 +334,7 @@ class InputWidget(TextArea):
             self._history_index = None
             self._history_value = None
             self._draft = ""
-            self.post_message(UserSubmitted(text, attachments))
+            self.post_message(UserSubmitted(text, attachments, force_text=force_text))
             self.clear()
 
     def action_newline(self) -> None:

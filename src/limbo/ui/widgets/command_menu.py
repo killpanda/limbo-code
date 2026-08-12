@@ -35,6 +35,19 @@ class SlashCommandMenu(OptionList):
             self.highlighted = 0
         self.display = True
 
+    def show_hint(self, text: str) -> None:
+        """Show a passive one-line hint (no selectable command).
+
+        Used when '/'-leading input matches no command (e.g. a file path).
+        The screen keeps its menu-open flag False, so Enter/arrows/Esc keep
+        their normal behavior — the hint is display-only.
+        """
+        self._commands = []
+        self.clear_options()
+        self.add_option(Option(text, disabled=True))
+        self.highlighted = None
+        self.display = True
+
     def close(self) -> None:
         self.display = False
 
