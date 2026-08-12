@@ -189,6 +189,20 @@ async def test_escape_closes_menu_and_keeps_text(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_new_session_rebuilds_pump(tmp_path):
+    """Regression: /new must rebuild the pump alongside the agent — a pump
+    wrapping the old agent would keep pumping the old session's history."""
+    app = make_app(tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = app.screen
+        old_agent = screen.agent
+        screen._start_new_session()
+        assert screen.agent is not old_agent
+        assert screen.pump._agent is screen.agent
+
+
+@pytest.mark.asyncio
 async def test_plain_message_still_reaches_llm(tmp_path):
     """Regression: normal (non-slash) input is unaffected by the menu."""
     from limbo.models import TextChunk

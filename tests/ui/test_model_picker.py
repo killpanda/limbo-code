@@ -298,7 +298,7 @@ async def test_busy_guard_blocks_switch(tmp_path):
     app = make_app(tmp_path)
     async with app.run_test() as pilot:
         screen = pilot.app.screen_stack[-1]
-        screen.driver._running = True  # simulate an in-flight turn (driver owns single-flight)
+        screen.pump._running = True  # simulate an in-flight turn (pump owns single-flight)
         await submit(pilot, "/model glm-4.7")
         await wait_for_chat(pilot, "当前任务进行中")
         assert pilot.app.screen_stack[-1] is screen

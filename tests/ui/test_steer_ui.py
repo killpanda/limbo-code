@@ -132,7 +132,7 @@ async def test_busy_rejects_history_commands(tmp_path):
         screen = get_screen(pilot)
         chat = screen.query_one("#chat", ChatWidget)
         chat.add_info("标记消息")
-        screen.driver._running = True  # simulate an in-flight turn (driver owns single-flight)
+        screen.pump._running = True  # simulate an in-flight turn (pump owns single-flight)
         agent_before = screen.agent
 
         screen._handle_command("/new")
@@ -171,7 +171,7 @@ async def test_busy_rejection_via_enter_submission(tmp_path):
         screen = get_screen(pilot)
         chat = screen.query_one("#chat", ChatWidget)
         input_widget = screen.query_one("#input", InputWidget)
-        screen.driver._running = True  # simulate an in-flight turn (driver owns single-flight)
+        screen.pump._running = True  # simulate an in-flight turn (pump owns single-flight)
         agent_before = screen.agent
 
         input_widget.text = "/new"
@@ -194,7 +194,7 @@ async def test_skill_invocation_while_busy_enqueues_full_prompt(tmp_path):
         await pilot.pause()
         screen = get_screen(pilot)
         chat = screen.query_one("#chat", ChatWidget)
-        screen.driver._running = True  # simulate an in-flight turn (driver owns single-flight)
+        screen.pump._running = True  # simulate an in-flight turn (pump owns single-flight)
 
         screen._handle_command("/tdd implement login")
         await pilot.pause()
@@ -317,7 +317,7 @@ async def test_esc_cancels_latest_queued(tmp_path):
 
         # ESC while the turn runs interrupts the turn; the queue survives.
         await pilot.press("escape")
-        await wait_until(pilot, lambda: not screen.driver.running)
+        await wait_until(pilot, lambda: not screen.pump.running)
         assert screen.agent.queued_count == 2
         assert "⏹ 已打断" in chat.transcript_text()
 
@@ -376,7 +376,7 @@ async def test_esc_closes_slash_menu_before_cancelling(tmp_path):
         # Menu closed now: the turn is still running, so the next Esc
         # interrupts the turn (RFC LIM-53) instead of touching the queue.
         await pilot.press("escape")
-        await wait_until(pilot, lambda: not screen.driver.running)
+        await wait_until(pilot, lambda: not screen.pump.running)
         assert screen.agent.queued_count == 1
         assert "❯ 排队（排队中）" in chat.transcript_text()
 

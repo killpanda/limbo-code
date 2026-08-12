@@ -3,7 +3,7 @@
 Non-UI layer (RFC LIM-40 v1.2): this module must never import textual.
 The loop's gate is the verify command's exit code — 0 means the goal is
 met; anything else means the failure output is fed back verbatim into the
-next round. See docs in goal_driver.py for the orchestration layer.
+next round. See docs in pump.py for the orchestration layer.
 """
 
 from __future__ import annotations
@@ -125,7 +125,7 @@ async def run_verify(
 
     stdout+stderr are merged and tail-truncated (2000 lines / 50KB, keep
     the tail — failure stacks live at the end). Cancellation (Esc route via
-    GoalDriver.cancel_verify) kills the process tree and re-raises so the
+    TurnPump.cancel_verify) kills the process tree and re-raises so the
     caller can turn it into a ``cancelled`` result.
     """
     # Same shell dialect as the bash tool: bash -c, own process group.
