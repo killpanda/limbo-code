@@ -45,7 +45,10 @@ src/limbo/
 │                     # mutation_queue.py (per-file locks), ignore.py (.gitignore),
 │                     # read/bash/edit/write/grep/find/ls.py
 └── ui/               # app.py + app.tcss (ALL styles here; theme vars only, no bare hex),
-                      # theme.py (limbo-dark/-light, RFC LIM-16), commands.py (slash registry),
+                      # theme.py (limbo-dark/-light, RFC LIM-16), commands.py (slash registry
+                      # + resolve(): the single builtin-vs-skill collision site), path_input.py
+                      # ('/'-path fallback), paste_store.py (pure paste/attachment marker
+                      # state machine; the input widget is its adapter),
                       # screens/ (main, session_picker, model_picker, game2048),
                       # widgets/ (chat, input, status_bar, tool_card, command_menu)
 ```

@@ -40,8 +40,8 @@ async def test_ctrl_v_image_clipboard_creates_attachment(
         await pilot.press("ctrl+v")
         await pilot.pause()
         assert widget.text == "[图片 #1]"
-        assert len(widget._attachments) == 1
-        _, attachment = widget._attachments[0]
+        assert len(widget._store._attachments) == 1
+        _, attachment = widget._store._attachments[0]
         assert attachment.kind == "image"
         assert attachment.mime == "image/png"
         assert Path(attachment.path).read_bytes() == b"png-bytes"
@@ -53,7 +53,7 @@ async def test_ctrl_v_image_clipboard_creates_attachment(
         assert len(submitted[0].attachments) == 1
         assert submitted[0].attachments[0].kind == "image"
         # clear() resets attachment state for the next message.
-        assert widget._attachments == []
+        assert widget._store._attachments == []
 
 
 @pytest.mark.asyncio
@@ -73,7 +73,7 @@ async def test_ctrl_v_file_clipboard_creates_attachment(
         await pilot.press("ctrl+v")
         await pilot.pause()
         assert widget.text == "[文件 #1: report.txt]"
-        _, attachment = widget._attachments[0]
+        _, attachment = widget._store._attachments[0]
         assert attachment.kind == "file"
         assert attachment.path == str(target)
 
@@ -99,7 +99,7 @@ async def test_ctrl_v_text_clipboard_falls_back_to_builtin_paste(monkeypatch):
         await pilot.press("ctrl+v")
         await pilot.pause()
         assert called == [True]
-        assert widget._attachments == []
+        assert widget._store._attachments == []
 
 
 @pytest.mark.asyncio
