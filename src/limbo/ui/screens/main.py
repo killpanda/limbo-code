@@ -480,19 +480,18 @@ class MainScreen(Screen[None]):
         name, _, arg = text.partition(" ")
         arg = arg.strip()
 
-        command = self._commands.get(name.lower())
-        if command is not None and command.handler is not None:
+        resolved = self._commands.resolve(name, discover_skills(self.workdir))
+        if isinstance(resolved, SlashCommand) and resolved.handler is not None:
             # Busy guard (RFC LIM-20): history-rewriting commands are
             # rejected mid-turn. Centralized here so both entry points
             # (on_user_submitted and slash_menu_complete) are covered.
-            if self._agent_busy and not command.allow_when_busy:
-                self._reject_busy_command(command)
+            if self._agent_busy and not resolved.allow_when_busy:
+                self._reject_busy_command(resolved)
                 return True
-            command.handler(arg)
+            resolved.handler(arg)
             return True
-        skill = self._find_skill(name.removeprefix("/"))
-        if skill is not None:
-            self._invoke_skill(skill, arg)
+        if isinstance(resolved, Skill):
+            self._invoke_skill(resolved, arg)
             return True
         if looks_like_path(text):
             return False
@@ -595,14 +594,6 @@ class MainScreen(Screen[None]):
         chat.clear()
         chat.add_info(f"已开始新会话 {self.agent.session_id}")
         self._report_session()
-
-    def _find_skill(self, name: str) -> Skill | None:
-        if self._commands.get(f"/{name}") is not None:
-            return None
-        for skill in discover_skills(self.workdir):
-            if skill.name == name:
-                return skill
-        return None
 
     def _invoke_skill(self, skill: Skill, arg: str) -> None:
         """Invoke a skill: its body becomes the turn's instruction.

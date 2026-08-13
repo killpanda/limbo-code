@@ -66,3 +66,39 @@ def test_help_text_lists_commands():
     text = registry.help_text()
     assert "/sessions" in text
     assert "/new" in text
+
+
+# -- resolve(): the single collision-policy site (menu + dispatch) ------------
+
+
+def test_resolve_returns_builtin_and_skill():
+    registry = SlashCommandRegistry()
+    registry.register(SlashCommand("/new", "开始新会话"))
+    skill = make_skill("tdd")
+
+    assert registry.resolve("/new", [skill]) is registry.get("/new")
+    assert registry.resolve("/tdd", [skill]) is skill
+    assert registry.resolve("/nope", [skill]) is None
+
+
+def test_resolve_builtin_wins_collision_with_skill():
+    """Dispatch and menu share one policy: the built-in claims the name."""
+    registry = SlashCommandRegistry()
+    registry.register(SlashCommand("/new", "开始新会话"))
+    skill = make_skill("new", "a skill named new")
+
+    resolved = registry.resolve("/new", [skill])
+    assert isinstance(resolved, SlashCommand)
+    assert resolved.kind == "builtin"
+    # Menu side agrees (no skill entry for the shadowed name).
+    assert [c.name for c in registry.candidates([skill])] == ["/new"]
+
+
+def test_resolve_builtin_lookup_is_case_insensitive():
+    registry = SlashCommandRegistry()
+    registry.register(SlashCommand("/help", "显示帮助"))
+
+    assert registry.resolve("/HELP", []) is registry.get("/help")
+    # Skill names stay exact-case.
+    skill = make_skill("tdd")
+    assert registry.resolve("/TDD", [skill]) is None
