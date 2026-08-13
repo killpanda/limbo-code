@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import re
+import secrets
 from pathlib import Path
 
 from textual.app import ComposeResult
@@ -52,6 +55,7 @@ from limbo.pump import (
 )
 from limbo.sessions import derive_title, export_jsonl, export_markdown, list_sessions
 from limbo.skills import Skill, discover_skills
+from limbo.tools.bash import BashTool
 from limbo.ui.banner import startup_art_text
 from limbo.ui.commands import SlashCommand, SlashCommandRegistry
 from limbo.ui.path_input import attachments_from_text, looks_like_path
@@ -108,6 +112,11 @@ class MainScreen(Screen[None]):
         self._pending_proposals: list[str] = []
         self._commands = SlashCommandRegistry()
         self._register_builtin_commands()
+        # Private bash executor for user '!' bang commands (RFC
+        # design/rfc-bang-command.md). Deliberately NOT the agent registry's
+        # instance: a turn's ESC interrupt calls registry.cancel_active(),
+        # which must never kill a command the user launched by hand.
+        self._bang_tool = BashTool(workdir=self.workdir)
         # External tool integrations (Herdr, ...): an empty composite
         # outside any integrated environment, so all calls are no-ops.
         self._integrations = create_reporters()
@@ -164,7 +173,7 @@ class MainScreen(Screen[None]):
         yield SlashCommandMenu(id="slash-menu")
         yield InputWidget(id="input")
         yield Static(
-            "Enter 发送 · Shift+Enter 换行 · ↑↓ 历史输入 · / 命令 · ctrl+o 工具输出 · ctrl+g 2048",
+            "Enter 发送 · Shift+Enter 换行 · ↑↓ 历史 · /! 命令 · ctrl+o 工具输出 · ctrl+g 2048",
             id="hint",
             markup=False,
         )
@@ -720,9 +729,10 @@ class MainScreen(Screen[None]):
         self._open_game2048()
 
     async def on_unmount(self) -> None:
-        """Close owned resources on shutdown: the LLM client's HTTP pool and
-        the agent's trace file handle."""
+        """Close owned resources on shutdown: the LLM client's HTTP pool,
+        the agent's trace file handle, and any in-flight bang processes."""
         self._integrations.release()
+        self._bang_tool.cancel()
         self.agent.close()
         close = getattr(self.llm_client, "close", None)
         if close is not None:
@@ -758,6 +768,9 @@ class MainScreen(Screen[None]):
                 self._report_state("idle")
             return
         attachments = event.attachments
+        if text.startswith("!") and not event.force_text:
+            self._handle_bang(text)
+            return
         if text.startswith("/") and not event.force_text:
             if self._handle_command(text):
                 return
@@ -774,6 +787,70 @@ class MainScreen(Screen[None]):
             return
         chat.add_user_message(text, attachments)
         self.run_worker(self._handle_turn(text, attachments))
+
+    # -- '!' bang commands: run bash directly, never touch the LLM ----------
+
+    def _handle_bang(self, text: str) -> None:
+        """Dispatch a '!'-leading submission: run it as a bash command.
+
+        The command and its output stay out of the agent history entirely —
+        nothing is sent to the LLM, nothing lands in the session file; the
+        chat shows the echoed input plus a tool card. Works while a turn is
+        running (like /btw): the bang worker is independent of the pump.
+        """
+        chat = self.query_one("#chat", ChatWidget)
+        command = text[1:].strip()
+        if not command:
+            chat.add_info("用法：! <bash 命令>（直接执行，不发送给模型）")
+            return
+        # Echo without attachments: attachments are payloads for LLM-bound
+        # messages; a bang command is never sent to the model.
+        chat.add_user_message(text)
+        self.run_worker(self._run_bang(command))
+
+    async def _run_bang(self, command: str) -> None:
+        """Bang worker: execute via the private BashTool, render into a card."""
+        chat = self.query_one("#chat", ChatWidget)
+        # Capture the trace at submit time: /new or /sessions may swap
+        # self.agent before the command finishes, and the old agent's trace
+        # handle is released by close() — hence the best-effort write below.
+        trace = self.agent.trace
+        card = chat.add_tool_card(
+            f"bang-{secrets.token_hex(8)}",
+            "bash",
+            {"command": command},
+            agent_owned=False,
+        )
+        success = False
+        exit_code: int | None = None
+        try:
+            result = await asyncio.to_thread(
+                self._bang_tool.execute, {"command": command}
+            )
+            success = result.success
+            if result.success:
+                card.set_success(result.output or "")
+            else:
+                # Fill the body with output (not error): BashTool puts the
+                # "exit code N" line first and the full stdout/stderr after
+                # it — error alone would drop all of the output.
+                card.set_error(result.output or result.error or "Command failed.")
+                if result.error:
+                    match = re.search(r"exit code (\d+)", result.error)
+                    if match:
+                        exit_code = int(match.group(1))
+        except Exception as e:  # noqa: BLE001 — never leave the card running
+            card.set_error(f"内部错误：{e}")
+        finally:
+            try:
+                trace.log(
+                    "bang_command",
+                    command=command,
+                    exit_code=exit_code,
+                    success=success,
+                )
+            except Exception:  # noqa: BLE001 — trace is best-effort here
+                pass
 
     # -- steer queue UI (LIM-20) ---------------------------------------------
 

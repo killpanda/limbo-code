@@ -29,9 +29,9 @@ MAX_TEXT_ROWS = 8
 class UserSubmitted(Message):
     """Event emitted when the user submits a message.
 
-    ``force_text`` is the escape hatch for '/'-leading plain text: set when
-    the raw input had a leading space before the '/', telling the screen to
-    skip slash-command dispatch.
+    ``force_text`` is the escape hatch for '/'/'!'-leading plain text: set
+    when the raw input had a leading space before the prefix, telling the
+    screen to skip slash-command / bang-command dispatch.
     """
 
     def __init__(
@@ -249,10 +249,11 @@ class InputWidget(TextArea):
         if screen is not None and screen.slash_menu_complete(execute=True):
             return
         raw = self.text
-        # Escape hatch: a leading space before a '/' forces plain text, so
-        # the message skips slash-command dispatch (the stripped text is
-        # what gets sent; the screen's unknown-command error hints at this).
-        force_text = raw[:1].isspace() and raw.lstrip().startswith("/")
+        # Escape hatch: a leading space before a '/' or '!' forces plain
+        # text, so the message skips slash-command / bang-command dispatch
+        # (the stripped text is what gets sent; the screen's unknown-command
+        # error hints at this).
+        force_text = raw[:1].isspace() and raw.lstrip()[:1] in ("/", "!")
         text, invalid_ids = self._store.expand(raw.strip())
         if invalid_ids:
             self.post_message(PasteMarkersInvalid(invalid_ids))
