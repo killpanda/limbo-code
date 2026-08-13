@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
+import re
+import secrets
 from pathlib import Path
 
 from textual.app import ComposeResult
@@ -32,15 +35,6 @@ from limbo.goal import (
     parse_goal_args,
     parse_verify_proposal,
 )
-from limbo.goal_driver import (
-    DriverEvent,
-    GoalDriver,
-    GoalExhausted,
-    GoalPassed,
-    GoalResumed,
-    GoalVerifyResultEvent,
-    GoalVerifyStarted,
-)
 from limbo.integrations import AgentState, create_reporters, install_exit_hooks
 from limbo.llm.client import LLMClient
 from limbo.llm.factory import create_llm_client
@@ -50,8 +44,18 @@ from limbo.model_switch import (
     swap_llm_client,
 )
 from limbo.models import Attachment
+from limbo.pump import (
+    GoalExhausted,
+    GoalPassed,
+    GoalResumed,
+    GoalVerifyResultEvent,
+    GoalVerifyStarted,
+    PumpEvent,
+    TurnPump,
+)
 from limbo.sessions import derive_title, export_jsonl, export_markdown, list_sessions
 from limbo.skills import Skill, discover_skills
+from limbo.tools.bash import BashTool
 from limbo.ui.banner import startup_art_text
 from limbo.ui.commands import SlashCommand, SlashCommandRegistry
 from limbo.ui.path_input import attachments_from_text, looks_like_path
@@ -97,7 +101,7 @@ class MainScreen(Screen[None]):
         self.llm_client = llm_client or create_llm_client(self.config)
         self.session_dir = session_dir or Path.home() / ".limbo" / "sessions"
         self.agent = self._new_agent(resume=resume)
-        self.driver = self._new_driver(self.agent)
+        self.pump = self._new_pump(self.agent)
         self._slash_menu_open = False
         # M2: proposal-round bookkeeping. _awaiting_verify_proposal is set
         # when /goal starts a proposal round; the confirmation picker pops
@@ -106,11 +110,13 @@ class MainScreen(Screen[None]):
         self._awaiting_verify_proposal = False
         self._editing_verify = False
         self._pending_proposals: list[str] = []
-        # Busy while a /compact worker owns the agent history; turn-level
-        # busy is owned by the goal driver (see _agent_busy).
-        self._compact_busy = False
         self._commands = SlashCommandRegistry()
         self._register_builtin_commands()
+        # Private bash executor for user '!' bang commands (RFC
+        # design/rfc-bang-command.md). Deliberately NOT the agent registry's
+        # instance: a turn's ESC interrupt calls registry.cancel_active(),
+        # which must never kill a command the user launched by hand.
+        self._bang_tool = BashTool(workdir=self.workdir)
         # External tool integrations (Herdr, ...): an empty composite
         # outside any integrated environment, so all calls are no-ops.
         self._integrations = create_reporters()
@@ -118,16 +124,16 @@ class MainScreen(Screen[None]):
 
     @property
     def _agent_busy(self) -> bool:
-        """Busy while a driver run OR a /compact worker owns the history.
+        """Busy while the turn pump owns the agent history.
 
-        Turn-level single-flight lives in ``GoalDriver.running`` (eagerly
-        set when ``driver.run()`` is called); /compact sets its own flag
-        because it bypasses the driver.
+        One flag covers everything (turns, goal rounds, follow-ups and
+        /compact mini-turns): ``TurnPump.running``, set eagerly when
+        ``pump.run()``/``pump.compact()`` is called.
         """
-        return self._compact_busy or self.driver.running
+        return self.pump.running
 
-    def _new_driver(self, agent: Agent) -> GoalDriver:
-        return GoalDriver(
+    def _new_pump(self, agent: Agent) -> TurnPump:
+        return TurnPump(
             agent,
             self.workdir,
             max_rounds=self.config.goal.max_rounds,
@@ -167,7 +173,7 @@ class MainScreen(Screen[None]):
         yield SlashCommandMenu(id="slash-menu")
         yield InputWidget(id="input")
         yield Static(
-            "Enter 发送 · Shift+Enter 换行 · ↑↓ 历史输入 · / 命令 · ctrl+o 工具输出 · ctrl+g 2048",
+            "Enter 发送 · Shift+Enter 换行 · ↑↓ 历史 · /! 命令 · ctrl+o 工具输出 · ctrl+g 2048",
             id="hint",
             markup=False,
         )
@@ -281,7 +287,7 @@ class MainScreen(Screen[None]):
         chat = self.query_one("#chat", ChatWidget)
         command = parse_goal_args(arg)
         if isinstance(command, GoalQuery):
-            state = self.driver.status()
+            state = self.pump.status()
             if state is None or state.status == "cleared":
                 chat.add_info("当前没有 goal。用法：/goal <目标> · /goal clear")
             else:
@@ -293,13 +299,13 @@ class MainScreen(Screen[None]):
                 )
             return
         if isinstance(command, GoalClear):
-            if self.driver.status() is None:
+            if self.pump.status() is None:
                 chat.add_info("当前没有 goal")
                 return
-            self.driver.clear()
+            self.pump.clear()
             self._awaiting_verify_proposal = False
             self._editing_verify = False
-            suffix = "（当前轮跑完后停止续轮）" if self.driver.running else ""
+            suffix = "（当前轮跑完后停止续轮）" if self.pump.running else ""
             chat.add_info(f"已退出 goal 模式{suffix}")
             self._refresh_goal_indicator()
             return
@@ -308,7 +314,7 @@ class MainScreen(Screen[None]):
         if self._agent_busy:
             chat.add_info("当前任务进行中，请等待完成后再设定 /goal")
             return
-        state = self.driver.set_goal(command.text)
+        state = self.pump.set_goal(command.text)
         chat.add_user_message(f"/goal {command.text}")
         self._refresh_goal_indicator()
         # M2: the first round is a proposal round — the model explores the
@@ -318,13 +324,13 @@ class MainScreen(Screen[None]):
         self.run_worker(self._handle_turn(build_proposer_prompt(state)))
 
     def _refresh_goal_indicator(self) -> None:
-        """Sync the status-bar badge with driver state (rainbow = running)."""
+        """Sync the status-bar badge with pump state (rainbow = running)."""
         statusbar = self.query_one("#statusbar", StatusBar)
-        state = self.driver.status()
+        state = self.pump.status()
         if state is not None and state.status == STATUS_ACTIVE:
             statusbar.set_goal(
                 (state.rounds_completed, state.max_rounds),
-                running=self.driver.running,
+                running=self.pump.running,
             )
         else:
             statusbar.set_goal(None)
@@ -340,7 +346,7 @@ class MainScreen(Screen[None]):
         """
         if not self._awaiting_verify_proposal:
             return
-        state = self.driver.status()
+        state = self.pump.status()
         if state is None or state.status != STATUS_ACTIVE or state.verify_command:
             self._awaiting_verify_proposal = False
             return
@@ -370,7 +376,7 @@ class MainScreen(Screen[None]):
     def _on_verify_picked(self, choice: str | None) -> None:
         chat = self.query_one("#chat", ChatWidget)
         self._awaiting_verify_proposal = False
-        state = self.driver.status()
+        state = self.pump.status()
         if state is None or state.status != STATUS_ACTIVE:
             return
         if choice is None:
@@ -394,7 +400,7 @@ class MainScreen(Screen[None]):
 
     def _accept_verify(self, command: str) -> None:
         chat = self.query_one("#chat", ChatWidget)
-        state = self.driver.set_verify(command)
+        state = self.pump.set_verify(command)
         if state is None:
             return
         chat.add_info(f"验收方式已确认：{command}")
@@ -483,19 +489,18 @@ class MainScreen(Screen[None]):
         name, _, arg = text.partition(" ")
         arg = arg.strip()
 
-        command = self._commands.get(name.lower())
-        if command is not None and command.handler is not None:
+        resolved = self._commands.resolve(name, discover_skills(self.workdir))
+        if isinstance(resolved, SlashCommand) and resolved.handler is not None:
             # Busy guard (RFC LIM-20): history-rewriting commands are
             # rejected mid-turn. Centralized here so both entry points
             # (on_user_submitted and slash_menu_complete) are covered.
-            if self._agent_busy and not command.allow_when_busy:
-                self._reject_busy_command(command)
+            if self._agent_busy and not resolved.allow_when_busy:
+                self._reject_busy_command(resolved)
                 return True
-            command.handler(arg)
+            resolved.handler(arg)
             return True
-        skill = self._find_skill(name.removeprefix("/"))
-        if skill is not None:
-            self._invoke_skill(skill, arg)
+        if isinstance(resolved, Skill):
+            self._invoke_skill(resolved, arg)
             return True
         if looks_like_path(text):
             return False
@@ -521,18 +526,17 @@ class MainScreen(Screen[None]):
     async def _run_compact(self) -> None:
         input_widget = self.query_one("#input", InputWidget)
         statusbar = self.query_one("#statusbar", StatusBar)
-        # Same busy discipline as _handle_turn: the summary call takes
-        # seconds, and a concurrent turn or second /compact would race
-        # compact()'s wholesale history rewrite and silently drop messages.
+        # The pump owns the busy discipline (pump.compact() sets the shared
+        # running flag eagerly): a concurrent turn or second /compact can
+        # never race compact()'s wholesale history rewrite. What remains
+        # here is pure UI: disable input, label the status bar.
         input_widget.disabled = True
-        self._compact_busy = True
         statusbar.set_state("compacting…", "thinking")
         self._report_state("working")
         try:
-            async for event in self.agent.compact(trigger="manual"):
+            async for event in self.pump.compact():
                 await self._process_agent_event(event)
         finally:
-            self._compact_busy = False
             input_widget.disabled = False
             input_widget.focus()
             statusbar.set_state("idle")
@@ -592,17 +596,13 @@ class MainScreen(Screen[None]):
         chat = self.query_one("#chat", ChatWidget)
         self.agent.close()  # release the old session's trace file handle
         self.agent = self._new_agent()
+        # The pump wraps the agent: replacing the agent without rebuilding
+        # the pump would keep pumping the OLD agent's history (pre-existing
+        # /new bug — the resume path below always did both).
+        self.pump = self._new_pump(self.agent)
         chat.clear()
         chat.add_info(f"已开始新会话 {self.agent.session_id}")
         self._report_session()
-
-    def _find_skill(self, name: str) -> Skill | None:
-        if self._commands.get(f"/{name}") is not None:
-            return None
-        for skill in discover_skills(self.workdir):
-            if skill.name == name:
-                return skill
-        return None
 
     def _invoke_skill(self, skill: Skill, arg: str) -> None:
         """Invoke a skill: its body becomes the turn's instruction.
@@ -640,7 +640,7 @@ class MainScreen(Screen[None]):
         chat = self.query_one("#chat", ChatWidget)
         self.agent.close()  # release the old session's trace file handle
         self.agent = self._new_agent(resume=path)
-        self.driver = self._new_driver(self.agent)
+        self.pump = self._new_pump(self.agent)
         self._awaiting_verify_proposal = False
         self._editing_verify = False
         self._pending_proposals = []
@@ -729,9 +729,10 @@ class MainScreen(Screen[None]):
         self._open_game2048()
 
     async def on_unmount(self) -> None:
-        """Close owned resources on shutdown: the LLM client's HTTP pool and
-        the agent's trace file handle."""
+        """Close owned resources on shutdown: the LLM client's HTTP pool,
+        the agent's trace file handle, and any in-flight bang processes."""
         self._integrations.release()
+        self._bang_tool.cancel()
         self.agent.close()
         close = getattr(self.llm_client, "close", None)
         if close is not None:
@@ -767,6 +768,9 @@ class MainScreen(Screen[None]):
                 self._report_state("idle")
             return
         attachments = event.attachments
+        if text.startswith("!") and not event.force_text:
+            self._handle_bang(text)
+            return
         if text.startswith("/") and not event.force_text:
             if self._handle_command(text):
                 return
@@ -783,6 +787,71 @@ class MainScreen(Screen[None]):
             return
         chat.add_user_message(text, attachments)
         self.run_worker(self._handle_turn(text, attachments))
+
+    # -- '!' bang commands: run bash directly, never touch the LLM ----------
+
+    def _handle_bang(self, text: str) -> None:
+        """Dispatch a '!'-leading submission: run it as a bash command.
+
+        The command and its output stay out of the agent history entirely —
+        nothing is sent to the LLM, nothing lands in the session file; the
+        chat shows the echoed input plus a tool card. Works while a turn is
+        running (like /btw): the bang worker is independent of the pump.
+        """
+        chat = self.query_one("#chat", ChatWidget)
+        command = text[1:].strip()
+        if not command:
+            chat.add_info("用法：! <bash 命令>（直接执行，不发送给模型）")
+            return
+        # Echo without attachments: attachments are payloads for LLM-bound
+        # messages; a bang command is never sent to the model.
+        chat.add_user_message(text)
+        self.run_worker(self._run_bang(command))
+
+    async def _run_bang(self, command: str) -> None:
+        """Bang worker: execute via the private BashTool, render into a card."""
+        chat = self.query_one("#chat", ChatWidget)
+        # Capture the trace at submit time: /new or /sessions may swap
+        # self.agent before the command finishes, and the old agent's trace
+        # handle is released by close() — hence the best-effort write below.
+        trace = self.agent.trace
+        card = chat.add_tool_card(
+            f"bang-{secrets.token_hex(8)}",
+            "bash",
+            {"command": command},
+            agent_owned=False,
+        )
+        success = False
+        exit_code: int | None = None
+        try:
+            result = await asyncio.to_thread(
+                self._bang_tool.execute, {"command": command}
+            )
+            success = result.success
+            if result.success:
+                exit_code = 0
+                card.set_success(result.output or "")
+            else:
+                # Fill the body with output (not error): BashTool puts the
+                # "exit code N" line first and the full stdout/stderr after
+                # it — error alone would drop all of the output.
+                card.set_error(result.output or result.error or "Command failed.")
+                if result.error:
+                    match = re.search(r"exit code (\d+)", result.error)
+                    if match:
+                        exit_code = int(match.group(1))
+        except Exception as e:  # noqa: BLE001 — never leave the card running
+            card.set_error(f"内部错误：{e}")
+        finally:
+            try:
+                trace.log(
+                    "bang_command",
+                    command=command,
+                    exit_code=exit_code,
+                    success=success,
+                )
+            except Exception:  # noqa: BLE001 — trace is best-effort here
+                pass
 
     # -- steer queue UI (LIM-20) ---------------------------------------------
 
@@ -819,8 +888,8 @@ class MainScreen(Screen[None]):
         if self.slash_menu_open:
             self.slash_menu_close()
             return
-        if self.driver.verifying:
-            if self.driver.cancel_verify():
+        if self.pump.verifying:
+            if self.pump.cancel_verify():
                 self.query_one("#chat", ChatWidget).add_info("已取消验收命令")
             return
         if self._agent_busy:
@@ -846,41 +915,33 @@ class MainScreen(Screen[None]):
     async def _handle_turn(
         self, user_input: str, attachments: list[Attachment] | None = None
     ) -> None:
+        """Adapter: pump one user input, translating events into UI updates.
+
+        All orchestration — single-flight, the follow-up steer drain, the
+        goal loop — lives in the TurnPump (limbo.pump); this worker only
+        owns what the user sees: status bar, focus, the goal badge, and
+        the post-turn verify-proposal picker.
+        """
         input_widget = self.query_one("#input", InputWidget)
         statusbar = self.query_one("#statusbar", StatusBar)
         # The input stays enabled during the turn (RFC LIM-20): submissions
         # go to the steer queue instead of being blocked. Single-flight is
-        # owned by the goal driver (``running`` is set eagerly on call).
+        # owned by the pump (``running`` is set eagerly on call).
         statusbar.set_state("thinking…", "thinking")
         self._report_state("working")
-        # driver.run() sets ``running`` eagerly at call time, so the badge
+        # pump.run() sets ``running`` eagerly at call time, so the badge
         # refresh below already sees the loop as executing (rainbow on).
-        events = self.driver.run(user_input, attachments)
+        events = self.pump.run(user_input, attachments)
         self._refresh_goal_indicator()
         try:
             async for event in events:
                 await self._process_agent_event(event)
+        except Exception as e:  # noqa: BLE001
+            # A pump crash is a bug (the agent loop converts LLM/tool
+            # failures into error events). Surface it instead of silently
+            # swallowing it the way the old finally-drain did.
+            self.query_one("#chat", ChatWidget).add_error(f"内部错误：{e}")
         finally:
-            chat = self.query_one("#chat", ChatWidget)
-            # Automatic follow-up turn (RFC LIM-20): drain + hand off BEFORE
-            # releasing the busy flag, so no user submission can slip into
-            # the gap and start a second concurrent turn worker. Leftovers
-            # happen on error / max-iterations exits (the loop's own
-            # consumption points never leave the queue non-empty otherwise).
-            # RFC LIM-53: an interrupted turn must NOT auto-follow-up —
-            # queued steers stay queued until the user's next submission
-            # (run()-head fallback drain delivers them there).
-            pending = [] if self.agent.was_interrupted else self.agent.drain_steer()
-            if pending:
-                for item in pending:
-                    chat.mark_steer_delivered(item.id)
-                joined = "\n\n".join(item.text for item in pending)
-                followup_attachments = [
-                    a for item in pending for a in item.attachments
-                ]
-                self._update_queue_status()
-                self.run_worker(self._handle_turn(joined, followup_attachments))
-                return
             self._update_queue_status()
             # Disabling the input mid-turn moves focus away; give it back so
             # the user can keep typing without clicking.
@@ -892,7 +953,7 @@ class MainScreen(Screen[None]):
             # the verify-command confirmation picker.
             self._maybe_confirm_verify_proposal()
 
-    async def _process_agent_event(self, event: DriverEvent) -> None:
+    async def _process_agent_event(self, event: PumpEvent) -> None:
         chat = self.query_one("#chat", ChatWidget)
         statusbar = self.query_one("#statusbar", StatusBar)
 

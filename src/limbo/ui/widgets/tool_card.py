@@ -42,12 +42,18 @@ class ToolCard(Vertical):
         name: str,
         arguments: dict[str, Any],
         *args: Any,
+        agent_owned: bool = True,
         **kwargs: Any,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.tool_id = tool_id
         self.tool_name = name
         self.arguments = arguments
+        # Agent-owned cards back LLM tool calls: a turn interrupt means no
+        # result will ever arrive, so cancel_running_tool_cards() marks them
+        # cancelled. Non-agent-owned cards (user bang commands) keep running
+        # — their result always arrives when the process exits.
+        self.agent_owned = agent_owned
         self.state = "running"
         self._started = time.monotonic()
         self._elapsed: float | None = None

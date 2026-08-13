@@ -20,11 +20,19 @@ proposals should name modules with these terms.
 
 - **Turn** — one user input through the agent loop until a tool-call-free
   response (or max_iterations). Turns are the save/trace unit.
+- **Turn pump** — the non-UI module that runs turns back-to-back
+  (`pump.py`, `TurnPump`): pulls events out of the lazy `Agent.run()`
+  stream, owns the single-flight busy flag (turns and `/compact`
+  mini-turns alike) and the goal closed loop. The follow-up steer drain
+  lives in its supervisor (stragglers past a round's boundary drain —
+  verify/wrap-up window, teardown race — become one more turn); frontends
+  never drain. Frontends are adapters translating its events into UI
+  updates.
 - **Steer** — a user message queued mid-turn, injected at consistency
   points (loop top, turn end, run head). The `SteerQueue` (`steer.py`) owns
   queueing semantics — id generation, FIFO, and the cancel boundary (an
-  item can be cancelled by id only until drained); the Agent owns drain
-  timing.
+  item can be cancelled by id only until drained); the **Turn pump** owns
+  drain timing.
 - **Compaction** — summarizing the old region of history into a synthetic
   summary message, keeping the recent tail. Triggered automatically
   (loop-top, before context overflow) or manually (`/compact`).

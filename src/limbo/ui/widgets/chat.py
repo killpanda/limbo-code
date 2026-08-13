@@ -249,16 +249,26 @@ class ChatWidget(VerticalScroll):
     # -- tool cards -----------------------------------------------------------
 
     def add_tool_card(
-        self, tool_id: str, name: str, arguments: dict[str, Any]
+        self,
+        tool_id: str,
+        name: str,
+        arguments: dict[str, Any],
+        *,
+        agent_owned: bool = True,
     ) -> ToolCard:
-        """Get or create the card for a tool call (idempotent by tool-call id)."""
+        """Get or create the card for a tool call (idempotent by tool-call id).
+
+        ``agent_owned=False`` marks cards that do not back an agent tool call
+        (user ``!`` bang commands): they are excluded from
+        ``cancel_running_tool_cards()`` on turn interrupt.
+        """
         existing = self.tool_cards.get(tool_id)
         if existing is not None:
             return existing
         # Text after a tool card must start a new assistant block.
         self._current_assistant = None
         self._current_thinking = None
-        card = ToolCard(tool_id, name, arguments)
+        card = ToolCard(tool_id, name, arguments, agent_owned=agent_owned)
         self.tool_cards[tool_id] = card
         self._mount_and_scroll(card)
         return card
@@ -269,14 +279,16 @@ class ChatWidget(VerticalScroll):
             card.toggle()
 
     def cancel_running_tool_cards(self) -> None:
-        """Mark still-running tool cards as interrupted (RFC LIM-53).
+        """Mark still-running agent-owned cards as interrupted (RFC LIM-53).
 
         Covers cards created from partial tool-call events during a stream
         that was then interrupted — those calls never execute, so no
-        ToolResultEvent will ever arrive for them.
+        ToolResultEvent will ever arrive for them. Non-agent-owned cards
+        (user bang commands) are skipped: their processes keep running and
+        their results still arrive.
         """
         for card in self.tool_cards.values():
-            if card.state == "running":
+            if card.state == "running" and card.agent_owned:
                 card.set_cancelled()
 
     # -- helpers --------------------------------------------------------------

@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-import limbo.goal_driver as goal_driver_module
+import limbo.pump as pump_module
 from limbo.config import Config
 from limbo.goal import VerifyResult
 from limbo.models import TextChunk
@@ -119,7 +119,7 @@ async def test_goal_proposal_accept_starts_closed_loop(tmp_path, monkeypatch):
         async def passing(command, workdir, **kwargs):
             return VerifyResult(exit_code=0)
 
-        monkeypatch.setattr(goal_driver_module, "run_verify", passing)
+        monkeypatch.setattr(pump_module, "run_verify", passing)
 
         await type_and_submit(pilot, input_widget, "/goal 补齐测试")
         # Proposal round ends → confirmation picker pops.
@@ -132,7 +132,7 @@ async def test_goal_proposal_accept_starts_closed_loop(tmp_path, monkeypatch):
         assert "验收方式已确认：python3 -m unittest discover -v" in transcript
         assert "第 1/10 轮验收" in transcript
         assert statusbar._goal is None  # passed → badge hidden
-        state = screen.driver.status()
+        state = screen.pump.status()
         assert state is not None and state.status == "passed"
         assert state.verify_command == "python3 -m unittest discover -v"
         # First turn is the proposal round (proposer prompt, not work prompt).
@@ -158,7 +158,7 @@ async def test_goal_proposal_skip_keeps_single_turn(tmp_path, monkeypatch):
         await wait_until(
             pilot, lambda: "已跳过自动验收" in chat.transcript_text()
         )
-        state = screen.driver.status()
+        state = screen.pump.status()
         assert state is not None and state.verify_command == ""
         assert len(client.calls) == 1  # no work turn started
 
@@ -194,7 +194,7 @@ async def test_goal_badge_rainbow_while_running(tmp_path, monkeypatch):
     async def passing(command, workdir, **kwargs):
         return VerifyResult(exit_code=0)
 
-    monkeypatch.setattr(goal_driver_module, "run_verify", passing)
+    monkeypatch.setattr(pump_module, "run_verify", passing)
 
     app = make_app(tmp_path, client)
     async with app.run_test() as pilot:
@@ -202,7 +202,7 @@ async def test_goal_badge_rainbow_while_running(tmp_path, monkeypatch):
         screen = get_screen(pilot)
         statusbar = screen.query_one("#statusbar", StatusBar)
 
-        screen.driver.set_goal("g", verify_command="pytest")
+        screen.pump.set_goal("g", verify_command="pytest")
         screen.run_worker(screen._handle_turn("goal prompt"))
         await wait_until(pilot, lambda: len(client.calls) == 1)
 
@@ -211,7 +211,7 @@ async def test_goal_badge_rainbow_while_running(tmp_path, monkeypatch):
         assert statusbar._goal_running
 
         gate.set()
-        await wait_until(pilot, lambda: not screen.driver.running)
+        await wait_until(pilot, lambda: not screen.pump.running)
         # No auto-verify happened mid-test? It did (turn ended) — but the
         # point here is the badge leaves rainbow mode once the loop stops.
         assert not statusbar._goal_running
@@ -234,7 +234,7 @@ async def test_goal_set_rejected_while_busy(tmp_path):
 
         await type_and_submit(pilot, input_widget, "/goal 新目标")
         assert "请等待完成后再设定 /goal" in chat.transcript_text()
-        assert screen.driver.status() is None
+        assert screen.pump.status() is None
 
         # Query and clear still work mid-turn (allow_when_busy).
         await type_and_submit(pilot, input_widget, "/goal")
@@ -261,7 +261,7 @@ async def test_goal_edit_mode_accepts_edited_command(tmp_path, monkeypatch):
         async def passing(command, workdir, **kwargs):
             return VerifyResult(exit_code=0)
 
-        monkeypatch.setattr(goal_driver_module, "run_verify", passing)
+        monkeypatch.setattr(pump_module, "run_verify", passing)
 
         await type_and_submit(pilot, input_widget, "/goal 补齐测试")
         await wait_picker(pilot)
@@ -273,6 +273,6 @@ async def test_goal_edit_mode_accepts_edited_command(tmp_path, monkeypatch):
         assert input_widget.text == "pytest -x"
         await type_and_submit(pilot, input_widget, "pytest tests/tools -q")
         await wait_until(pilot, lambda: "目标达成" in chat.transcript_text())
-        state = screen.driver.status()
+        state = screen.pump.status()
         assert state is not None
         assert state.verify_command == "pytest tests/tools -q"

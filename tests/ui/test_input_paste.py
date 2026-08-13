@@ -56,12 +56,12 @@ async def test_small_paste_inserted_verbatim():
         widget.focus()
         await paste(pilot, widget, "hello world")
         assert widget.text == "hello world"
-        assert widget._pastes == {}
+        assert widget._store._pastes == {}
 
         small_multiline = "line1\nline2\nline3"
         await paste(pilot, widget, small_multiline)
         assert small_multiline in widget.text
-        assert widget._pastes == {}
+        assert widget._store._pastes == {}
 
 
 @pytest.mark.asyncio
@@ -76,7 +76,7 @@ async def test_large_paste_collapses_to_placeholder_only():
         await paste(pilot, widget, original)
         assert widget.text == f"[粘贴的文本 #1，共 {PASTE_COLLAPSE_LINES + 1} 行]"
         assert "log line" not in widget.text
-        assert widget._pastes == {1: original}
+        assert widget._store._pastes == {1: original}
 
 
 @pytest.mark.asyncio
@@ -88,7 +88,7 @@ async def test_long_single_line_paste_collapses_by_chars():
         original = big_chars()
         await paste(pilot, widget, original)
         assert widget.text == f"[粘贴的文本 #1，{PASTE_COLLAPSE_CHARS + 1} 字符]"
-        assert widget._pastes == {1: original}
+        assert widget._store._pastes == {1: original}
 
 
 @pytest.mark.asyncio
@@ -115,7 +115,7 @@ async def test_submit_expands_placeholder():
         assert submitted == [original]
         assert invalid == []
         # clear() after submit resets paste state.
-        assert widget._pastes == {}
+        assert widget._store._pastes == {}
         assert widget.text == ""
 
 
@@ -182,7 +182,7 @@ async def test_backspace_deletes_placeholder_atomically():
         await pilot.press("backspace")
         await pilot.pause()
         assert widget.text == ""
-        assert widget._pastes == {}
+        assert widget._store._pastes == {}
         # Submitting nothing posts no warning and no message.
         await submit(pilot, widget)
         assert submitted == []
@@ -214,7 +214,7 @@ async def test_delete_key_removes_placeholder_to_the_right():
         await pilot.press("delete")
         await pilot.pause()
         assert widget.text == ""
-        assert widget._pastes == {}
+        assert widget._store._pastes == {}
 
 
 @pytest.mark.asyncio
@@ -234,7 +234,7 @@ async def test_undo_restored_placeholder_warns_on_submit():
         await pilot.press("ctrl+z")  # undo restores the placeholder text
         await pilot.pause()
         assert widget.text == "[粘贴的文本 #1，共 11 行]"
-        assert widget._pastes == {}
+        assert widget._store._pastes == {}
         await submit(pilot, widget)
         assert submitted == ["[粘贴的文本 #1，共 11 行]"]
         assert invalid == [[1]]
@@ -311,4 +311,4 @@ async def test_large_paste_marker_replaces_selection():
         await paste(pilot, widget, original)
         assert widget.text == "hello [粘贴的文本 #1，共 11 行]"
         assert "world" not in widget.text
-        assert widget._pastes == {1: original}
+        assert widget._store._pastes == {1: original}

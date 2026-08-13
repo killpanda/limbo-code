@@ -38,16 +38,35 @@ class SlashCommandRegistry:
         self._commands[command.name] = command
 
     def get(self, name: str) -> SlashCommand | None:
-        return self._commands.get(name)
+        """Look up a built-in by name (case-insensitive, '/'-carrying)."""
+        return self._commands.get(name.lower())
 
     def all(self) -> list[SlashCommand]:
         return list(self._commands.values())
+
+    def resolve(self, name: str, skills: list[Skill]) -> SlashCommand | Skill | None:
+        """Resolve '/'-leading input to a built-in command or a skill.
+
+        The single collision-policy site for both the autocomplete menu
+        (``candidates``) and dispatch: a registered built-in always wins
+        over a same-named skill. Built-in lookup is case-insensitive;
+        skill names match exactly.
+        """
+        command = self.get(name)
+        if command is not None:
+            return command
+        bare = name.removeprefix("/")
+        for skill in skills:
+            if skill.name == bare:
+                return skill
+        return None
 
     def candidates(self, skills: list[Skill]) -> list[SlashCommand]:
         """Built-in commands plus skills (built-ins win on name collisions)."""
         candidates = self.all()
         for skill in skills:
-            if f"/{skill.name}" in self._commands:
+            # Same policy as resolve(): a built-in claims the name first.
+            if self.get(f"/{skill.name}") is not None:
                 continue
             candidates.append(
                 SlashCommand(

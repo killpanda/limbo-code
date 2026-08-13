@@ -30,7 +30,8 @@ src/limbo/
 ├── prompt.py         # System-prompt assembly (tools section derived from the registry)
 ├── steer.py          # Mid-turn steer queue (LIM-20): queueing semantics, cancel boundary
 ├── goal.py           # /goal closed-loop state machine, prompt templates, verify executor (LIM-40)
-├── goal_driver.py    # /goal orchestrator (frontend-agnostic, non-UI): turn → verify → next round
+├── pump.py           # Turn pump (frontend-agnostic, non-UI): single-flight busy flag,
+│                     # steer follow-up drain, /compact mini-turn, goal closed loop
 ├── sessions.py       # Session JSONL save/load/list/export
 ├── trace.py          # Append-only JSONL run log (sessions/traces/)
 ├── integrations/     # External mux/orchestrator lifecycle reporters: base.py (protocol
@@ -44,7 +45,10 @@ src/limbo/
 │                     # mutation_queue.py (per-file locks), ignore.py (.gitignore),
 │                     # read/bash/edit/write/grep/find/ls.py
 └── ui/               # app.py + app.tcss (ALL styles here; theme vars only, no bare hex),
-                      # theme.py (limbo-dark/-light, RFC LIM-16), commands.py (slash registry),
+                      # theme.py (limbo-dark/-light, RFC LIM-16), commands.py (slash registry
+                      # + resolve(): the single builtin-vs-skill collision site), path_input.py
+                      # ('/'-path fallback), paste_store.py (pure paste/attachment marker
+                      # state machine; the input widget is its adapter),
                       # screens/ (main, session_picker, model_picker, game2048),
                       # widgets/ (chat, input, status_bar, tool_card, command_menu)
 ```
@@ -81,7 +85,7 @@ Skills: `~/.limbo/skills/<name>/SKILL.md` (user) and `<workdir>/.agents/skills/<
 
 Single column: status bar (state/elapsed/tokens/model/workdir/queued + rainbow 🎯GOAL badge while a goal loop runs) → scrolling chat flow (user `❯`, streaming Markdown, tool cards, errors) → input box (Enter submits, Shift+Enter newline, paste markers, `ctrl+v` image attach) → hint line. Slash commands: `/sessions /new /export /compact /model /help /2048 /goal` + skill commands. '/'-leading input that matches no command but looks like a path is sent as a normal message with existing files auto-attached (`ui/path_input.py`); a leading space forces plain text. After palette changes run `python scripts/check_contrast.py` (≥ 4.5:1).
 
-`/goal <text>` starts closed-loop mode (LIM-40): the first round is a proposal round — the model explores the repo and proposes acceptance command(s) in a `<verify_proposal>` block; the user confirms in a picker (accept / edit / skip), then `GoalDriver` (non-UI, shared by any frontend) runs each round as a complete `Agent.run()` turn and executes the verify command; exit 0 ends the loop, otherwise the failure output is fed back verbatim into the next round until `max_rounds`, when a no-tool wrap-up turn summarizes and any user message resumes with a fresh budget. Goal state persists on `SessionMeta.goal`. Esc during verify cancels the subprocess.
+`/goal <text>` starts closed-loop mode (LIM-40): the first round is a proposal round — the model explores the repo and proposes acceptance command(s) in a `<verify_proposal>` block; the user confirms in a picker (accept / edit / skip), then the goal branch of the `TurnPump` (non-UI, shared by any frontend) runs each round as a complete `Agent.run()` turn and executes the verify command; exit 0 ends the loop, otherwise the failure output is fed back verbatim into the next round until `max_rounds`, when a no-tool wrap-up turn summarizes and any user message resumes with a fresh budget. Goal state persists on `SessionMeta.goal`. Esc during verify cancels the subprocess.
 
 ## Key Decisions
 

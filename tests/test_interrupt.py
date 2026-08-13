@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-import limbo.goal_driver as goal_driver_module
+import limbo.pump as pump_module
 from limbo.agent import (
     Agent,
     CompactionEvent,
@@ -26,8 +26,8 @@ from limbo.agent import (
     ToolResultEvent,
 )
 from limbo.config import Config
-from limbo.goal_driver import GoalDriver, GoalVerifyStarted
 from limbo.models import TextChunk, ThinkingChunk, ToolCallEvent
+from limbo.pump import GoalVerifyStarted, TurnPump
 from limbo.trace import read_trace
 
 
@@ -397,12 +397,12 @@ async def test_driver_stops_on_interrupt_before_leftover_drain(
         verify_calls.append(command)
         raise AssertionError("verify must not run after an interrupt")
 
-    monkeypatch.setattr(goal_driver_module, "run_verify", fake_verify)
+    monkeypatch.setattr(pump_module, "run_verify", fake_verify)
 
     chunks = [TextChunk(text=f"c{i}") for i in range(10)]
     client = FakeLLMClient([chunks])
     agent = make_agent(workdir, client)
-    driver = GoalDriver(agent, workdir)
+    driver = TurnPump(agent, workdir)
     driver.set_goal("g", verify_command="pytest")
 
     events = []

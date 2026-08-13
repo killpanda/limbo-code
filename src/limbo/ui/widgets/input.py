@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 from typing import Any
 
 from rich.cells import cell_len
@@ -16,30 +15,23 @@ from textual.widgets._text_area import EditResult
 from limbo.models import Attachment
 from limbo.ui import clipboard
 
+# Re-exported for existing imports (tests); the store owns the values.
+from limbo.ui.paste_store import PASTE_COLLAPSE_CHARS as PASTE_COLLAPSE_CHARS
+from limbo.ui.paste_store import PASTE_COLLAPSE_LINES as PASTE_COLLAPSE_LINES
+from limbo.ui.paste_store import PasteStore, clean_pasted_text
+
 # Widget height is text rows + 2 rows of round border. The input starts at
 # one text row (height 3) and grows up to MAX_TEXT_ROWS before scrolling.
 MIN_TEXT_ROWS = 1
 MAX_TEXT_ROWS = 8
 
-# Large pastes (above either threshold, pi-style) are collapsed into a
-# one-line placeholder; the real content lives in InputWidget._pastes and
-# is expanded back at submit time.
-PASTE_COLLAPSE_LINES = 10
-PASTE_COLLAPSE_CHARS = 1000
-
-# Matches paste placeholders like ``[粘贴的文本 #1，共 123 行]`` or
-# ``[粘贴的文本 #1，1234 字符]``. Anchored to the exact formats the widget
-# inserts (no newlines, no free-form middle) so similar-looking pasted
-# content is not misdetected.
-PASTE_MARKER_RE = re.compile(r"\[粘贴的文本 #(\d+)(?:，共 \d+ 行|，\d+ 字符)\]")
-
 
 class UserSubmitted(Message):
     """Event emitted when the user submits a message.
 
-    ``force_text`` is the escape hatch for '/'-leading plain text: set when
-    the raw input had a leading space before the '/', telling the screen to
-    skip slash-command dispatch.
+    ``force_text`` is the escape hatch for '/'/'!'-leading plain text: set
+    when the raw input had a leading space before the prefix, telling the
+    screen to skip slash-command / bang-command dispatch.
     """
 
     def __init__(
@@ -111,16 +103,10 @@ class InputWidget(TextArea):
         # Last value applied via history recall; used to tell recall edits
         # apart from manual edits in the (async) Changed handler.
         self._history_value: str | None = None
-        # Collapsed-paste storage: paste id -> original pasted text. Only
-        # ids present here are expanded at submit time (cf. pi's
-        # validPasteIds), so lookalike text is never expanded by accident.
-        self._pastes: dict[int, str] = {}
-        self._paste_counter = 0
-        # Pending attachments (clipboard images/files). Each has a marker in
-        # the document (``[图片 #N]`` / ``[文件 #N: name]``); at submit time
-        # only attachments whose marker is still present are sent.
-        self._attachments: list[tuple[str, Attachment]] = []
-        self._attachment_counter = 0
+        # Collapsed-paste / attachment-marker state machine (pure text,
+        # no Textual): the widget is the adapter translating key, cursor,
+        # and clipboard events into store calls.
+        self._store = PasteStore()
 
     def _menu_screen(self):
         """The screen, but only when its slash-command menu is open."""
@@ -168,12 +154,6 @@ class InputWidget(TextArea):
 
     # -- paste collapse ----------------------------------------------------------
 
-    @staticmethod
-    def _clean_pasted_text(text: str) -> str:
-        """Normalize line endings and strip control chars (keep \\n and \\t)."""
-        text = text.replace("\r\n", "\n").replace("\r", "\n")
-        return "".join(c for c in text if c in "\n\t" or ord(c) >= 32)
-
     def _insert_replacing_selection(self, text: str) -> None:
         """Insert at the cursor, replacing any active selection.
 
@@ -195,54 +175,19 @@ class InputWidget(TextArea):
         the widget fully controls what gets inserted.
         """
         event.prevent_default()
-        text = self._clean_pasted_text(event.text)
-        lines = text.split("\n")
-        if len(lines) > PASTE_COLLAPSE_LINES or len(text) > PASTE_COLLAPSE_CHARS:
-            self._paste_counter += 1
-            paste_id = self._paste_counter
-            self._pastes[paste_id] = text
-            if len(lines) > PASTE_COLLAPSE_LINES:
-                marker = f"[粘贴的文本 #{paste_id}，共 {len(lines)} 行]"
-            else:
-                marker = f"[粘贴的文本 #{paste_id}，{len(text)} 字符]"
-            self._insert_replacing_selection(marker)
-            return
-        self._insert_replacing_selection(text)
-
-    def _expand_paste_markers(self, text: str) -> tuple[str, list[int]]:
-        """Replace placeholders with their stored content.
-
-        Returns the expanded text plus the ids of markers whose content is
-        no longer stored (deleted then restored via undo, or hand-typed
-        lookalikes); those stay as literal text and are reported so the
-        screen can warn the user instead of silently losing the paste.
-        """
-        invalid: list[int] = []
-
-        def repl(match: re.Match[str]) -> str:
-            paste_id = int(match.group(1))
-            if paste_id in self._pastes:
-                return self._pastes[paste_id]
-            invalid.append(paste_id)
-            return match.group(0)
-
-        return PASTE_MARKER_RE.sub(repl, text), invalid
-
-    def _valid_marker_ending_at(self, line: str, col: int) -> re.Match[str] | None:
-        """A stored-content marker whose text ends exactly at ``col``."""
-        for match in PASTE_MARKER_RE.finditer(line):
-            if match.end() == col and int(match.group(1)) in self._pastes:
-                return match
-        return None
+        self._insert_replacing_selection(
+            self._store.collapse(clean_pasted_text(event.text))
+        )
 
     def action_paste_aware_delete_left(self) -> None:
         """Backspace: delete an adjacent paste placeholder atomically."""
         if self.selection[0] == self.selection[1]:
             row, col = self.cursor_location
-            match = self._valid_marker_ending_at(self.document.get_line(row), col)
-            if match is not None:
-                self.delete((row, match.start()), (row, match.end()))
-                del self._pastes[int(match.group(1))]
+            span = self._store.consume_marker_ending_at(
+                self.document.get_line(row), col
+            )
+            if span is not None:
+                self.delete((row, span[0]), (row, span[1]))
                 return
         self.action_delete_left()
 
@@ -250,10 +195,11 @@ class InputWidget(TextArea):
         """Delete: remove an adjacent paste placeholder atomically."""
         if self.selection[0] == self.selection[1]:
             row, col = self.cursor_location
-            match = PASTE_MARKER_RE.match(self.document.get_line(row), col)
-            if match is not None and int(match.group(1)) in self._pastes:
-                self.delete((row, match.start()), (row, match.end()))
-                del self._pastes[int(match.group(1))]
+            span = self._store.consume_marker_starting_at(
+                self.document.get_line(row), col
+            )
+            if span is not None:
+                self.delete((row, span[0]), (row, span[1]))
                 return
         self.action_delete_right()
 
@@ -262,8 +208,7 @@ class InputWidget(TextArea):
         # Paste/attachment state is per-message; reset it on the same
         # clear() path (regular and slash-command submits alike) so stale
         # ids can't leak into the next message.
-        self._pastes.clear()
-        self._attachments.clear()
+        self._store.clear()
         return result
 
     # -- attachments -------------------------------------------------------------
@@ -286,27 +231,12 @@ class InputWidget(TextArea):
         content = await asyncio.to_thread(clipboard.read_clipboard)
         if isinstance(content, clipboard.ClipboardImage):
             path = clipboard.save_clipboard_image(content.data, content.ext)
-            self._attachment_counter += 1
-            n = self._attachment_counter
-            attachment = Attachment(
-                kind="image",
-                name=f"剪贴板图片-{n}.{content.ext}",
-                path=str(path),
-                mime=f"image/{content.ext}",
-            )
-            marker = f"[图片 #{n}]"
-            self._attachments.append((marker, attachment))
+            _attachment, marker = self._store.add_clipboard_image(path, content.ext)
             self._insert_replacing_selection(marker)
             return
         if isinstance(content, clipboard.ClipboardFiles):
             for path in content.paths:
-                self._attachment_counter += 1
-                n = self._attachment_counter
-                attachment = Attachment(
-                    kind="file", name=path.name, path=str(path)
-                )
-                marker = f"[文件 #{n}: {path.name}]"
-                self._attachments.append((marker, attachment))
+                _attachment, marker = self._store.add_file(path)
                 self._insert_replacing_selection(marker)
             return
         # Text/empty/failure: keep the built-in text paste behavior.
@@ -319,16 +249,17 @@ class InputWidget(TextArea):
         if screen is not None and screen.slash_menu_complete(execute=True):
             return
         raw = self.text
-        # Escape hatch: a leading space before a '/' forces plain text, so
-        # the message skips slash-command dispatch (the stripped text is
-        # what gets sent; the screen's unknown-command error hints at this).
-        force_text = raw[:1].isspace() and raw.lstrip().startswith("/")
-        text, invalid_ids = self._expand_paste_markers(raw.strip())
+        # Escape hatch: a leading space before a '/' or '!' forces plain
+        # text, so the message skips slash-command / bang-command dispatch
+        # (the stripped text is what gets sent; the screen's unknown-command
+        # error hints at this).
+        force_text = raw[:1].isspace() and raw.lstrip()[:1] in ("/", "!")
+        text, invalid_ids = self._store.expand(raw.strip())
         if invalid_ids:
             self.post_message(PasteMarkersInvalid(invalid_ids))
         if text:
             # Only send attachments whose marker survived editing.
-            attachments = [a for marker, a in self._attachments if marker in text]
+            attachments = self._store.live_attachments(text)
             if not self._history or self._history[-1] != text:
                 self._history.append(text)
             self._history_index = None

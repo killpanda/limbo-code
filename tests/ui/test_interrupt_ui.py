@@ -78,7 +78,7 @@ async def test_esc_interrupt_marks_partial_tool_card_cancelled(tmp_path):
         assert chat.tool_cards["t1"].state == "running"
 
         await pilot.press("escape")
-        await wait_until(pilot, lambda: not screen.driver.running)
+        await wait_until(pilot, lambda: not screen.pump.running)
 
         assert chat.tool_cards["t1"].state == "cancelled"
         assert "⏹ 已打断" in chat.transcript_text()
@@ -100,9 +100,9 @@ async def test_esc_routes_to_verify_before_interrupt(tmp_path):
         screen = get_screen(pilot)
         chat = screen.query_one("#chat", ChatWidget)
 
-        # Fake an in-flight verify subprocess (white-box: GoalDriver owns it).
+        # Fake an in-flight verify subprocess (white-box: TurnPump owns it).
         verify_task = asyncio.create_task(asyncio.sleep(60))
-        screen.driver._verify_task = verify_task
+        screen.pump._verify_task = verify_task
 
         await pilot.press("escape")
         await pilot.pause()
@@ -133,7 +133,7 @@ async def test_esc_interrupts_when_input_not_focused(tmp_path):
         assert screen.app.focused is not input_widget
 
         await pilot.press("escape")
-        await wait_until(pilot, lambda: not screen.driver.running)
+        await wait_until(pilot, lambda: not screen.pump.running)
 
         assert chat.tool_cards["t1"].state == "cancelled"
         assert "⏹ 已打断" in chat.transcript_text()
@@ -163,7 +163,7 @@ async def test_esc_unfocused_falls_back_to_queue_cancel(tmp_path):
         chat.focus()
         await pilot.pause()
         await pilot.press("escape")
-        await wait_until(pilot, lambda: not screen.driver.running)
+        await wait_until(pilot, lambda: not screen.pump.running)
         assert screen.agent.queued_count == 1
 
         # The turn's finally-chain hands focus back to the input; move it
@@ -213,13 +213,13 @@ async def test_esc_unfocused_closes_open_slash_menu_first(tmp_path):
         # Only the menu closed: the turn is still running and the queued
         # message is untouched.
         assert not screen.slash_menu_open
-        assert screen.driver.running
+        assert screen.pump.running
         assert screen.agent.queued_count == 1
         assert "⏹ 已打断" not in chat.transcript_text()
 
         # Next ESC (menu closed, still unfocused) interrupts the turn.
         await pilot.press("escape")
-        await wait_until(pilot, lambda: not screen.driver.running)
+        await wait_until(pilot, lambda: not screen.pump.running)
         assert "⏹ 已打断" in chat.transcript_text()
         assert screen.agent.queued_count == 1
 
@@ -238,4 +238,4 @@ async def test_esc_noop_when_idle_and_queue_empty(tmp_path):
         await pilot.pause()
 
         assert chat.transcript_text() == before
-        assert not screen.driver.running
+        assert not screen.pump.running
