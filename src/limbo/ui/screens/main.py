@@ -829,6 +829,7 @@ class MainScreen(Screen[None]):
             )
             success = result.success
             if result.success:
+                exit_code = 0
                 card.set_success(result.output or "")
             else:
                 # Fill the body with output (not error): BashTool puts the
