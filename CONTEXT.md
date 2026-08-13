@@ -40,6 +40,11 @@ proposals should name modules with these terms.
   (`attachments.py`): images become multimodal blocks for vision models
   (encoded per dialect, `llm/scaffold.py`), everything else degrades to
   text — small files inline (≤50KB), the rest as path references.
+- **Bang command** — a '!'-leading input run as bash directly (RFC
+  `design/rfc-bang-command.md`): a private `BashTool` instance isolated
+  from the agent registry, so a turn's ESC interrupt never kills it; the
+  result renders into a non-agent-owned ToolCard and never enters history
+  or the LLM prompt.
 - **Model switch** — `/model` mid-session (`model_switch.py`): validate the
   target (API key, thinking-effort compatibility), swap the client
   (converging on the latest config model), persist to config.toml. The UI
