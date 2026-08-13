@@ -67,6 +67,31 @@ def test_create_reporters_detects_herdr():
     assert composite
 
 
+# -- test-process isolation (conftest strips Herdr pane vars) ------------------
+
+
+def test_herdr_env_vars_are_stripped_from_test_process():
+    """Regression guard for the conftest isolation fixture: the suite must
+    never inherit a Herdr pane's variables, even when run inside one. If
+    the fixture is removed this test goes red immediately."""
+    import os
+
+    for name in (
+        "HERDR_ENV",
+        "HERDR_PANE_ID",
+        "HERDR_BIN_PATH",
+        "HERDR_SOCKET_PATH",
+    ):
+        assert name not in os.environ
+
+
+def test_create_reporters_from_process_env_is_empty_in_tests():
+    """No-arg create_reporters() reads os.environ; in tests it must always
+    be the empty composite, so UI tests instantiating MainScreen never
+    report state to a real Herdr instance."""
+    assert not create_reporters()
+
+
 # -- install_exit_hooks ------------------------------------------------------
 
 
