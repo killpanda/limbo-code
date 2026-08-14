@@ -27,6 +27,8 @@ src/limbo/
 ├── compaction.py     # Context compaction decision/prompt logic (LIM-14)
 ├── history.py        # tool_call↔result pairing + resume repair
 ├── model_switch.py   # /model domain logic: validate, swap client, persist (UI is an adapter)
+├── code_mode.py      # Code Mode (/code-mode on|off): SDK rendering + CODE_ONLY instruction
+│                     # (deepseek-harness parity: catalog collapses to run_code)
 ├── prompt.py         # System-prompt assembly (tools section derived from the registry)
 ├── steer.py          # Mid-turn steer queue (LIM-20): queueing semantics, cancel boundary
 ├── goal.py           # /goal closed-loop state machine, prompt templates, verify executor (LIM-40)
@@ -41,9 +43,10 @@ src/limbo/
 │                     # openai_client.py, anthropic_client.py, responses_client.py, retry.py, sse.py,
 │                     # usage.py (token accounting: usage normalization + prompt-size estimation),
 │                     # scaffold.py (plumbing shared by dialect clients: credentials, retry, images)
-├── tools/            # base.py (BaseTool + path resolution + truncation), registry.py (dispatch),
-│                     # mutation_queue.py (per-file locks), ignore.py (.gitignore),
-│                     # read/bash/edit/write/grep/find/ls.py
+├── tools/            # base.py (BaseTool + path resolution + truncation), registry.py (dispatch;
+│                     # code_mode flag filters definitions() to [run_code], all_definitions() feeds
+│                     # the SDK), mutation_queue.py (per-file locks), ignore.py (.gitignore),
+│                     # read/bash/edit/write/grep/find/ls/run_code.py (the Code Mode transport)
 └── ui/               # app.py + app.tcss (ALL styles here; theme vars only, no bare hex),
                       # theme.py (limbo-dark/-light, RFC LIM-16), commands.py (slash registry
                       # + resolve(): the single builtin-vs-skill collision site), path_input.py
@@ -83,13 +86,19 @@ Skills: `~/.limbo/skills/<name>/SKILL.md` (user) and `<workdir>/.agents/skills/<
 
 ## UI
 
-Single column: status bar (state/elapsed/tokens/model/workdir/queued + rainbow 🎯GOAL badge while a goal loop runs) → scrolling chat flow (user `❯`, streaming Markdown, tool cards, errors) → input box (Enter submits, Shift+Enter newline, paste markers, `ctrl+v` image attach) → hint line. Slash commands: `/sessions /new /export /compact /model /help /2048 /goal` + skill commands. '/'-leading input that matches no command but looks like a path is sent as a normal message with existing files auto-attached (`ui/path_input.py`); a leading space forces plain text. After palette changes run `python scripts/check_contrast.py` (≥ 4.5:1).
+Single column: status bar (state/elapsed/tokens/model/workdir/queued + rainbow 🎯GOAL badge while a goal loop runs + ⌨code badge while Code Mode is on) → scrolling chat flow (user `❯`, streaming Markdown, tool cards, errors) → input box (Enter submits, Shift+Enter newline, paste markers, `ctrl+v` image attach) → hint line. Slash commands: `/sessions /new /export /compact /model /code-mode /help /2048 /goal` + skill commands. '/'-leading input that matches no command but looks like a path is sent as a normal message with existing files auto-attached (`ui/path_input.py`); a leading space forces plain text. After palette changes run `python scripts/check_contrast.py` (≥ 4.5:1).
 
 `/goal <text>` starts closed-loop mode (LIM-40): the first round is a proposal round — the model explores the repo and proposes acceptance command(s) in a `<verify_proposal>` block; the user confirms in a picker (accept / edit / skip), then the goal branch of the `TurnPump` (non-UI, shared by any frontend) runs each round as a complete `Agent.run()` turn and executes the verify command; exit 0 ends the loop, otherwise the failure output is fed back verbatim into the next round until `max_rounds`, when a no-tool wrap-up turn summarizes and any user message resumes with a fresh budget. Goal state persists on `SessionMeta.goal`. Esc during verify cancels the subprocess.
 
 ## Key Decisions
 
 - Async agent, sync tools via `asyncio.to_thread()`
+- Code Mode (`/code-mode on|off`): `ToolRegistry.code_mode` collapses
+  `definitions()` to `[run_code]`; `RunCodeTool` runs a model-written Python
+  program on a fresh event loop, forwarding `tools.*` sub-calls through the
+  same registry. Only the curated program output (print + return) enters
+  history — sub-calls never do. `SessionMeta.code_mode` persists the mode
+  across resume
 - System prompt = hardcoded tool guidelines + `<workdir>/AGENTS.md` & `~/.limbo/AGENTS.md` (XML-wrapped) + skills catalog. **This file is injected into every request — keep it accurate and lean.**
 - Session files fully rewritten per save (atomic, 0600); trace holds full-fidelity record
 

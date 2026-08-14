@@ -218,6 +218,37 @@ tomlkit) so the next launch keeps it. If the write fails, the switch still
 applies for the current session. Switching is refused while a turn is in
 flight.
 
+### Code Mode (`/code-mode on|off`)
+
+Code Mode collapses the model-facing tool catalog to a single `run_code`
+tool: instead of one tool call per action, the model writes a **Python
+program** against a generated SDK and `run_code` executes it — a sequence
+that would take several LLM round trips becomes one. The system prompt
+injects the SDK (every other tool as `await tools.<name>(kwarg=...)`, with
+signatures derived from the registry), so:
+
+```python
+# one run_code call instead of three tool-call round trips
+content = await tools.read(path="src/main.py")
+await tools.write(path="copy.py", content=content)
+return await tools.bash(command="python copy.py")
+```
+
+Inside the program `tools` and `ToolCallError` are bound. Tools return
+their text output as `str`; a failed call raises `ToolCallError` (catchable
+with `try/except`), an unhandled exception fails the run with the
+traceback and captured output so the model self-corrects on the next
+iteration, and independent calls may overlap under `asyncio.gather`. Only
+what the program prints or returns enters the conversation — intermediate
+tool results never do. A runaway program is bounded by a default 120 s
+budget (pass `timeout=` to override) and ESC interrupts at the next tool
+boundary.
+
+Toggle with `/code-mode on|off` (no argument flips). The mode is per
+session: it is persisted in the session file and restored on resume, and
+the status bar shows a `⌨code` badge while it is on. Switching is refused
+while a turn is in flight.
+
 ## Safety
 
 Limbo executes every tool call immediately, without asking for confirmation,

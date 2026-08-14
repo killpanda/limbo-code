@@ -226,6 +226,12 @@ class Agent:
             self._meta, history, self._compactions = load_session(resume)
             self._session_file = resume
             self.messages.extend(repair_history(history))
+            # Restore the presentation mode: repair_history dropped the
+            # loaded system message, so rebuild the fresh one in code mode
+            # when the session was saved with it on.
+            if self._meta.code_mode:
+                self.registry.code_mode = True
+                self._init_system_message()
             # Restore the iterative-summary chain across sessions.
             self._previous_summary = next(
                 (c.summary for c in reversed(self._compactions) if c.summary),
@@ -353,12 +359,13 @@ class Agent:
         return self._meta
 
     def _init_system_message(self) -> None:
-        self.messages.append(
-            Message(
-                role="system",
-                content=build_system_prompt(self.registry, self.workdir),
-            )
-        )
+        prompt = build_system_prompt(self.registry, self.workdir)
+        if self.messages and self.messages[0].role == "system":
+            # Code Mode toggles rebuild the system prompt in place (the
+            # SDK section changes with the presentation).
+            self.messages[0] = Message(role="system", content=prompt)
+        else:
+            self.messages.append(Message(role="system", content=prompt))
 
     @property
     def messages(self) -> list[Message]:
@@ -368,6 +375,29 @@ class Agent:
     @messages.setter
     def messages(self, value: list[Message]) -> None:
         self._history.messages = value
+
+    # -- code mode (deepseek-harness parity) ---------------------------------
+
+    @property
+    def code_mode(self) -> bool:
+        """Whether the model-facing catalog is collapsed to ``run_code``."""
+        return self.registry.code_mode
+
+    def set_code_mode(self, enabled: bool) -> bool:
+        """Toggle Code Mode: rebuild the system prompt (SDK section).
+
+        Returns False when the mode did not change (the caller can report
+        "already on/off" instead of a fake switch). The UI owns the busy
+        guard — a mid-turn switch would corrupt the in-flight request.
+        """
+        if self.registry.code_mode == enabled:
+            return False
+        self.registry.code_mode = enabled
+        self._init_system_message()
+        self.trace.log(
+            "code_mode", turn=self._turn_count, enabled=enabled
+        )
+        return True
 
     # -- steer queue (LIM-20) -------------------------------------------------
 
@@ -1268,6 +1298,8 @@ class Agent:
         # conversations.
         if not self._meta.title:
             self._meta.title = derive_title(self.messages)
+        # Persist the presentation mode so a resumed session restores it.
+        self._meta.code_mode = self.code_mode
         save_session(self._session_file, self._meta, self.messages, self._compactions)
 
     async def _save_session(self) -> None:

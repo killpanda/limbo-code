@@ -38,6 +38,7 @@ class StatusBar(Horizontal):
         self._workdir = workdir
         self._tokens = 0
         self._queued = 0
+        self._code_mode = False
         # NOTE: attribute names must not collide with MessagePump internals
         # (e.g. `_context` is a method on MessagePump).
         self._state_label = Static("● idle", id="statusbar-state", markup=False)
@@ -57,6 +58,8 @@ class StatusBar(Horizontal):
 
     def _context_text(self) -> str:
         parts = [self._model]
+        if self._code_mode:
+            parts.append("⌨code")
         if self._tokens:
             parts.append(f"↓↑ {_format_tokens(self._tokens)}")
         if self._queued:
@@ -85,6 +88,16 @@ class StatusBar(Horizontal):
     def set_model(self, model: str) -> None:
         """Update the displayed model name (after a /model switch)."""
         self._model = model
+        try:
+            self._context_label.update(self._context_text())
+        except Exception:  # noqa: BLE001 - not composed yet
+            pass
+
+    def set_code_mode(self, enabled: bool) -> None:
+        """Show/hide the ⌨code badge (Code Mode presentation toggle)."""
+        if enabled == self._code_mode:
+            return
+        self._code_mode = enabled
         try:
             self._context_label.update(self._context_text())
         except Exception:  # noqa: BLE001 - not composed yet

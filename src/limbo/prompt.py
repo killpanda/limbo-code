@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from limbo.code_mode import CODE_ONLY_INSTRUCTION, render_tools_sdk
 from limbo.skills import discover_skills, format_skills_for_prompt
 
 if TYPE_CHECKING:
@@ -101,6 +102,13 @@ def build_system_prompt(
         "\n\n",
         _guidelines(registry),
     ]
+    if registry.code_mode:
+        # Code Mode (deepseek-harness parity): the catalog above is just
+        # `run_code`; the SDK section tells the model how to reach every
+        # other tool from inside a program.
+        parts.append(
+            f"\n\n{CODE_ONLY_INSTRUCTION}\n\n{render_tools_sdk(registry)}"
+        )
     context = _context_block(workdir, home or Path.home())
     if context is not None:
         parts.append(context)

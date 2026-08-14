@@ -191,6 +191,9 @@ class MainScreen(Screen[None]):
                 f"已恢复会话 {meta.id} · {meta.title or '(无标题)'}"
             )
         self._refresh_goal_indicator()  # D6: silent resume, badge only
+        # Code Mode badge: sync on startup so a resumed code-mode session
+        # shows it without a fresh toggle.
+        self.query_one("#statusbar", StatusBar).set_code_mode(self.agent.code_mode)
         self.query_one("#input", InputWidget).focus()
         self._report_session()
         self._report_state("idle")
@@ -441,6 +444,14 @@ class MainScreen(Screen[None]):
         )
         self._commands.register(
             SlashCommand(
+                "/code-mode",
+                "切换 Code Mode：模型写 Python 程序批量调用工具（一次往返完成多步）[on|off]",
+                takes_args=True,
+                handler=lambda arg: self._code_mode(arg),
+            )
+        )
+        self._commands.register(
+            SlashCommand(
                 "/help",
                 "显示帮助",
                 allow_when_busy=True,
@@ -579,6 +590,36 @@ class MainScreen(Screen[None]):
             chat.add_info(notice)
         if verdict.switched:
             self.run_worker(self._swap_llm_client())
+
+    # -- /code-mode: Code Mode presentation toggle ---------------------------
+
+    def _code_mode(self, arg: str) -> None:
+        """Handle /code-mode: toggle the run_code presentation on/off.
+
+        The busy guard lives in _handle_command (RFC LIM-20): swapping the
+        system prompt mid-stream would corrupt the in-flight turn.
+        """
+        chat = self.query_one("#chat", ChatWidget)
+        arg = arg.strip().lower()
+        if arg in ("on", "1", "true", "yes", "开", "开启"):
+            enabled = True
+        elif arg in ("off", "0", "false", "no", "关", "关闭"):
+            enabled = False
+        elif arg == "":
+            enabled = not self.agent.code_mode
+        else:
+            chat.add_info("用法：/code-mode on|off（无参则切换）")
+            return
+        if self.agent.set_code_mode(enabled):
+            status = "开启" if enabled else "关闭"
+            chat.add_info(
+                f"Code Mode 已{status}：模型将"
+                + ("只通过 run_code 写 Python 程序批量调用工具" if enabled
+                   else "恢复逐个直接调用工具")
+            )
+            self.query_one("#statusbar", StatusBar).set_code_mode(enabled)
+        else:
+            chat.add_info(f"Code Mode 已是{'开启' if enabled else '关闭'}状态")
 
     async def _swap_llm_client(self) -> None:
         """Swap the client for the *current* config model (converges on
