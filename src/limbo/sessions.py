@@ -57,6 +57,9 @@ class SessionMeta(BaseModel):
     updated_at: str = ""
     # Active/finished closed-loop goal (LIM-40); restored on resume (D4/D6).
     goal: GoalState | None = None
+    # Code Mode presentation (deepseek-harness parity): whether the
+    # model-facing catalog was collapsed to `run_code`; restored on resume.
+    code_mode: bool = False
     # Populated by list/load; not written to disk.
     path: Path | None = None
 
