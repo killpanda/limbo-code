@@ -8,8 +8,8 @@ Performance model (long-session UI lag):
 - Streaming output (assistant Markdown + thinking) is batched into ~12 fps
   time slices instead of re-rendering on every chunk: each tick performs at
   most one Markdown append, one thinking refresh, and one scroll.
-- Thinking is collapsed by default to a one-line summary; the full text is
-  only rendered while expanded (a click away).
+- Thinking is collapsed by default to a one-line title (char count); the
+  full text is only rendered while expanded (a click away).
 - Old messages are pruned from the DOM beyond a window (``_MAX_DOM_MESSAGES``),
   keeping the widget tree bounded; the full history stays in ``self.messages``
   and is paged back in via the "load more" pill at the top.
@@ -20,7 +20,6 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from rich.cells import cell_len
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -38,16 +37,14 @@ _PAGE_SIZE = 50
 # Streaming flush rate: chunks accumulate and are rendered together at this
 # cadence, capping full-document re-renders per second.
 _FLUSH_INTERVAL = 1 / 12
-# Summary line cap for a collapsed thinking block.
-_THINKING_SUMMARY_CHARS = 60
 
 
 class ThinkingBlock(Vertical):
     """Collapsible reasoning block.
 
-    Collapsed (default) renders a one-line summary that updates cheaply
-    while streaming; expanded renders the full text, materialized once per
-    flush instead of per chunk. Click to toggle.
+    Collapsed (default) renders a one-line title (char count) that updates
+    cheaply while streaming; expanded renders the full text, materialized
+    once per flush instead of per chunk. Click to toggle.
     """
 
     def __init__(self) -> None:
@@ -90,6 +87,14 @@ class ThinkingBlock(Vertical):
         self._summary.update(self._summary_text())
         if not self._collapsed:
             self._body.update(self._text)
+            # A long reasoning stream is dozens of lines tall once expanded,
+            # and the click often lands near the viewport bottom — without
+            # this the body stays below the fold and the expansion looks
+            # like a no-op. Defer until the layout picks up the display
+            # flip (scroll_visible needs a laid-out region).
+            self.call_after_refresh(
+                lambda: self._body.scroll_visible(animate=False)
+            )
 
     def on_click(self) -> None:
         self.toggle()
@@ -105,23 +110,9 @@ class ThinkingBlock(Vertical):
 
     def _summary_text(self) -> str:
         n = len(self._text)
-        # Truncate by display width (CJK chars are 2 cells), not char count.
-        flat = " ".join(self._text.split())
-        head = ""
-        width = 0
-        truncated = False
-        for ch in flat:
-            w = cell_len(ch)
-            if width + w > _THINKING_SUMMARY_CHARS:
-                truncated = True
-                break
-            width += w
-            head += ch
+        # Collapsed: title only — no content preview (click to expand).
         if self._collapsed:
-            if not head:
-                return f"🧠 thinking…（{n} 字）"
-            ellipsis = "…" if truncated else ""
-            return f"🧠 thinking… {head}{ellipsis}（{n} 字）"
+            return f"🧠 thinking…（{n} 字）"
         return f"🧠 thinking（点击折叠 · {n} 字）"
 
 

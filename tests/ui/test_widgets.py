@@ -263,18 +263,56 @@ async def test_thinking_collapsed_by_default_and_expandable():
         block = widget.messages[-1]
         from limbo.ui.widgets.chat import ThinkingBlock
         assert isinstance(block, ThinkingBlock)
-        # Collapsed by default: summary line only, body hidden.
+        # Collapsed by default: title line only, body hidden, no content
+        # preview in the summary.
         assert block.collapsed
         assert block._body.display is False
         summary = str(block._summary.render())
         assert "thinking" in summary and "字" in summary
+        assert "step one" not in summary
 
         # Expand shows the full accumulated text.
         block.toggle()
+        await pilot.pause()
         assert block._body.display is True
         assert "step one step two" in str(block._body.render())
         block.toggle()
         assert block.collapsed
+
+
+@pytest.mark.asyncio
+async def test_thinking_expand_scrolls_body_into_view():
+    """Expanding a thinking block near the viewport bottom must scroll the
+    body into view — a long reasoning stream is dozens of lines tall once
+    expanded, and without the scroll the click looks like a no-op."""
+    class TestApp(App[None]):
+        def compose(self):
+            yield ChatWidget(id="chat")
+
+    app = TestApp()
+    async with app.run_test(size=(80, 10)) as pilot:
+        widget = pilot.app.query_one(ChatWidget)
+        # Long reasoning text: well past one viewport.
+        text = "思考中" * 400
+        for i in range(0, len(text), 64):
+            await widget.append_thinking_text(text[i : i + 64])
+        await widget.append_assistant_text("结论")
+        await widget.flush_stream()
+        await pilot.pause()
+
+        block = widget.messages[-2]
+        assert isinstance(block, ThinkingBlock)
+        assert block.collapsed
+        # The chat scrolled to the tail; the collapsed block's summary may
+        # sit above the fold. Expand and let the deferred scroll run.
+        block.toggle()
+        await pilot.pause()
+        assert not block.collapsed
+        assert block._body.display is True
+        # After the layout picks up the expansion, the body top is inside
+        # the chat viewport (the deferred scroll_visible ran).
+        assert block._body.region.y >= 0
+        assert block._body.region.y < widget.region.height
 
 
 @pytest.mark.asyncio
