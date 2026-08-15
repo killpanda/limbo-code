@@ -297,13 +297,28 @@ class ChatWidget(VerticalScroll):
         finally:
             self._flush_in_flight = False
 
+    def _close_thinking(self) -> None:
+        """Flush any pending thinking refresh and detach the current block.
+
+        Called whenever a new kind of message starts (user input, tool
+        card, error, assistant text): the thinking stream may have ended
+        with un-flushed chunks in the same event-loop turn (no tick in
+        between), and discarding them would leave the collapsed summary
+        missing its tail — e.g. showing ``（0 字）`` for a full block.
+        """
+        if self._current_thinking is not None:
+            if self._thinking_dirty:
+                self._current_thinking.refresh_display()
+                self._thinking_dirty = False
+            self._current_thinking = None
+
     # -- messages -----------------------------------------------------------
 
     def add_user_message(
         self, text: str, attachments: list[Attachment] | None = None
     ) -> None:
         self._current_assistant = None
-        self._current_thinking = None
+        self._close_thinking()
         msg = Static(f"❯ {text}", classes="user-message", markup=False)
         self.messages.append(msg)
         self._mount_and_scroll(msg)
@@ -329,7 +344,7 @@ class ChatWidget(VerticalScroll):
     ) -> QueuedMessage:
         """Optimistically render a message queued for steer injection."""
         self._current_assistant = None
-        self._current_thinking = None
+        self._close_thinking()
         card = QueuedMessage(item_id, text, attachments)
         self.queued_cards[item_id] = card
         self.messages.append(card)
@@ -365,7 +380,7 @@ class ChatWidget(VerticalScroll):
 
     def add_error(self, text: str) -> None:
         self._current_assistant = None
-        self._current_thinking = None
+        self._close_thinking()
         # Structured error block (RFC §6.3): ✗ marker + indented detail lines.
         lines = text.splitlines() or [""]
         body = "✗ " + lines[0]
@@ -401,7 +416,7 @@ class ChatWidget(VerticalScroll):
         of one per chunk (Markdown.append re-renders the whole document).
         """
         # Assistant text after thinking starts a new block.
-        self._current_thinking = None
+        self._close_thinking()
         if self._current_assistant is None:
             # markdown=None: on_mount applies the initial markdown and would
             # wipe any chunks appended before mounting finished, so the mount
@@ -443,6 +458,7 @@ class ChatWidget(VerticalScroll):
     def add_assistant_message(self, text: str) -> None:
         """Add a complete (non-streamed) assistant Markdown block."""
         self._current_assistant = None
+        self._close_thinking()
         md = Markdown(text, classes="assistant-message")
         self.messages.append(md)
         self._mount_and_scroll(md)
@@ -457,6 +473,7 @@ class ChatWidget(VerticalScroll):
         self.queued_cards.clear()
         self._current_assistant = None
         self._current_thinking = None
+        self._thinking_dirty = False
         self._assistant_buffer = ""
         self._thinking_dirty = False
         self._pruned_count = 0
@@ -487,7 +504,7 @@ class ChatWidget(VerticalScroll):
             return existing
         # Text after a tool card must start a new assistant block.
         self._current_assistant = None
-        self._current_thinking = None
+        self._close_thinking()
         card = ToolCard(tool_id, name, arguments, agent_owned=agent_owned)
         self.tool_cards[tool_id] = card
         # Cards participate in old-message paging like any other message,

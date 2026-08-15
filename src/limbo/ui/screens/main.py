@@ -1001,6 +1001,11 @@ class MainScreen(Screen[None]):
             # swallowing it the way the old finally-drain did.
             self.query_one("#chat", ChatWidget).add_error(f"内部错误：{e}")
         finally:
+            # Flush any buffered streamed text (assistant/thinking) so the
+            # final chunks are rendered even if the last flush tick had not
+            # fired yet — otherwise the transcript/display loses the tail.
+            chat = self.query_one("#chat", ChatWidget)
+            await chat.flush_stream()
             self._update_queue_status()
             # Disabling the input mid-turn moves focus away; give it back so
             # the user can keep typing without clicking.
