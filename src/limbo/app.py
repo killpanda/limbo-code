@@ -66,6 +66,13 @@ def main() -> int:
         default=None,
         help="Override the configured model for this run (e.g. glm-4.7)",
     )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run the plain-terminal headless frontend instead of the TUI "
+        "(line-oriented REPL for Herdr/script control; see "
+        "design/rfc-headless-cli.md)",
+    )
     args = parser.parse_args()
 
     config = load_config()
@@ -111,6 +118,18 @@ def main() -> int:
         meta, _, _ = load_session(resume)
         if meta.workdir and Path(meta.workdir).is_dir():
             workdir = Path(meta.workdir)
+
+    if args.headless:
+        from limbo.headless import (
+            run_headless,  # noqa: PLC0415 - deferred: keeps the TUI path's import cost off headless startup
+        )
+
+        return run_headless(
+            workdir=workdir,
+            config=config,
+            session_dir=args.session_dir,
+            resume=resume,
+        )
 
     from limbo.ui.app import LimboApp  # noqa: I001, PLC0415 - deferred so the kitty keyboard workaround runs first
 

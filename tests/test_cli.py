@@ -242,3 +242,38 @@ def test_kitty_keyboard_config_defaults_to_auto(tmp_path):
     (home / ".limbo").mkdir(parents=True)
     assert _probe_kitty_env(home, herdr=True) == "1"
     assert _probe_kitty_env(home, herdr=False) == ""
+
+# --- headless mode ------------------------------------------------------------
+
+
+def test_cli_headless_routes_to_run_headless(fake_config, monkeypatch):
+    import limbo.headless as headless_module
+
+    mock_run = MagicMock(return_value=0)
+    monkeypatch.setattr(headless_module, "run_headless", mock_run)
+    monkeypatch.setattr(
+        sys, "argv", ["limbo", "--headless", "--workdir", "/tmp/project"]
+    )
+
+    assert main() == 0
+
+    mock_run.assert_called_once()
+    kwargs = mock_run.call_args.kwargs
+    assert kwargs["workdir"] == Path("/tmp/project")
+    assert kwargs["session_dir"] is None
+    assert kwargs["resume"] is None
+
+
+def test_cli_default_route_is_the_tui(fake_config, monkeypatch):
+    import limbo.headless as headless_module
+
+    mock_run = MagicMock(return_value=0)
+    monkeypatch.setattr(headless_module, "run_headless", mock_run)
+    mock_app_class = MagicMock()
+    monkeypatch.setattr(ui_app_module, "LimboApp", mock_app_class)
+    monkeypatch.setattr(sys, "argv", ["limbo"])
+
+    assert main() == 0
+
+    mock_run.assert_not_called()
+    mock_app_class.assert_called_once()
