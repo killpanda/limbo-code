@@ -8,6 +8,8 @@ SVG diff.
 
 from __future__ import annotations
 
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -123,6 +125,10 @@ def test_snapshot_session_picker(snap_compare, tmp_path, monkeypatch):
         ),
         [Message(role="system", content="sys"), Message(role="user", content="hi")],
     )
+    # list_sessions surfaces the file mtime as updated_at; pin it to the
+    # same frozen instant so the picker row is identical across runs.
+    frozen = datetime(2026, 7, 30, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+    os.utime(path, (frozen, frozen))
     app = make_app(tmp_path)
 
     async def run_before(pilot) -> None:

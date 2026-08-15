@@ -402,6 +402,7 @@ async def test_trace_events_full_lifecycle(workdir, monkeypatch):
     )
     driver.set_goal("g", verify_command="pytest")
     await collect(driver.run("start"))
+    driver._agent.trace.flush()  # background writer: barrier before reading
 
     kinds = [e.get("type") for e in read_trace(driver._agent.trace.path)]
     assert "goal_set" in kinds

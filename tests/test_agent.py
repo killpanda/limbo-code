@@ -497,6 +497,117 @@ async def test_agent_save_session_is_atomic(workdir, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_agent_save_incremental_after_first_full_write(workdir, monkeypatch):
+    """Steady-state saves append only new messages: no full rewrite, no
+    tmp+rename, and the already-persisted lines stay byte-identical."""
+    cfg = Config()
+    fake_llm = FakeLLMClient(
+        [[TextChunk(text="hello")], [TextChunk(text="world")]]
+    )
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    await _collect(agent.run("first"))
+    path = agent.session_path
+    first_lines = path.read_text(encoding="utf-8").strip().splitlines()
+    assert agent._session_saved_count == len(agent.messages)
+
+    replaced: list[tuple[Path, Path]] = []
+    monkeypatch.setattr(os, "replace", lambda s, d: replaced.append((s, d)))
+
+    await _collect(agent.run("second"))
+
+    # The second save was append-only: os.replace never ran, the file only
+    # grew, and the earlier lines are untouched (resume-safe).
+    assert replaced == []
+    lines = path.read_text(encoding="utf-8").strip().splitlines()
+    assert lines[: len(first_lines)] == first_lines
+    assert len(lines) > len(first_lines)
+    assert agent._session_saved_count == len(agent.messages)
+    assert agent._session_full_rewrite_needed is False
+
+
+@pytest.mark.asyncio
+async def test_agent_append_failure_forces_full_rewrite(workdir, monkeypatch):
+    # A failed/partial append must not silently lose or duplicate
+    # messages: mark a full rewrite so the next save rebuilds the file.
+    from limbo.sessions import append_session_messages as real_append
+
+    cfg = Config()
+    fake_llm = FakeLLMClient(
+        [[TextChunk(text="hello")], [TextChunk(text="world")]]
+    )
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    await _collect(agent.run("first"))
+    agent._save_session_sync()  # first save: full rewrite
+
+    def boom(path, messages):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(
+        "limbo.agent.append_session_messages", boom
+    )
+    agent.messages.append(Message(role="assistant", content="more"))
+    with pytest.raises(OSError):
+        agent._save_session_sync()
+    assert agent._session_full_rewrite_needed is True
+    assert agent._session_saved_count < len(agent.messages)
+
+    # Next save (append no longer failing) fully rewrites: file is
+    # consistent, count re-anchored.
+    monkeypatch.setattr(
+        "limbo.agent.append_session_messages", real_append
+    )
+    agent._save_session_sync()
+    from limbo.sessions import load_session
+    _, messages, _ = load_session(agent.session_path)
+    assert any(m.content == "more" for m in messages)
+    assert agent._session_saved_count == len(agent.messages)
+    assert agent._session_full_rewrite_needed is False
+
+
+@pytest.mark.asyncio
+async def test_agent_goal_mutation_forces_full_rewrite(workdir):
+    # TurnPump._save_state mutates SessionMeta.goal in memory, relying on
+    # the per-turn save to persist it. Under incremental saves the meta
+    # line is only rewritten when the meta snapshot changes — the goal
+    # must trigger that (regression: goal used to vanish after resume).
+    from limbo.goal import STATUS_ACTIVE, GoalState
+    from limbo.sessions import load_session
+
+    cfg = Config()
+    fake_llm = FakeLLMClient([[TextChunk(text="hello")]])
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    await _collect(agent.run("hi"))  # first save: full rewrite
+
+    # Mutate meta like TurnPump._save_state does, then save again.
+    agent.session_meta.goal = GoalState(
+        status=STATUS_ACTIVE, text="g", max_rounds=5
+    )
+    agent._save_session_sync()
+
+    # Reload from disk: the goal must be present (meta line rewritten).
+    meta, _, _ = load_session(agent.session_path)
+    assert meta.goal is not None
+    assert meta.goal.text == "g"
+    assert meta.goal.max_rounds == 5
+
+
+@pytest.mark.asyncio
 async def test_agent_saves_meta_with_title(workdir):
     from limbo.sessions import list_sessions, load_session
 
@@ -2254,6 +2365,7 @@ def test_agent_close_releases_trace_file_handle(workdir):
         session_dir=workdir / "sessions",
     )
     agent.trace.log("user_message", turn=1, content="before close")
+    agent.trace.flush()  # background writer: barrier before reading
     before = read_trace(agent.trace.path)
     assert len(before) == 2  # session_start + the user_message above
 

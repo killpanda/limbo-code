@@ -722,17 +722,35 @@ class MainScreen(Screen[None]):
             out = (
                 Path.home() / ".limbo" / "exports" / f"{self.agent.session_id}.jsonl"
             )
-        try:
+        # flush + export run off the event loop: flush() is a queue.join()
+        # barrier that can block for the whole writer backlog on a long
+        # session, and export_jsonl re-reads the whole trace — neither
+        # should freeze the UI.
+        self.run_worker(self._export_worker(chat, out), name="export-session")
+
+    async def _export_worker(self, chat: ChatWidget, out: Path) -> None:
+        """Perform the export off the event loop, then report."""
+        def _sync() -> None:
+            # The export reads the trace file; flush the background
+            # writer first so every record lands in the export.
+            self.agent.trace.flush()
             if out.suffix == ".md":
-                export_markdown(meta, self.agent.messages, out)
+                export_markdown(self.agent.session_meta, self.agent.messages, out)
             else:
                 export_jsonl(
-                    meta, self.agent.messages, out, trace_path=self.agent.trace.path
+                    self.agent.session_meta,
+                    self.agent.messages,
+                    out,
+                    trace_path=self.agent.trace.path,
                 )
+
+        try:
+            await asyncio.to_thread(_sync)
         except OSError as e:
             chat.add_error(f"导出失败：{e}")
-            return
-        chat.add_info(f"已导出到 {out}")
+        else:
+            chat.add_info(f"已导出到 {out}")
+
 
     def action_toggle_tools(self) -> None:
         self.query_one("#chat", ChatWidget).toggle_tool_bodies()

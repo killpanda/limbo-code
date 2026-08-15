@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -12,6 +14,7 @@ from limbo.sessions import (
     AmbiguousSessionError,
     SessionMeta,
     SessionNotFoundError,
+    append_session_messages,
     export_jsonl,
     export_markdown,
     find_session,
@@ -77,6 +80,34 @@ def test_save_is_atomic_and_sets_permissions(tmp_path: Path):
     assert (path.stat().st_mode & 0o777) == 0o600
 
 
+def test_append_session_messages_is_incremental(tmp_path: Path):
+    path = tmp_path / "x.jsonl"
+    meta = make_meta()
+    first = make_messages()
+    save_session(path, meta, first)
+
+    appended = [Message(role="assistant", content="more")]
+    append_session_messages(path, appended)
+
+    loaded_meta, loaded_messages, _ = load_session(path)
+    assert loaded_meta.id == meta.id  # meta line untouched
+    assert [m.content for m in loaded_messages] == [
+        *[m.content for m in first], "more"
+    ]
+    # File only grew by the appended lines; the meta line still leads.
+    lines = path.read_text(encoding="utf-8").splitlines()
+    assert json.loads(lines[0])["type"] == "meta"
+    assert len(lines) == len(first) + len(appended) + 1
+
+
+def test_append_session_messages_requires_existing_file(tmp_path: Path):
+    # Appending to a missing file must raise: silently creating a
+    # meta-less session would break the full-rewrite-then-append
+    # contract (callers gate on file existence).
+    with pytest.raises(FileNotFoundError):
+        append_session_messages(tmp_path / "fresh.jsonl", make_messages())
+
+
 def test_load_legacy_file_without_meta(tmp_path: Path):
     path = tmp_path / "legacy.jsonl"
     path.write_text(
@@ -115,7 +146,12 @@ def _write_session_file(path: Path, meta: SessionMeta) -> None:
 def test_list_sessions_sorted_by_updated_at_desc(tmp_path: Path):
     for i, updated in enumerate(["2026-07-18", "2026-07-20", "2026-07-19"]):
         meta = make_meta(id=f"s{i}", updated_at=f"{updated}T00:00:00+00:00")
-        _write_session_file(tmp_path / f"s{i}.jsonl", meta)
+        path = tmp_path / f"s{i}.jsonl"
+        _write_session_file(path, meta)
+        # list_sessions sorts by file mtime (incremental saves never
+        # touch the meta line); pin mtimes to the updated_at ordering.
+        mtime = datetime.fromisoformat(updated).timestamp()
+        os.utime(path, (mtime, mtime))
 
     sessions = list_sessions(tmp_path)
     assert [s.id for s in sessions] == ["s1", "s2", "s0"]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import platform
 import secrets
@@ -44,6 +45,7 @@ from limbo.prompt import build_system_prompt
 from limbo.sessions import (
     CompactionRecord,
     SessionMeta,
+    append_session_messages,
     derive_title,
     load_session,
     save_session,
@@ -218,6 +220,13 @@ class Agent:
         self._prompt_estimator = PromptSizeEstimator()
         self._compactions: list[CompactionRecord] = []
         self._previous_summary: str | None = None
+        # Incremental session persistence: how many messages are already on
+        # disk (append-only fast path), and whether the next save must do a
+        # full rewrite instead (history reshaped by compaction, or a resume
+        # whose repair() inserted placeholder tool messages).
+        self._session_saved_count = 0
+        self._session_saved_meta: str | None = None
+        self._session_full_rewrite_needed = False
         self._auto_compaction_failed_this_turn = False
         self._auto_compact_noop_notified = False
 
@@ -226,6 +235,12 @@ class Agent:
             self._meta, history, self._compactions = load_session(resume)
             self._session_file = resume
             self.messages.extend(repair_history(history))
+            # repair_history may have inserted placeholder tool messages, and
+            # load_session re-applied compaction: the in-memory history no
+            # longer matches the file byte-for-byte, so the first save after
+            # resume is a full rewrite (then the append path takes over).
+            self._session_saved_count = len(self.messages)
+            self._session_full_rewrite_needed = True
             # Restore the presentation mode: repair_history dropped the
             # loaded system message, so rebuild the fresh one in code mode
             # when the session was saved with it on.
@@ -1254,6 +1269,10 @@ class Agent:
         system_msg = self.messages[0]
         kept = self.messages[split:]
         self.messages = [system_msg, make_summary_message(summary), *kept]
+        # History changed shape (old messages dropped): the append-only
+        # fast path would leave the summarized-away messages on disk, so the
+        # next save must fully rewrite (shrinking the file).
+        self._session_full_rewrite_needed = True
         after = estimate_tokens(self.messages)
         record = CompactionRecord(
             id=secrets.token_hex(8),
@@ -1294,13 +1313,72 @@ class Agent:
         )
 
     def _save_session_sync(self) -> None:
-        # Rewrite the whole session on every save. It is cheap for MVP-sized
-        # conversations.
+        """Persist the session: incremental append by default, full rewrite
+        when the on-disk state changes shape.
+
+        Full rewrite happens when the file does not exist yet (first save),
+        when compaction reshaped the history, when a resumed session's
+        repaired history must be re-synced, or when the meta record changed
+        (title, code_mode, goal, ...) — the meta line is only written by a
+        full rewrite, so any meta drift forces one. The meta snapshot
+        comparison replaces ad-hoc dirty flags, so future meta fields (e.g.
+        the LIM-40 goal state mutated by TurnPump._save_state) are covered
+        automatically. Otherwise only the messages appended since the last
+        save are written — long sessions no longer rewrite megabytes every
+        turn.
+        """
+        # Keep the presentation mode in sync before snapshotting the meta.
+        self._meta.code_mode = self.code_mode
         if not self._meta.title:
             self._meta.title = derive_title(self.messages)
-        # Persist the presentation mode so a resumed session restores it.
-        self._meta.code_mode = self.code_mode
-        save_session(self._session_file, self._meta, self.messages, self._compactions)
+        # updated_at is stamped by save_session (full rewrite) and refreshed
+        # in-memory on the append path; exclude it so the comparison below
+        # compares real meta content, not the always-moving timestamp.
+        meta_snapshot = json.dumps(
+            self._meta.model_dump(exclude={"path", "updated_at"}),
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        if (
+            self._session_full_rewrite_needed
+            or meta_snapshot != self._session_saved_meta
+            or not self._session_file.exists()
+        ):
+            save_session(
+                self._session_file,
+                self._meta,
+                self.messages,
+                self._compactions,
+            )
+            self._session_saved_count = len(self.messages)
+            self._session_saved_meta = meta_snapshot
+            self._session_full_rewrite_needed = False
+        else:
+            new_messages = self.messages[self._session_saved_count :]
+            if new_messages:
+                try:
+                    append_session_messages(self._session_file, new_messages)
+                except OSError:
+                    # Partial or failed append: some of the new messages may
+                    # already be on disk, and re-appending next time would
+                    # duplicate them. Force a full rewrite on the next save,
+                    # which rebuilds the file and drops the duplicates.
+                    self._session_full_rewrite_needed = True
+                    raise
+                self._session_saved_count = len(self.messages)
+            # Keep the in-memory timestamp fresh even though the meta line
+            # is not rewritten (export headers read it).
+            self._meta.updated_at = datetime.now(timezone.utc).isoformat(
+                timespec="seconds"
+            )
 
     async def _save_session(self) -> None:
-        await asyncio.to_thread(self._save_session_sync)
+        # Trace and session are separate files written independently; the
+        # flush barrier belongs here (turn end), so by the time run()
+        # returns, every trace record is on disk. Both run off the event
+        # loop so the UI never blocks on either file.
+        def _sync() -> None:
+            self.trace.flush()
+            self._save_session_sync()
+
+        await asyncio.to_thread(_sync)
