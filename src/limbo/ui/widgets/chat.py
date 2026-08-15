@@ -461,6 +461,7 @@ class ChatWidget(VerticalScroll):
         self._thinking_dirty = False
         self._pruned_count = 0
         self._pending_count = 0
+        self._prune_scheduled = False
         self._follow = True
         self._update_floater()
         self._update_load_more()
@@ -500,7 +501,9 @@ class ChatWidget(VerticalScroll):
     def toggle_tool_bodies(self) -> None:
         """Expand/collapse all tool cards that have output."""
         for card in self.tool_cards.values():
-            if card.is_attached:
+            # is_attached stays True in the remove-in-flight window
+            # (_pruning set, parent unlink deferred); _pruning guards that.
+            if card.is_attached and not card._pruning:
                 card.toggle()
 
     def cancel_running_tool_cards(self) -> None:
@@ -543,7 +546,9 @@ class ChatWidget(VerticalScroll):
         saw_unmounted = False
         while to_remove < excess:
             oldest = self.messages[self._pruned_count + to_remove]
-            if not oldest._is_mounted:
+            if not oldest._is_mounted or oldest.region.area == 0:
+                # Still mounting / not yet laid out: region is NULL and
+                # cannot be measured or viewport-protected.
                 saw_unmounted = True
                 break
             if not self._follow and oldest.region.overlaps(self.region):
@@ -555,14 +560,23 @@ class ChatWidget(VerticalScroll):
                 # Every candidate is still mounting (a burst of messages in
                 # one event-loop turn): retry once they have composed.
                 self._prune_scheduled = True
-                self.call_after_refresh(self._prune)
+                self.call_after_refresh(self._prune_retry)
             return
         # Remove and accumulate the removed height directly: compensation
         # must not depend on a "stay" widget — a second prune in the same
         # refresh window removes it too, invalidating its region.
         removed_height = 0
         for _ in range(to_remove):
-            removed_height += max(0, self.messages[self._pruned_count].region.height)
+            oldest = self.messages[self._pruned_count]
+            # region.height excludes margins (VerticalLayout folds them into
+            # spacing); under production CSS (.user/.assistant/.thinking/
+            # .error messages all margin-top: 1) each pruned message frees
+            # height + margin, so compensate for both or the viewport
+            # drifts by one line per pruned message.
+            margin = oldest.styles.margin
+            removed_height += max(
+                0, oldest.region.height + margin.top + margin.bottom
+            )
             self.messages[self._pruned_count].remove()
             self._pruned_count += 1
         if not self._follow and removed_height > 0:
@@ -571,11 +585,18 @@ class ChatWidget(VerticalScroll):
 
             self.call_after_refresh(_hold_viewport)
         self._update_load_more()
-        self._prune_scheduled = False
         # Skipped candidates (still mounting) get another pass once composed.
         if saw_unmounted and not self._prune_scheduled:
             self._prune_scheduled = True
-            self.call_after_refresh(self._prune)
+            self.call_after_refresh(self._prune_retry)
+
+    def _prune_retry(self) -> None:
+        """Re-scheduled _prune: release the dedupe flag when the callback
+        actually fires, so a retry that still finds unmounted candidates can
+        chain another retry (a stuck flag would disable retries forever).
+        """
+        self._prune_scheduled = False
+        self._prune()
 
     def _load_more(self) -> None:
         """Restore the next page of pruned messages above the current ones."""
@@ -597,7 +618,6 @@ class ChatWidget(VerticalScroll):
 
         self.call_after_refresh(_hold_viewport)
         self._update_load_more()
-        self._prune_scheduled = False
 
     def _update_load_more(self) -> None:
         try:

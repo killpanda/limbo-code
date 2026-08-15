@@ -6,6 +6,17 @@ from limbo.ui.widgets.chat import ChatWidget
 from limbo.ui.widgets.input import InputWidget, UserSubmitted
 
 
+async def wait_until(pilot, predicate, attempts: int = 200) -> None:
+    """Pause until predicate holds (timeout-safe), avoiding pause-count
+    flakiness under suite load."""
+    for _ in range(attempts):
+        if predicate():
+            return
+        await pilot.pause()
+    raise AssertionError("condition not reached within timeout")
+
+
+
 @pytest.mark.asyncio
 async def test_chat_adds_messages():
     class TestApp(App[None]):
@@ -423,3 +434,91 @@ async def test_prune_resumes_bounding_after_scroll_back_to_bottom():
             if c.id not in ("back-to-bottom", "load-more")
         ]
         assert len(mounted) <= _MAX_DOM_MESSAGES + 2
+
+
+@pytest.mark.asyncio
+async def test_prune_compensates_margins_under_real_css():
+    """Regression (reviewer round 3, S1): messages carry margin-top in the
+    real stylesheet; removed_height must include margins or the viewport
+    drifts one line per pruned message (invisible in tests without CSS)."""
+    class TestApp(App[None]):
+        CSS = ".user-message { margin-top: 1; }"
+
+        def compose(self):
+            yield ChatWidget(id="chat")
+
+    from limbo.ui.widgets.chat import _MAX_DOM_MESSAGES
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(ChatWidget)
+        for i in range(_MAX_DOM_MESSAGES + 30):
+            widget.add_user_message(f"msg {i}")
+        await pilot.pause()
+        widget.scroll_y = 40
+        widget._follow = False
+        await pilot.pause()
+
+        visible = [
+            m for m in widget.messages
+            if getattr(m, "region", None) and m.region.overlaps(widget.region)
+        ]
+        top_id = str(visible[0].render()) if visible else None
+        top_screen = visible[0].region.y if visible else None
+
+        for i in range(60):
+            widget.add_user_message(f"tail {i}")
+
+        # Wait until the burst's prune retries have settled (pause counts
+        # are timing-sensitive under full-suite load). While scrolled up the
+        # viewport guard intentionally lets the DOM exceed the bound, so we
+        # wait on the retry flag, not the DOM count.
+        await wait_until(pilot, lambda: widget._prune_scheduled is False)
+        await pilot.pause()
+
+        visible = [
+            m for m in widget.messages
+            if getattr(m, "region", None) and m.region.overlaps(widget.region)
+        ]
+        top_id2 = str(visible[0].render()) if visible else None
+        top_screen2 = visible[0].region.y if visible else None
+        # The same message stays at the top of the viewport.
+        assert top_id == top_id2
+        assert abs((top_screen2 or 0) - (top_screen or 0)) <= 1
+
+
+@pytest.mark.asyncio
+async def test_prune_retry_flag_resets_on_clear():
+    """Regression (reviewer round 3, S2): a stuck _prune_scheduled flag
+    silently disables retries and lets the DOM exceed the bound forever."""
+    class TestApp(App[None]):
+        def compose(self):
+            yield ChatWidget(id="chat")
+
+    from limbo.ui.widgets.chat import _MAX_DOM_MESSAGES
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(ChatWidget)
+        for i in range(_MAX_DOM_MESSAGES + 60):
+            widget.add_info(f"msg {i}")
+        assert widget._prune_scheduled is True  # retry queued
+        await pilot.pause()
+        await pilot.pause()
+        assert widget._pruned_count > 0
+
+        # clear() must reset the flag, or a fresh session never retries.
+        widget.clear()
+        assert widget._prune_scheduled is False
+
+        for i in range(_MAX_DOM_MESSAGES + 60):
+            widget.add_info(f"new {i}")
+        assert widget._prune_scheduled is True
+        await wait_until(
+            pilot,
+            lambda: len(
+                [c for c in widget.children if c.id not in ("back-to-bottom", "load-more")]
+            )
+            <= _MAX_DOM_MESSAGES + 2
+            and widget._prune_scheduled is False,
+        )
