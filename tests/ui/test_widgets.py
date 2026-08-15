@@ -477,6 +477,31 @@ async def test_prune_resumes_bounding_after_scroll_back_to_bottom():
 
 
 @pytest.mark.asyncio
+async def test_deferred_autoscroll_does_not_override_scroll_up():
+    """Regression: scroll_end defers the actual scroll until after the next
+    refresh; a stale deferred scroll-to-end fired even after the user
+    scrolled up in between, yanking the view back to the bottom."""
+    class TestApp(App[None]):
+        def compose(self):
+            yield ChatWidget(id="chat")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(ChatWidget)
+        for i in range(50):
+            widget.add_user_message(f"msg {i}")
+        await pilot.pause()  # settle: layout done, view at bottom, following
+        # A new message queues a deferred scroll-to-end while following...
+        widget.add_user_message("new")
+        # ...and the user scrolls up before the refresh executes it.
+        widget.scroll_y = 0
+        await pilot.pause()
+        await pilot.pause()
+        assert widget.scroll_y == 0
+        assert not widget._follow
+
+
+@pytest.mark.asyncio
 async def test_prune_compensates_margins_under_real_css():
     """Regression (reviewer round 3, S1): messages carry margin-top in the
     real stylesheet; removed_height must include margins or the viewport

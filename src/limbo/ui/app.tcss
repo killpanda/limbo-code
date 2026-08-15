@@ -45,6 +45,10 @@ ChatWidget {
     padding: 0;
 }
 .thinking-message {
+    /* Vertical defaults to height: 1fr — without this a thinking block eats
+       all free space when the conversation is shorter than the viewport
+       (fresh session, just after resume), leaving a huge blank gap. */
+    height: auto;
     color: $text-tertiary;
     text-style: italic;
     margin-top: 1;

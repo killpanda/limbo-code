@@ -461,6 +461,20 @@ class ChatWidget(VerticalScroll):
         self.messages.append(md)
         self._mount_and_scroll(md)
 
+    def add_thinking_message(self, text: str) -> None:
+        """Add a complete (non-streamed) thinking block, collapsed by default.
+
+        Used when rendering restored session history: the reasoning stream
+        is long finished, so the block is mounted whole with just its
+        one-line summary visible.
+        """
+        self._current_assistant = None
+        self._close_thinking()
+        block = ThinkingBlock()
+        block.append(text)
+        self.messages.append(block)
+        self._mount_and_scroll(block)
+
     def clear(self) -> None:
         """Remove all rendered messages and tool cards (keeps the floaters)."""
         for child in list(self.children):
@@ -594,10 +608,12 @@ class ChatWidget(VerticalScroll):
             self.messages[self._pruned_count].remove()
             self._pruned_count += 1
         if not self._follow and removed_height > 0:
-            def _hold_viewport() -> None:
-                self.scroll_y = max(0, self.scroll_y - removed_height)
-
-            self.call_after_refresh(_hold_viewport)
+            # Compensate immediately, not via call_after_refresh: the removed
+            # heights were measured on the current layout, so the correction
+            # is exact right now. Deferring it renders a frame at the stale
+            # offset first (visible jump) and races with the next paint in
+            # tests (assertion lands before the callback fires).
+            self.scroll_y = max(0, self.scroll_y - removed_height)
         self._update_load_more()
         # Skipped candidates (still mounting) get another pass once composed.
         if saw_unmounted and not self._prune_scheduled:
@@ -679,7 +695,16 @@ class ChatWidget(VerticalScroll):
 
     def _auto_scroll(self) -> None:
         if self._follow:
-            self.scroll_end(animate=False)
+            # scroll_end defers the actual scroll until after the next
+            # refresh (max_scroll_y is only correct once the new content is
+            # laid out). Re-check _follow at execution time: a scroll-up
+            # landing in between must not be overridden by this stale
+            # scroll-to-end.
+            def _scroll_end() -> None:
+                if self._follow:
+                    self.scroll_end(animate=False, immediate=True)
+
+            self.call_after_refresh(_scroll_end)
         else:
             self._pending_count += 1
         self._update_floater()

@@ -694,8 +694,9 @@ class MainScreen(Screen[None]):
     def _render_history(self) -> None:
         """Render the agent's restored history into the chat flow.
 
-        User/assistant text is rendered as-is; raw tool outputs are summarized
-        (tool cards are not rebuilt for history).
+        User/assistant text is rendered as-is; reasoning is restored as a
+        collapsed thinking block; raw tool outputs are summarized (tool cards
+        are not rebuilt for history).
         """
         chat = self.query_one("#chat", ChatWidget)
         skipped_tools = 0
@@ -704,8 +705,11 @@ class MainScreen(Screen[None]):
                 chat.add_info("（此前对话已压缩为摘要）")
             elif msg.role == "user" and msg.content:
                 chat.add_user_message(msg.content, msg.attachments)
-            elif msg.role == "assistant" and msg.content:
-                chat.add_assistant_message(msg.content)
+            elif msg.role == "assistant":
+                if msg.reasoning:
+                    chat.add_thinking_message(msg.reasoning)
+                if msg.content:
+                    chat.add_assistant_message(msg.content)
             elif msg.role == "tool":
                 skipped_tools += 1
         if skipped_tools:

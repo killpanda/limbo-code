@@ -62,6 +62,14 @@ async def _collect(run):
     return [event async for event in run]
 
 
+def read_agent_trace(agent: Agent) -> list[dict]:
+    """read_trace with a flush barrier: log() only enqueues (the background
+    writer thread does the disk write), so reading right after a turn can
+    race the writer under suite load."""
+    agent.trace.flush()
+    return read_trace(agent.trace.path)
+
+
 @pytest.mark.asyncio
 async def test_agent_text_only_response(workdir):
     cfg = Config()
@@ -804,7 +812,7 @@ async def test_agent_trace_records_full_turn(workdir):
 
     await _collect(agent.run("read main.py"))
 
-    records = read_trace(agent.trace.path)
+    records = read_agent_trace(agent)
     types = [r["type"] for r in records]
     assert types == [
         "session_start",
@@ -861,8 +869,7 @@ def test_agent_trace_session_start_records_resolved_provider(workdir):
         workdir=workdir,
         session_dir=workdir / "sessions",
     )
-    agent.trace.flush()  # background writer: session_start may be in flight
-    records = read_trace(agent.trace.path)
+    records = read_agent_trace(agent)
     resolved = records[0]["resolved"]
     assert resolved == {
         "model": "deepseek-v4-pro",
@@ -887,7 +894,7 @@ def test_agent_trace_records_model_switch(workdir):
     config.llm.model = "k3"
     agent.update_llm(FakeLLMClient([]))
 
-    records = read_trace(agent.trace.path)
+    records = read_agent_trace(agent)
     switch = next(r for r in records if r["type"] == "model_switch")
     assert switch["resolved"]["model"] == "k3"
     assert switch["resolved"]["provider"] == "kimi-coding"
@@ -914,7 +921,7 @@ async def test_agent_trace_records_llm_error(workdir):
     )
     await _collect(agent.run("hi"))
 
-    records = read_trace(agent.trace.path)
+    records = read_agent_trace(agent)
     error = next(r for r in records if r["type"] == "llm_error")
     assert error["exception_type"] == "RuntimeError"
     assert "network down" in error["error"]
@@ -943,7 +950,7 @@ async def test_agent_friendly_error_on_rate_limit(workdir):
     assert len(error_events) == 1
     assert "稍后重发" in error_events[0].message
 
-    records = read_trace(agent.trace.path)
+    records = read_agent_trace(agent)
     error = next(r for r in records if r["type"] == "llm_error")
     assert error["exception_type"] == "LLMHttpError"
     assert "429" in error["error"]
@@ -979,7 +986,7 @@ async def test_agent_trace_marks_cancelled_turn_as_interrupted(workdir):
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    records = read_trace(agent.trace.path)
+    records = read_agent_trace(agent)
     turn_ends = [r for r in records if r["type"] == "turn_end"]
     assert len(turn_ends) == 1
     assert turn_ends[0]["status"] == "interrupted"
@@ -995,7 +1002,7 @@ async def test_agent_trace_marks_finished_turn_as_completed(workdir):
     )
     await _collect(agent.run("hi"))
 
-    records = read_trace(agent.trace.path)
+    records = read_agent_trace(agent)
     turn_ends = [r for r in records if r["type"] == "turn_end"]
     assert len(turn_ends) == 1
     assert turn_ends[0]["status"] == "completed"
@@ -1042,7 +1049,7 @@ async def test_agent_trace_records_tool_crash(workdir):
     agent.registry.execute = crashing_execute
     await _collect(agent.run("read main.py"))
 
-    records = read_trace(agent.trace.path)
+    records = read_agent_trace(agent)
     result = next(r for r in records if r["type"] == "tool_result")
     assert result["success"] is False
     assert result["exception_type"] == "RuntimeError"
@@ -1222,7 +1229,7 @@ async def test_agent_length_stop_fails_whole_batch_without_executing(
     assert [m.tool_call_id for m in tool_msgs] == ["c1", "c2"]
     assert any(isinstance(e, TextDelta) and e.text == "done" for e in events)
 
-    records = read_trace(agent.trace.path)
+    records = read_agent_trace(agent)
     assert any(r.get("kind") == "length_stop" for r in records if r["type"] == "error")
 
 
@@ -1315,7 +1322,7 @@ async def test_agent_length_stop_loop_aborts_after_threshold(workdir):
     assert any("output token limit" in e.message for e in errors)
     assert any("write" in e.message for e in errors)
 
-    records = read_trace(agent.trace.path)
+    records = read_agent_trace(agent)
     assert any(
         r.get("kind") == "length_stop_loop" for r in records if r["type"] == "error"
     )
@@ -1352,7 +1359,7 @@ async def test_agent_length_stop_counter_resets_after_successful_batch(workdir):
     # Two consecutive truncations after one success must NOT trip the guard;
     # the turn completes normally.
     assert any(isinstance(e, TextDelta) and e.text == "done" for e in events)
-    records = read_trace(agent.trace.path)
+    records = read_agent_trace(agent)
     assert not any(
         r.get("kind") == "length_stop_loop" for r in records if r["type"] == "error"
     )
@@ -1951,7 +1958,7 @@ async def test_steer_injected_at_loop_top(workdir):
     assert not agent.has_pending_steer()
     # Trace marks the injected message as a steer (the turn's first input has
     # no steer/followup flag).
-    records = read_trace(agent.trace.path)
+    records = read_agent_trace(agent)
     steered = [r for r in records if r["type"] == "user_message" and r.get("steer")]
     assert len(steered) == 1 and steered[0]["content"] == "改用 uv"
     first = [
@@ -2025,7 +2032,7 @@ async def test_steer_followup_resets_iteration_count(workdir):
     assert [e.text for e in events if isinstance(e, SteerEvent)] == ["补充一下"]
     texts = [e.text for e in events if isinstance(e, TextDelta)]
     assert texts == ["first", "second"]
-    records = read_trace(agent.trace.path)
+    records = read_agent_trace(agent)
     followups = [r for r in records if r["type"] == "user_message" and r.get("followup")]
     assert len(followups) == 1 and followups[0]["content"] == "补充一下"
 
@@ -2200,7 +2207,7 @@ async def test_cancel_steer_by_id(workdir):
     steer_events = [e for e in events if isinstance(e, SteerEvent)]
     assert [e.id for e in steer_events] == [client.id2]
     # The cancellation is traced; the cancelled text never reaches the session.
-    records = read_trace(agent.trace.path)
+    records = read_agent_trace(agent)
     cancelled = [r for r in records if r["type"] == "steer_cancelled"]
     assert len(cancelled) == 1 and cancelled[0]["text"] == "取消我"
     from limbo.sessions import load_session
@@ -2366,15 +2373,14 @@ def test_agent_close_releases_trace_file_handle(workdir):
         session_dir=workdir / "sessions",
     )
     agent.trace.log("user_message", turn=1, content="before close")
-    agent.trace.flush()  # background writer: barrier before reading
-    before = read_trace(agent.trace.path)
+    before = read_agent_trace(agent)
     assert len(before) == 2  # session_start + the user_message above
 
     agent.close()
 
     # The trace fd is closed; further writes are dropped, not raised.
     agent.trace.log("user_message", turn=2, content="after close")
-    after = read_trace(agent.trace.path)
+    after = read_agent_trace(agent)
     assert len(after) == 2  # unchanged: the post-close write was dropped
     assert after[-1]["content"] == "before close"
 

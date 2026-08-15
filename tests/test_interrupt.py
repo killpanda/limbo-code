@@ -56,8 +56,14 @@ def make_agent(workdir: Path, client, config: Config | None = None) -> Agent:
     )
 
 
+def read_agent_trace(agent: Agent) -> list[dict]:
+    """read_trace with a flush barrier (see trace_types)."""
+    agent.trace.flush()
+    return read_trace(agent.trace.path)
+
+
 def trace_types(agent: Agent) -> list[str]:
-    return [r["type"] for r in read_trace(agent.trace.path)]
+    return [r["type"] for r in read_agent_trace(agent)]
 
 
 # -- 1. LLM stream interrupt ----------------------------------------------------
@@ -89,7 +95,7 @@ async def test_interrupt_mid_stream_appends_partial_content_only(workdir):
     assert last.reasoning is None
     assert last.reasoning_signature is None
 
-    records = read_trace(agent.trace.path)
+    records = read_agent_trace(agent)
     interrupted = [r for r in records if r["type"] == "turn_interrupted"]
     assert len(interrupted) == 1
     assert interrupted[0]["phase"] == "llm_stream"
@@ -318,7 +324,7 @@ async def test_interrupt_between_stream_end_and_batch_start(workdir):
     # History pairing intact, and the trace names the un-executed calls.
     tool_msgs = [m for m in agent.messages if m.role == "tool"]
     assert {m.tool_call_id for m in tool_msgs} == {"w1", "w2"}
-    records = read_trace(agent.trace.path)
+    records = read_agent_trace(agent)
     interrupted = [r for r in records if r["type"] == "turn_interrupted"]
     assert len(interrupted) == 1
     assert interrupted[0]["unexecuted_tool_call_ids"] == ["w1", "w2"]
@@ -358,7 +364,7 @@ async def test_idle_interrupt_is_noop_and_does_not_leak(workdir):
 
     assert "".join(e.text for e in events if isinstance(e, TextDelta)) == "ok"
     assert not any(isinstance(e, InterruptEvent) for e in events)
-    records = read_trace(agent.trace.path)
+    records = read_agent_trace(agent)
     assert not any(r["type"] == "turn_interrupted" for r in records)
     turn_ends = [r for r in records if r["type"] == "turn_end"]
     assert turn_ends[-1]["status"] == "completed"
@@ -378,7 +384,7 @@ async def test_double_interrupt_logs_once(workdir):
             agent.interrupt()
             agent.interrupt()
 
-    records = read_trace(agent.trace.path)
+    records = read_agent_trace(agent)
     interrupted = [r for r in records if r["type"] == "turn_interrupted"]
     assert len(interrupted) == 1
     assert len([e for e in events if isinstance(e, InterruptEvent)]) == 1
@@ -455,7 +461,7 @@ async def test_queued_steer_delivered_on_next_run_after_interrupt(workdir):
     assert steers[0].text == "插队"
     users = [m.content for m in agent.messages if m.role == "user"]
     assert users == ["first", "插队", "second"]
-    records = read_trace(agent.trace.path)
+    records = read_agent_trace(agent)
     turn_ends = [r for r in records if r["type"] == "turn_end"]
     assert [t["status"] for t in turn_ends] == ["interrupted", "completed"]
 
@@ -494,7 +500,7 @@ async def test_interrupt_stalled_stream(workdir):
     assert interrupts[0].phase == "llm_stream"
     # Nothing streamed: no assistant message is appended at all.
     assert agent.messages[-1].role == "user"
-    records = read_trace(agent.trace.path)
+    records = read_agent_trace(agent)
     turn_ends = [r for r in records if r["type"] == "turn_end"]
     assert turn_ends[-1]["status"] == "interrupted"
 
