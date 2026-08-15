@@ -3,6 +3,10 @@
 A tool card renders as a single summary line (state symbol + tool name +
 argument summary + elapsed time) and can be expanded to show the full tool
 output. State machine: running → success | error.
+
+The output body is lazy: it is created only when the card is expanded and
+destroyed again when collapsed, so a long session's DOM stays dominated by
+one-line headers instead of hundreds of `RichLog`s full of tool output.
 """
 
 from __future__ import annotations
@@ -61,28 +65,35 @@ class ToolCard(Vertical):
         self._elapsed: float | None = None
         self._has_body = False
         self._body_content: list[tuple[str, str | None]] | None = None
+        self._body: RichLog | None = None
         self.add_class("running")
 
     def compose(self) -> ComposeResult:
         yield Static(self._header_text(), classes="tool-header", markup=False)
-        body = RichLog(classes="tool-body", wrap=True, max_lines=1000)
-        body.display = False
-        yield body
+        # The output body is NOT composed here: it is created lazily on the
+        # first expansion (see _ensure_body) and destroyed on collapse, so
+        # collapsed cards cost one line each in the DOM.
 
     def on_mount(self) -> None:
         # State transitions may have happened before composition finished
         # (events can arrive in the same loop turn as the card creation).
         self._refresh_header()
-        if self._body_content is not None:
-            self._write_body(self._body_content)
+
+    def on_unmount(self) -> None:
+        # The lazily-created body is a dynamic child: it does not survive a
+        # prune/re-mount (compose only yields the header). Drop the dead
+        # RichLog reference so the restored card expands cleanly on the
+        # first click instead of collapsing a stale body.
+        self._body = None
 
     @property
     def header(self) -> Static:
         return self.query_one(".tool-header", Static)
 
     @property
-    def body(self) -> RichLog:
-        return self.query_one(".tool-body", RichLog)
+    def body(self) -> RichLog | None:
+        """The lazily-created output body, or None while collapsed."""
+        return self._body
 
     # -- state transitions -------------------------------------------------
 
@@ -105,8 +116,13 @@ class ToolCard(Vertical):
     # -- expansion ----------------------------------------------------------
 
     def toggle(self) -> None:
-        if self._has_body:
-            self.body.display = not self.body.display
+        """Expand to show the output body, or collapse and destroy it."""
+        if not self._has_body:
+            return
+        if self._body is None or not self._body.display:
+            self._ensure_body()
+        else:
+            self._drop_body()
 
     def on_click(self) -> None:
         self.toggle()
@@ -134,10 +150,10 @@ class ToolCard(Vertical):
             return
         self._has_body = True
         self._body_content = parts
-        try:
-            self._write_body(parts)
-        except NoMatches:
-            pass  # Not composed yet; on_mount writes the body.
+        # Do not render yet: the body is materialized on first expansion.
+        # An already-expanded card picks the new content up immediately.
+        if self._body is not None and self._body.display:
+            self._write_body(self._body_content)
 
     def _body_parts(
         self, content: str, lexer: str | None
@@ -157,7 +173,27 @@ class ToolCard(Vertical):
             parts.append((content, lexer))
         return parts
 
+    def _ensure_body(self) -> None:
+        """Create and mount the output body (once per expansion)."""
+        if self._body is None:
+            body = RichLog(classes="tool-body", wrap=True, max_lines=1000)
+            self.mount(body)
+            self._body = body
+            if self._body_content:
+                self._write_body(self._body_content)
+        self._body.display = True
+
+    def _drop_body(self) -> None:
+        """Destroy the output body: collapsed cards are one line in the DOM."""
+        if self._body is not None:
+            self._body.remove()
+            self._body = None
+
     def _write_body(self, parts: list[tuple[str, str | None]]) -> None:
+        assert self._body is not None  # only called after _ensure_body
+        # A second set_success/set_error on an expanded card must not
+        # duplicate earlier content in the append-only RichLog.
+        self._body.clear()
         for content, lexer in parts:
             renderable: Any = Text(content)
             if lexer:
@@ -167,7 +203,7 @@ class ToolCard(Vertical):
                     renderable = Syntax(content, lexer, theme=self._syntax_theme())
                 except Exception:  # noqa: BLE001 - fall back to plain text
                     renderable = Text(content)
-            self.body.write(renderable)
+            self._body.write(renderable)
 
     def _syntax_theme(self) -> Any:
         """Match the syntax-highlighting palette to the active UI theme.

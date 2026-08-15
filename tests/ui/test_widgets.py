@@ -1,8 +1,22 @@
+import asyncio
+
 import pytest
 from textual.app import App
+from textual.widgets import Static
 
-from limbo.ui.widgets.chat import ChatWidget
+from limbo.ui.widgets.chat import ChatWidget, QueuedMessage, ThinkingBlock
 from limbo.ui.widgets.input import InputWidget, UserSubmitted
+
+
+async def wait_until(pilot, predicate, attempts: int = 200) -> None:
+    """Pause until predicate holds (timeout-safe), avoiding pause-count
+    flakiness under suite load."""
+    for _ in range(attempts):
+        if predicate():
+            return
+        await pilot.pause()
+    raise AssertionError("condition not reached within timeout")
+
 
 
 @pytest.mark.asyncio
@@ -93,7 +107,7 @@ async def test_chat_append_streams_into_one_block():
         widget = pilot.app.query_one(ChatWidget)
         await widget.append_assistant_text("[bold]chunk1[/bold]")
         await widget.append_assistant_text("[italic]chunk2[/italic]")
-        await pilot.pause()
+        await widget.flush_stream()  # render the batched buffer immediately
 
         # Both chunks accumulate in a single assistant block.
         assert len(widget.messages) == 1
@@ -149,15 +163,16 @@ async def test_tool_card_toggle_requires_body():
         card = widget.add_tool_card("c1", "ls", {})
         await pilot.pause()
 
-        # No output yet: toggling is a no-op and body stays hidden.
+        # No output yet: toggling is a no-op and no body exists.
         card.toggle()
-        assert card.body.display is False
+        assert card.body is None
 
         card.set_success("file1\nfile2")
         card.toggle()
-        assert card.body.display is True
+        assert card.body is not None and card.body.display is True
         card.toggle()
-        assert card.body.display is False
+        # Collapsing destroys the lazy body: the card is one line again.
+        assert card.body is None
 
 
 @pytest.mark.asyncio
@@ -187,7 +202,7 @@ async def test_chat_streaming_burst_does_not_duplicate_blocks():
         chunks = [text[i : i + 4] for i in range(0, len(text), 4)]
         for chunk in chunks:
             await widget.append_assistant_text(chunk)
-        await pilot.pause()
+        await widget.flush_stream()  # render the batched buffer immediately
 
         md = widget.messages[-1]
         rendered = "\n".join(
@@ -222,7 +237,7 @@ async def test_tool_card_run_code_shows_description_and_source():
 
         card.set_success("ok: file content")
         card.toggle()
-        assert card.body.display is True
+        assert card.body is not None and card.body.display is True
         # Expanding shows the source first, then the result. (The body is a
         # hidden RichLog: in tests it stays size-unknown so writes land in
         # _deferred_renders and lines stays empty — assert on the sections
@@ -231,3 +246,375 @@ async def test_tool_card_run_code_shows_description_and_source():
         assert sections is not None
         assert sections[0] == (code, "python")
         assert sections[1] == ("ok: file content", None)
+
+@pytest.mark.asyncio
+async def test_thinking_collapsed_by_default_and_expandable():
+    class TestApp(App[None]):
+        def compose(self):
+            yield ChatWidget(id="chat")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(ChatWidget)
+        await widget.append_thinking_text("step one ")
+        await widget.append_thinking_text("step two")
+        await pilot.pause()
+
+        block = widget.messages[-1]
+        from limbo.ui.widgets.chat import ThinkingBlock
+        assert isinstance(block, ThinkingBlock)
+        # Collapsed by default: title line only, body hidden, no content
+        # preview in the summary.
+        assert block.collapsed
+        assert block._body.display is False
+        summary = str(block._summary.render())
+        assert "thinking" in summary and "字" in summary
+        assert "step one" not in summary
+
+        # Expand shows the full accumulated text.
+        block.toggle()
+        await pilot.pause()
+        assert block._body.display is True
+        assert "step one step two" in str(block._body.render())
+        block.toggle()
+        assert block.collapsed
+
+
+@pytest.mark.asyncio
+async def test_thinking_expand_scrolls_body_into_view():
+    """Expanding a thinking block near the viewport bottom must scroll the
+    body into view — a long reasoning stream is dozens of lines tall once
+    expanded, and without the scroll the click looks like a no-op."""
+    class TestApp(App[None]):
+        def compose(self):
+            yield ChatWidget(id="chat")
+
+    app = TestApp()
+    async with app.run_test(size=(80, 10)) as pilot:
+        widget = pilot.app.query_one(ChatWidget)
+        # Long reasoning text: well past one viewport.
+        text = "思考中" * 400
+        for i in range(0, len(text), 64):
+            await widget.append_thinking_text(text[i : i + 64])
+        await widget.append_assistant_text("结论")
+        await widget.flush_stream()
+        await pilot.pause()
+
+        block = widget.messages[-2]
+        assert isinstance(block, ThinkingBlock)
+        assert block.collapsed
+        # The chat scrolled to the tail; the collapsed block's summary may
+        # sit above the fold. Expand and let the deferred scroll run.
+        block.toggle()
+        await pilot.pause()
+        assert not block.collapsed
+        assert block._body.display is True
+        # After the layout picks up the expansion, the body top is inside
+        # the chat viewport (the deferred scroll_visible ran).
+        assert block._body.region.y >= 0
+        assert block._body.region.y < widget.region.height
+
+
+@pytest.mark.asyncio
+async def test_chat_prunes_old_messages_and_pages_back():
+    class TestApp(App[None]):
+        def compose(self):
+            yield ChatWidget(id="chat")
+
+    from limbo.ui.widgets.chat import _MAX_DOM_MESSAGES, _PAGE_SIZE
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(ChatWidget)
+        for i in range(_MAX_DOM_MESSAGES + 60):
+            widget.add_info(f"msg {i}")
+        await pilot.pause()
+
+        # DOM is bounded; the overflow is tracked for paging.
+        mounted = [c for c in widget.children if c.id not in ("back-to-bottom", "load-more")]
+        assert len(mounted) <= _MAX_DOM_MESSAGES + 2
+        assert widget._pruned_count == 60
+
+        # The load-more pill is shown while older messages exist.
+        pill = widget.query_one("#load-more")
+        assert pill.display is True
+        assert "加载更早" in str(pill.render())
+
+        # Loading a page restores the oldest 50 (msg 10..59) and re-anchors.
+        widget._load_more()
+        await pilot.pause()
+        assert widget._pruned_count == 60 - _PAGE_SIZE
+        assert any(
+            isinstance(c, Static) and str(c.render()) == "msg 10" for c in widget.children
+        )
+        assert not any(
+            isinstance(c, Static) and str(c.render()) == "msg 0" for c in widget.children
+        )
+        # A second page brings the rest (msg 0..9) back too.
+        widget._load_more()
+        await pilot.pause()
+        assert widget._pruned_count == 0
+        assert any(
+            isinstance(c, Static) and str(c.render()) == "msg 0" for c in widget.children
+        )
+
+        # The transcript always keeps the full history.
+        assert "msg 0" in widget.transcript_text()
+        assert f"msg {_MAX_DOM_MESSAGES + 59}" in widget.transcript_text()
+
+
+@pytest.mark.asyncio
+async def test_prune_holds_viewport_steady_when_scrolled_up():
+    """Regression (S1): pruning above the viewport must compensate the
+    scroll offset so the visible messages do not jump."""
+    class TestApp(App[None]):
+        def compose(self):
+            yield ChatWidget(id="chat")
+
+    from limbo.ui.widgets.chat import _MAX_DOM_MESSAGES
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(ChatWidget)
+        # Build enough messages to force a prune, and scroll up first so
+        # the prune happens away from the tail.
+        for i in range(_MAX_DOM_MESSAGES + 40):
+            widget.add_info(f"msg {i}")
+        await pilot.pause()
+        assert widget._pruned_count > 0
+
+        widget.scroll_y = 50  # not following the tail
+        widget._follow = False
+        await pilot.pause()
+        before = widget.scroll_y
+
+        # A new message triggers another prune while scrolled up.
+        widget.add_info("new tail message")
+        await pilot.pause()
+        await pilot.pause()
+
+        # The viewport did not jump (compensated by the removed height).
+        assert abs(widget.scroll_y - before) <= 2.0
+
+
+@pytest.mark.asyncio
+async def test_prune_holds_viewport_content_steady_while_scrolled():
+    """Regression (reviewer round 2): pruning while reading history must
+    keep the visible messages unchanged (scroll offset changes because
+    removed height above the viewport, but the content does not)."""
+    class TestApp(App[None]):
+        def compose(self):
+            yield ChatWidget(id="chat")
+
+    from limbo.ui.widgets.chat import _MAX_DOM_MESSAGES
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(ChatWidget)
+        for i in range(_MAX_DOM_MESSAGES + 30):
+            widget.add_info(f"msg {i}")
+        await pilot.pause()
+
+        widget.scroll_y = 40
+        widget._follow = False
+        await pilot.pause()
+        visible = [
+            m for m in widget.messages
+            if getattr(m, "region", None) and m.region.overlaps(widget.region)
+        ]
+        top_before = str(visible[0].render()) if visible else "?"
+
+        # A burst of new messages triggers multiple prunes while scrolled.
+        for i in range(_MAX_DOM_MESSAGES):
+            widget.add_info(f"tail {i}")
+        await pilot.pause()
+        await pilot.pause()
+
+        visible = [
+            m for m in widget.messages
+            if getattr(m, "region", None) and m.region.overlaps(widget.region)
+        ]
+        top_after = str(visible[0].render()) if visible else "?"
+        assert top_before == top_after
+
+
+@pytest.mark.asyncio
+async def test_prune_resumes_bounding_after_scroll_back_to_bottom():
+    """While reading history the DOM may exceed the bound (visible content
+    is protected); returning to the tail must prune back down."""
+    class TestApp(App[None]):
+        def compose(self):
+            yield ChatWidget(id="chat")
+
+    from limbo.ui.widgets.chat import _MAX_DOM_MESSAGES
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(ChatWidget)
+        for i in range(_MAX_DOM_MESSAGES + 30):
+            widget.add_info(f"msg {i}")
+        await pilot.pause()
+        widget.scroll_y = 40
+        widget._follow = False
+        await pilot.pause()
+        for i in range(_MAX_DOM_MESSAGES):
+            widget.add_info(f"tail {i}")
+        await pilot.pause()
+        await pilot.pause()
+
+        widget.scroll_end(animate=False)
+        widget._follow = True
+        await pilot.pause()
+        for i in range(5):
+            widget.add_info(f"more {i}")
+        await pilot.pause()
+        await pilot.pause()
+        mounted = [
+            c for c in widget.children
+            if c.id not in ("back-to-bottom", "load-more")
+        ]
+        assert len(mounted) <= _MAX_DOM_MESSAGES + 2
+
+
+@pytest.mark.asyncio
+async def test_deferred_autoscroll_does_not_override_scroll_up():
+    """Regression: scroll_end defers the actual scroll until after the next
+    refresh; a stale deferred scroll-to-end fired even after the user
+    scrolled up in between, yanking the view back to the bottom."""
+    class TestApp(App[None]):
+        def compose(self):
+            yield ChatWidget(id="chat")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(ChatWidget)
+        for i in range(50):
+            widget.add_user_message(f"msg {i}")
+        await pilot.pause()  # settle: layout done, view at bottom, following
+        # A new message queues a deferred scroll-to-end while following...
+        widget.add_user_message("new")
+        # ...and the user scrolls up before the refresh executes it.
+        widget.scroll_y = 0
+        await pilot.pause()
+        await pilot.pause()
+        assert widget.scroll_y == 0
+        assert not widget._follow
+
+
+@pytest.mark.asyncio
+async def test_prune_compensates_margins_under_real_css():
+    """Regression (reviewer round 3, S1): messages carry margin-top in the
+    real stylesheet; removed_height must include margins or the viewport
+    drifts one line per pruned message (invisible in tests without CSS)."""
+    class TestApp(App[None]):
+        CSS = ".user-message { margin-top: 1; }"
+
+        def compose(self):
+            yield ChatWidget(id="chat")
+
+    from limbo.ui.widgets.chat import _MAX_DOM_MESSAGES
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(ChatWidget)
+        for i in range(_MAX_DOM_MESSAGES + 30):
+            widget.add_user_message(f"msg {i}")
+        await pilot.pause()
+        widget.scroll_y = 40
+        widget._follow = False
+        await pilot.pause()
+
+        visible = [
+            m for m in widget.messages
+            if getattr(m, "region", None) and m.region.overlaps(widget.region)
+        ]
+        top_id = str(visible[0].render()) if visible else None
+        top_screen = visible[0].region.y if visible else None
+
+        for i in range(60):
+            widget.add_user_message(f"tail {i}")
+
+        # Wait until the burst's prune retries have settled (pause counts
+        # are timing-sensitive under full-suite load). While scrolled up the
+        # viewport guard intentionally lets the DOM exceed the bound, so we
+        # wait on the retry flag, not the DOM count.
+        await wait_until(pilot, lambda: widget._prune_scheduled is False)
+        await pilot.pause()
+
+        visible = [
+            m for m in widget.messages
+            if getattr(m, "region", None) and m.region.overlaps(widget.region)
+        ]
+        top_id2 = str(visible[0].render()) if visible else None
+        top_screen2 = visible[0].region.y if visible else None
+        # The same message stays at the top of the viewport.
+        assert top_id == top_id2
+        assert abs((top_screen2 or 0) - (top_screen or 0)) <= 1
+
+
+@pytest.mark.asyncio
+async def test_prune_retry_flag_resets_on_clear():
+    """Regression (reviewer round 3, S2): a stuck _prune_scheduled flag
+    silently disables retries and lets the DOM exceed the bound forever."""
+    class TestApp(App[None]):
+        def compose(self):
+            yield ChatWidget(id="chat")
+
+    from limbo.ui.widgets.chat import _MAX_DOM_MESSAGES
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(ChatWidget)
+        for i in range(_MAX_DOM_MESSAGES + 60):
+            widget.add_info(f"msg {i}")
+        assert widget._prune_scheduled is True  # retry queued
+        await pilot.pause()
+        await pilot.pause()
+        assert widget._pruned_count > 0
+
+        # clear() must reset the flag, or a fresh session never retries.
+        widget.clear()
+        assert widget._prune_scheduled is False
+
+        for i in range(_MAX_DOM_MESSAGES + 60):
+            widget.add_info(f"new {i}")
+        assert widget._prune_scheduled is True
+        await wait_until(
+            pilot,
+            lambda: len(
+                [c for c in widget.children if c.id not in ("back-to-bottom", "load-more")]
+            )
+            <= _MAX_DOM_MESSAGES + 2
+            and widget._prune_scheduled is False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_thinking_mount_race_with_steer_message():
+    """Regression: a queued steer message during the thinking block's first
+    mount must not crash append_thinking_text (its _close_thinking nulls
+    _current_thinking while the mount await is in flight)."""
+    class TestApp(App[None]):
+        def compose(self):
+            yield ChatWidget(id="chat")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(ChatWidget)
+        await pilot.pause()
+
+        # Start a thinking append; interleave a queued message so it lands
+        # while the thinking block's mount is still in flight.
+        task = asyncio.create_task(widget.append_thinking_text("思考中"))
+        await asyncio.sleep(0)
+        widget.add_queued_message("q1", "用户插话")
+        await task  # must not raise (regression: AttributeError on None)
+        await pilot.pause()
+
+        # The queued message closed the in-flight thinking block; the chunk
+        # is dropped, but nothing crashed and the queue card is present.
+        assert any(isinstance(m, ThinkingBlock) for m in widget.messages)
+        assert any(
+            isinstance(m, QueuedMessage) and m.item_id == "q1"
+            for m in widget.messages
+        )

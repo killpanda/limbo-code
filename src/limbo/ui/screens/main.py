@@ -694,8 +694,9 @@ class MainScreen(Screen[None]):
     def _render_history(self) -> None:
         """Render the agent's restored history into the chat flow.
 
-        User/assistant text is rendered as-is; raw tool outputs are summarized
-        (tool cards are not rebuilt for history).
+        User/assistant text is rendered as-is; reasoning is restored as a
+        collapsed thinking block; raw tool outputs are summarized (tool cards
+        are not rebuilt for history).
         """
         chat = self.query_one("#chat", ChatWidget)
         skipped_tools = 0
@@ -704,8 +705,11 @@ class MainScreen(Screen[None]):
                 chat.add_info("（此前对话已压缩为摘要）")
             elif msg.role == "user" and msg.content:
                 chat.add_user_message(msg.content, msg.attachments)
-            elif msg.role == "assistant" and msg.content:
-                chat.add_assistant_message(msg.content)
+            elif msg.role == "assistant":
+                if msg.reasoning:
+                    chat.add_thinking_message(msg.reasoning)
+                if msg.content:
+                    chat.add_assistant_message(msg.content)
             elif msg.role == "tool":
                 skipped_tools += 1
         if skipped_tools:
@@ -722,17 +726,35 @@ class MainScreen(Screen[None]):
             out = (
                 Path.home() / ".limbo" / "exports" / f"{self.agent.session_id}.jsonl"
             )
-        try:
+        # flush + export run off the event loop: flush() is a queue.join()
+        # barrier that can block for the whole writer backlog on a long
+        # session, and export_jsonl re-reads the whole trace — neither
+        # should freeze the UI.
+        self.run_worker(self._export_worker(chat, out), name="export-session")
+
+    async def _export_worker(self, chat: ChatWidget, out: Path) -> None:
+        """Perform the export off the event loop, then report."""
+        def _sync() -> None:
+            # The export reads the trace file; flush the background
+            # writer first so every record lands in the export.
+            self.agent.trace.flush()
             if out.suffix == ".md":
-                export_markdown(meta, self.agent.messages, out)
+                export_markdown(self.agent.session_meta, self.agent.messages, out)
             else:
                 export_jsonl(
-                    meta, self.agent.messages, out, trace_path=self.agent.trace.path
+                    self.agent.session_meta,
+                    self.agent.messages,
+                    out,
+                    trace_path=self.agent.trace.path,
                 )
+
+        try:
+            await asyncio.to_thread(_sync)
         except OSError as e:
             chat.add_error(f"导出失败：{e}")
-            return
-        chat.add_info(f"已导出到 {out}")
+        else:
+            chat.add_info(f"已导出到 {out}")
+
 
     def action_toggle_tools(self) -> None:
         self.query_one("#chat", ChatWidget).toggle_tool_bodies()
@@ -983,6 +1005,11 @@ class MainScreen(Screen[None]):
             # swallowing it the way the old finally-drain did.
             self.query_one("#chat", ChatWidget).add_error(f"内部错误：{e}")
         finally:
+            # Flush any buffered streamed text (assistant/thinking) so the
+            # final chunks are rendered even if the last flush tick had not
+            # fired yet — otherwise the transcript/display loses the tail.
+            chat = self.query_one("#chat", ChatWidget)
+            await chat.flush_stream()
             self._update_queue_status()
             # Disabling the input mid-turn moves focus away; give it back so
             # the user can keep typing without clicking.

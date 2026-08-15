@@ -217,3 +217,78 @@ async def test_resume_on_startup_renders_history(tmp_path):
         transcript = chat.transcript_text()
         assert "old conversation" in transcript
         assert "已恢复" in transcript
+
+
+@pytest.mark.asyncio
+async def test_resume_renders_reasoning_as_collapsed_thinking(tmp_path):
+    """Regression: resumed history dropped msg.reasoning entirely — no
+    thinking content was shown at all after a resume. It must come back as
+    a collapsed ThinkingBlock, ahead of the assistant text it belongs to
+    (including reasoning-only turns that have no assistant content)."""
+    from limbo.ui.widgets.chat import ThinkingBlock
+
+    path = tmp_path / "sessions" / "think1.jsonl"
+    save_session(
+        path,
+        SessionMeta(id="think1", workdir=str(tmp_path.resolve()), title="t"),
+        [
+            Message(role="system", content="sys"),
+            Message(role="user", content="q1"),
+            Message(
+                role="assistant", content="a1", reasoning="pondering q1 deeply"
+            ),
+            Message(role="user", content="q2"),
+            # Reasoning-only turn (tool call followed, content is empty).
+            Message(role="assistant", content="", reasoning="silent planning"),
+        ],
+    )
+    app = make_app(tmp_path, resume=path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        chat = pilot.app.screen.query_one("#chat", ChatWidget)
+
+        blocks = [m for m in chat.messages if isinstance(m, ThinkingBlock)]
+        assert [b.content for b in blocks] == [
+            "pondering q1 deeply",
+            "silent planning",
+        ]
+        assert all(b.collapsed for b in blocks)
+        # The block sits in the flow before its assistant message.
+        kinds = [type(m).__name__ for m in chat.messages]
+        think_idx = kinds.index("ThinkingBlock")
+        md_idx = kinds.index("Markdown")
+        assert think_idx < md_idx
+        # Collapsed: only the one-line summary is laid out.
+        assert blocks[0].region.height == 1
+
+
+@pytest.mark.asyncio
+async def test_thinking_block_does_not_eat_free_viewport_space(tmp_path):
+    """Regression: ThinkingBlock (a Vertical) inherited height: 1fr, so with
+    less than a viewport of content (fresh session / just after resume) it
+    swallowed all free rows — a huge blank gap after the summary line."""
+    from limbo.models import TextChunk, ThinkingChunk
+    from limbo.ui.widgets.chat import ThinkingBlock
+
+    fake_llm = FakeLLMClient(
+        [[ThinkingChunk(text="嗯，让我想想"), TextChunk(text="答案")]]
+    )
+    # No banner: the conversation must stay well under one viewport so the
+    # thinking block has free space to (wrongly) expand into.
+    cfg = Config()
+    cfg.llm.api_key = "test"
+    cfg.ui.show_banner = False
+    app = LimboApp(
+        workdir=tmp_path,
+        config=cfg,
+        llm_client=fake_llm,
+        session_dir=tmp_path / "sessions",
+    )
+    async with app.run_test(size=(80, 24)) as pilot:
+        await pilot.pause()
+        await submit_and_wait(pilot, "hi", "答案")
+        chat = pilot.app.screen.query_one("#chat", ChatWidget)
+        block = next(m for m in chat.messages if isinstance(m, ThinkingBlock))
+        # Collapsed block = summary line only, however much free space remains.
+        assert block.region.height == 1
+        assert block.collapsed

@@ -47,6 +47,8 @@ class SessionPicker(Screen[Path | None]):
     @staticmethod
     def _format(meta: SessionMeta) -> str:
         title = meta.title or "(无标题)"
+        # list_sessions surfaces the file mtime as updated_at, so this shows
+        # when the session was last written even under incremental saves.
         updated = meta.updated_at[:16].replace("T", " ")
         return f"{title}  ·  {updated}  ·  {meta.id}"
 

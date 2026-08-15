@@ -104,7 +104,14 @@ def save_session(
     messages: list[Message],
     compactions: Sequence[CompactionRecord] = (),
 ) -> None:
-    """Atomically write the whole session (meta + compactions + messages)."""
+    """Atomically (re)write the whole session: meta + compactions + messages.
+
+    The full rewrite is the heavyweight path — used on session creation and
+    whenever the on-disk history changes shape (compaction) or the meta
+    line must be refreshed (title/code_mode). Steady-state persistence goes
+    through :func:`append_session_messages`, which only appends new
+    messages, so long sessions do not rewrite megabytes per turn.
+    """
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     meta.updated_at = _utc_now_iso()
     meta_line = json.dumps(
@@ -128,6 +135,29 @@ def save_session(
     os.replace(tmp_file, path)
     if not file_existed:
         path.chmod(0o600)
+
+
+def append_session_messages(path: Path, messages: list[Message]) -> None:
+    """Append new messages to an existing session file (incremental save).
+
+    The cheap steady-state write: the meta line and all previously saved
+    messages stay untouched, only ``messages`` are appended. Requires the
+    file to already exist with a meta first line (created by
+    :func:`save_session`) — a missing file raises instead of silently
+    creating a meta-less session, so the full-rewrite-then-append contract
+    stays explicit. Permissions are preserved (no re-chmod). A crash
+    during the append can leave a torn last line (skipped on load) and
+    loses at most the in-flight increment — narrower than the atomic
+    rewrite, which is why callers fall back to a full rewrite after a
+    failed append.
+    """
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Cannot append to missing session file: {path}"
+        )
+    with path.open("a", encoding="utf-8") as f:
+        for msg in messages:
+            f.write(msg.model_dump_json() + "\n")
 
 
 def _parse_meta(raw: dict[str, Any], fallback_id: str, path: Path) -> SessionMeta:
@@ -192,6 +222,12 @@ def load_session(
             try:
                 record = json.loads(line)
             except json.JSONDecodeError:
+                # Torn tail from a crashed incremental append: skip, but say
+                # so — a silently dropped message is hard to diagnose.
+                warnings.warn(
+                    f"Skipping malformed line in session {path}: {line[:60]!r}",
+                    stacklevel=2,
+                )
                 continue
             if record.get("type") == META_TYPE:
                 meta = _parse_meta(record, path.stem, path)
@@ -255,6 +291,22 @@ def list_sessions(
         if wanted is not None and meta.workdir != wanted:
             continue
         sessions.append(meta)
+    # Surface the file mtime as updated_at: incremental saves append to the
+    # file without rewriting the meta line, so the meta record's own
+    # updated_at goes stale (it still carries the creation / last-full-
+    # rewrite time), while the file's mtime is exactly "when this session
+    # was last written". Callers (picker, sorting) see fresh values without
+    # knowing the incremental-save detail.
+    for meta in sessions:
+        meta_path = meta.path
+        if meta_path is None:
+            continue
+        try:
+            meta.updated_at = datetime.fromtimestamp(
+                meta_path.stat().st_mtime, tz=timezone.utc
+            ).isoformat(timespec="seconds")
+        except OSError:
+            pass  # keep the stale meta value; the file vanished mid-list
     sessions.sort(key=lambda m: m.updated_at, reverse=True)
     return sessions
 
