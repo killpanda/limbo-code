@@ -1,6 +1,6 @@
 # Limbo — Agent Guide
 
-**Limbo** is a minimal terminal AI coding agent (Python 3.11+, Textual). Users converse with an LLM in a TUI to explore, read, edit, and write code via 7 tools.
+**Limbo** is a minimal terminal AI coding agent (Python 3.11+, Textual). Users converse with an LLM in a TUI to explore, read, edit, and write code via 7 tools. A `--headless` flag runs a plain-terminal REPL frontend instead of the TUI (Herdr/script control, RFC LIM-60).
 
 **Tools execute immediately — no confirmation flow, no safety fences.** File tools are not scoped to the workdir (absolute paths and symlinks are honored as-is), there is no sensitive-file skip list, and `bash` runs every command as given (no dangerous-command filter).
 
@@ -34,6 +34,9 @@ src/limbo/
 ├── goal.py           # /goal closed-loop state machine, prompt templates, verify executor (LIM-40)
 ├── pump.py           # Turn pump (frontend-agnostic, non-UI): single-flight busy flag,
 │                     # steer follow-up drain, /compact mini-turn, goal closed loop
+├── headless.py       # --headless frontend (RFC LIM-60): line-oriented REPL on the
+│                     # primary screen for Herdr (agent prompt/send-keys/read/wait);
+│                     # same TurnPump seam as the TUI, no textual import
 ├── sessions.py       # Session JSONL save/load/list/export
 ├── trace.py          # Append-only JSONL run log (sessions/traces/)
 ├── integrations/     # External mux/orchestrator lifecycle reporters: base.py (protocol

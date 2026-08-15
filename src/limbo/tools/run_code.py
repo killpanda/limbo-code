@@ -29,11 +29,11 @@ Execution model:
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import contextlib
 import io
 import json
-import textwrap
 import threading
 import traceback
 from pathlib import Path
@@ -67,6 +67,32 @@ class ToolCallError(Exception):
 
 class _ProgramFailed(Exception):
     """Internal: the program raised; its message is the model-facing error."""
+
+
+def _graft_into_async_def(code: str) -> ast.Module:
+    """Parse a program body and graft its statements into an async def.
+
+    Structural alternative to wrapping the source textually (``async def``
+    + ``textwrap.indent``), which also indented lines *inside* multi-line
+    string literals and silently corrupted file-writing programs — the
+    main thing Code Mode exists for. Top-level ``await``/``return`` parse
+    fine at module level (the "outside function" rejection is a symtable
+    check that runs at compile time, i.e. after the graft, when they ARE
+    inside the async def). Statements keep their original line numbers,
+    so tracebacks match the program's own numbering.
+    """
+    body = ast.parse(code).body
+    func = ast.AsyncFunctionDef(
+        name="_limbo_run_code",
+        args=ast.arguments(
+            posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]
+        ),
+        body=body or [ast.Pass()],
+        decorator_list=[],
+    )
+    module = ast.Module(body=[func], type_ignores=[])
+    ast.fix_missing_locations(module)
+    return module
 
 
 def _render_value(value: Any) -> str:
@@ -148,7 +174,11 @@ class _ToolsProxy:
 class RunCodeTool(BaseTool):
     name = "run_code"
     description = (
-        "Execute a Python program against the available tools. Takes two "
+        "Execute a Python program that orchestrates the available tools: "
+        "batch every `tools.*` call a task step needs into ONE program "
+        "(loops, conditionals, error handling, `asyncio.gather` for "
+        "independent reads) instead of one tool call per program — that "
+        "is what saves LLM round trips. Takes two "
         "required arguments: `code`, the BODY of an async Python function "
         "(top-level `await` and `return` work), and `description`, a short "
         "summary of what the program does. Call tools as "
@@ -283,9 +313,9 @@ class RunCodeTool(BaseTool):
             "ToolCallError": ToolCallError,
             "__name__": "__limbo_run_code__",
         }
-        # The `code` argument is a function BODY: indent it under an async
-        # def so top-level `await` and `return` are legal Python.
-        wrapped = f"async def _limbo_run_code():\n{textwrap.indent(code, '    ')}"
+        # The `code` argument is a function BODY: graft its statements into
+        # an async def so top-level `await` and `return` are legal Python.
+        wrapped = _graft_into_async_def(code)
         stdout = io.StringIO()
         stderr = io.StringIO()
         try:

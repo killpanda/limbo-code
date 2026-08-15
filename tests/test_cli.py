@@ -165,6 +165,23 @@ def test_cli_resume_ambiguous_id_lists_candidates(
     assert "abc1" in err and "abc2" in err
 
 
+def test_cli_missing_api_key_prints_shared_message(monkeypatch, capsys):
+    """The startup missing-key error lists every source and names the
+    effective provider — the exact user story (key in [providers.*] that
+    never resolves) must be diagnosable from stderr."""
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setattr(app_module, "load_config", lambda: Config())
+    monkeypatch.setattr(ui_app_module, "LimboApp", MagicMock())
+    monkeypatch.setattr(sys, "argv", ["limbo"])
+
+    assert main() == 1
+    err = capsys.readouterr().err
+    assert "No API key for provider 'deepseek'" in err
+    assert "[providers.deepseek]" in err
+    assert "[llm]" in err
+    assert "$DEEPSEEK_API_KEY" in err
+
+
 def test_cli_model_flag_overrides_config(fake_config, monkeypatch):
     mock_app_class = MagicMock()
     monkeypatch.setattr(ui_app_module, "LimboApp", mock_app_class)
@@ -242,3 +259,38 @@ def test_kitty_keyboard_config_defaults_to_auto(tmp_path):
     (home / ".limbo").mkdir(parents=True)
     assert _probe_kitty_env(home, herdr=True) == "1"
     assert _probe_kitty_env(home, herdr=False) == ""
+
+# --- headless mode ------------------------------------------------------------
+
+
+def test_cli_headless_routes_to_run_headless(fake_config, monkeypatch):
+    import limbo.headless as headless_module
+
+    mock_run = MagicMock(return_value=0)
+    monkeypatch.setattr(headless_module, "run_headless", mock_run)
+    monkeypatch.setattr(
+        sys, "argv", ["limbo", "--headless", "--workdir", "/tmp/project"]
+    )
+
+    assert main() == 0
+
+    mock_run.assert_called_once()
+    kwargs = mock_run.call_args.kwargs
+    assert kwargs["workdir"] == Path("/tmp/project")
+    assert kwargs["session_dir"] is None
+    assert kwargs["resume"] is None
+
+
+def test_cli_default_route_is_the_tui(fake_config, monkeypatch):
+    import limbo.headless as headless_module
+
+    mock_run = MagicMock(return_value=0)
+    monkeypatch.setattr(headless_module, "run_headless", mock_run)
+    mock_app_class = MagicMock()
+    monkeypatch.setattr(ui_app_module, "LimboApp", mock_app_class)
+    monkeypatch.setattr(sys, "argv", ["limbo"])
+
+    assert main() == 0
+
+    mock_run.assert_not_called()
+    mock_app_class.assert_called_once()

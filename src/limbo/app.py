@@ -8,7 +8,11 @@ import sys
 from pathlib import Path
 
 from limbo.config import load_config
-from limbo.llm.catalog import resolve_api_key, resolve_api_key_env, resolve_model
+from limbo.llm.catalog import (
+    missing_api_key_message,
+    resolve_api_key,
+    resolve_model,
+)
 from limbo.sessions import (
     AmbiguousSessionError,
     SessionNotFoundError,
@@ -66,6 +70,13 @@ def main() -> int:
         default=None,
         help="Override the configured model for this run (e.g. glm-4.7)",
     )
+    parser.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run the plain-terminal headless frontend instead of the TUI "
+        "(line-oriented REPL for Herdr/script control; see "
+        "design/rfc-headless-cli.md)",
+    )
     args = parser.parse_args()
 
     config = load_config()
@@ -74,13 +85,7 @@ def main() -> int:
         config.llm.model = args.model
     spec = resolve_model(config.llm.model)
     if not resolve_api_key(spec, config):
-        env = resolve_api_key_env(spec, config)
-        env_hint = f" or ${env}" if env else ""
-        print(
-            "Error: No API key configured. Set it in ~/.limbo/config.toml\n"
-            f"  [llm]\n  api_key = 'your-key'{env_hint}",
-            file=sys.stderr,
-        )
+        print("Error: " + missing_api_key_message(spec, config), file=sys.stderr)
         return 1
 
     session_dir = args.session_dir or DEFAULT_SESSION_DIR
@@ -111,6 +116,18 @@ def main() -> int:
         meta, _, _ = load_session(resume)
         if meta.workdir and Path(meta.workdir).is_dir():
             workdir = Path(meta.workdir)
+
+    if args.headless:
+        from limbo.headless import (
+            run_headless,  # noqa: PLC0415 - deferred: keeps the TUI path's import cost off headless startup
+        )
+
+        return run_headless(
+            workdir=workdir,
+            config=config,
+            session_dir=args.session_dir,
+            resume=resume,
+        )
 
     from limbo.ui.app import LimboApp  # noqa: I001, PLC0415 - deferred so the kitty keyboard workaround runs first
 

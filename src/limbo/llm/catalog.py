@@ -401,6 +401,51 @@ def resolve_api_key_env(spec: ModelSpec, config: Config) -> str | None:
     return spec.provider.api_key_env
 
 
+def known_provider_ids() -> set[str]:
+    """Every provider id a model can resolve to: catalog providers plus the
+    generic fallback (``custom``) used by unknown models.
+
+    A ``[providers.<id>]`` section whose id is not in this set can never be
+    reached by any model — dead config, almost always a typo.
+    """
+    return {spec.provider.id for spec in CATALOG.values()} | {GENERIC_OPENAI.id}
+
+
+def missing_api_key_message(spec: ModelSpec, config: Config) -> str:
+    """Explain where the API key for a model's provider can be set.
+
+    The missing-key error is the moment users discover the resolution rules,
+    so the message lists every valid source and — when the config has
+    ``[providers.*]`` sections that do *not* match the effective provider id
+    (e.g. a ``[provider.<id>]`` typo, or an unknown model that resolves to
+    ``custom``) — calls the mismatch out instead of hiding it.
+    """
+    provider = spec.provider.id
+    env = resolve_api_key_env(spec, config)
+    lines = [
+        f"No API key for provider {provider!r} (model {spec.id!r}).",
+        "Set one of:",
+        f"  [providers.{provider}]",
+        '  api_key = "your-key"',
+        "  [llm]",
+        '  api_key = "your-key"',
+    ]
+    if env:
+        lines.append(f"  or set the ${env} env var")
+    if config.providers and provider not in config.providers:
+        configured = ", ".join(sorted(config.providers))
+        lines.append(
+            f"Note: your [providers.*] sections ({configured}) do not match "
+            f"provider {provider!r}."
+        )
+        if provider == GENERIC_OPENAI.id:
+            lines.append(
+                "Unknown models always resolve to provider 'custom': use "
+                "[providers.custom], [llm] api_key, or a catalog model."
+            )
+    return "\n".join(lines)
+
+
 def resolve_headers(spec: ModelSpec, config: Config) -> dict[str, str]:
     """Provider headers merged with ``[providers.<id>] headers`` (override wins)."""
     override = config.providers.get(spec.provider.id)

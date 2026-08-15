@@ -1,5 +1,6 @@
 import os
 import tempfile
+import warnings
 from pathlib import Path
 
 import pytest
@@ -83,6 +84,49 @@ def test_load_config_tools_bash_enabled(tmp_path):
     path.write_text("[tools]\nbash_enabled = false\n")
     cfg = load_config(path)
     assert cfg.tools.bash_enabled is False
+
+
+def test_load_config_warns_on_singular_provider_section(tmp_path):
+    # [provider.<id>] (singular) silently lands under an unread "provider"
+    # top-level key; warn so the user spots the typo instead of chasing a
+    # missing API key that was actually configured.
+    path = tmp_path / "singular.toml"
+    path.write_text('[provider.deepseek]\napi_key = "k"\n')
+    with pytest.warns(UserWarning, match=r"\[providers\.<id>\]"):
+        cfg = load_config(path)
+    assert cfg.providers == {}
+
+
+def test_load_config_warns_on_unreachable_provider_section(tmp_path):
+    # [providers.<id>] where no model can resolve to <id> is dead config
+    # (e.g. "openai" when the catalog provider is "codex").
+    path = tmp_path / "dead.toml"
+    path.write_text('[providers.openai]\napi_key = "k"\n')
+    with pytest.warns(UserWarning, match=r"\[providers\.openai\]"):
+        cfg = load_config(path)
+    # Still parsed (harmless), just never consulted by resolution.
+    assert "openai" in cfg.providers
+
+
+def test_load_config_known_provider_section_is_silent(tmp_path):
+    path = tmp_path / "fine.toml"
+    path.write_text('[providers.codex]\napi_key = "k"\n')
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        cfg = load_config(path)
+    assert cfg.providers["codex"].api_key == "k"
+
+
+def test_load_config_providers_array_of_tables_does_not_crash(tmp_path):
+    # [[providers]] (array of tables) is valid TOML but the wrong shape for
+    # the [providers.<id>] dict we expect. Regression: the dead-section
+    # warning loop must not iterate it and crash on unhashable dicts —
+    # pydantic's clean ValidationError fallback is the intended outcome.
+    path = tmp_path / "array.toml"
+    path.write_text('[[providers]]\napi_key = "k"\n')
+    with pytest.warns(UserWarning, match="Invalid config file"):
+        cfg = load_config(path)
+    assert cfg.providers == {}
 
 
 def test_load_config_permission_error_uses_defaults(tmp_path):
