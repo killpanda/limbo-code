@@ -49,6 +49,17 @@ ChatWidget {
     text-style: italic;
     margin-top: 1;
 }
+.thinking-summary {
+    color: $text-tertiary;
+    text-style: italic;
+}
+.thinking-summary:hover {
+    text-style: bold italic;
+}
+.thinking-body {
+    color: $text-tertiary;
+    text-style: italic;
+}
 .error-message {
     width: 1fr;
     background: $error-bg;
@@ -96,6 +107,17 @@ ChatWidget {
 .ascii-art {
     color: $text-secondary;
     margin-top: 1;
+}
+#load-more {
+    height: 1;
+    background: $panel;
+    color: $accent;
+    text-style: bold;
+    text-align: center;
+    margin-bottom: 1;
+}
+#load-more:hover {
+    color: $primary;
 }
 #back-to-bottom {
     dock: bottom;

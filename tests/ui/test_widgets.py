@@ -1,5 +1,6 @@
 import pytest
 from textual.app import App
+from textual.widgets import Static
 
 from limbo.ui.widgets.chat import ChatWidget
 from limbo.ui.widgets.input import InputWidget, UserSubmitted
@@ -93,7 +94,7 @@ async def test_chat_append_streams_into_one_block():
         widget = pilot.app.query_one(ChatWidget)
         await widget.append_assistant_text("[bold]chunk1[/bold]")
         await widget.append_assistant_text("[italic]chunk2[/italic]")
-        await pilot.pause()
+        await widget.flush_stream()  # render the batched buffer immediately
 
         # Both chunks accumulate in a single assistant block.
         assert len(widget.messages) == 1
@@ -149,15 +150,16 @@ async def test_tool_card_toggle_requires_body():
         card = widget.add_tool_card("c1", "ls", {})
         await pilot.pause()
 
-        # No output yet: toggling is a no-op and body stays hidden.
+        # No output yet: toggling is a no-op and no body exists.
         card.toggle()
-        assert card.body.display is False
+        assert card.body is None
 
         card.set_success("file1\nfile2")
         card.toggle()
-        assert card.body.display is True
+        assert card.body is not None and card.body.display is True
         card.toggle()
-        assert card.body.display is False
+        # Collapsing destroys the lazy body: the card is one line again.
+        assert card.body is None
 
 
 @pytest.mark.asyncio
@@ -187,7 +189,7 @@ async def test_chat_streaming_burst_does_not_duplicate_blocks():
         chunks = [text[i : i + 4] for i in range(0, len(text), 4)]
         for chunk in chunks:
             await widget.append_assistant_text(chunk)
-        await pilot.pause()
+        await widget.flush_stream()  # render the batched buffer immediately
 
         md = widget.messages[-1]
         rendered = "\n".join(
@@ -222,7 +224,7 @@ async def test_tool_card_run_code_shows_description_and_source():
 
         card.set_success("ok: file content")
         card.toggle()
-        assert card.body.display is True
+        assert card.body is not None and card.body.display is True
         # Expanding shows the source first, then the result. (The body is a
         # hidden RichLog: in tests it stays size-unknown so writes land in
         # _deferred_renders and lines stays empty — assert on the sections
@@ -231,3 +233,82 @@ async def test_tool_card_run_code_shows_description_and_source():
         assert sections is not None
         assert sections[0] == (code, "python")
         assert sections[1] == ("ok: file content", None)
+
+@pytest.mark.asyncio
+async def test_thinking_collapsed_by_default_and_expandable():
+    class TestApp(App[None]):
+        def compose(self):
+            yield ChatWidget(id="chat")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(ChatWidget)
+        await widget.append_thinking_text("step one ")
+        await widget.append_thinking_text("step two")
+        await pilot.pause()
+
+        block = widget.messages[-1]
+        from limbo.ui.widgets.chat import ThinkingBlock
+        assert isinstance(block, ThinkingBlock)
+        # Collapsed by default: summary line only, body hidden.
+        assert block.collapsed
+        assert block._body.display is False
+        summary = str(block._summary.render())
+        assert "thinking" in summary and "字" in summary
+
+        # Expand shows the full accumulated text.
+        block.toggle()
+        assert block._body.display is True
+        assert "step one step two" in str(block._body.render())
+        block.toggle()
+        assert block.collapsed
+
+
+@pytest.mark.asyncio
+async def test_chat_prunes_old_messages_and_pages_back():
+    class TestApp(App[None]):
+        def compose(self):
+            yield ChatWidget(id="chat")
+
+    from limbo.ui.widgets.chat import _MAX_DOM_MESSAGES, _PAGE_SIZE
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(ChatWidget)
+        for i in range(_MAX_DOM_MESSAGES + 60):
+            widget.add_info(f"msg {i}")
+        await pilot.pause()
+
+        # DOM is bounded; the overflow is tracked for paging.
+        mounted = [c for c in widget.children if c.id not in ("back-to-bottom", "load-more")]
+        assert len(mounted) <= _MAX_DOM_MESSAGES + 2
+        assert widget._pruned_count == 60
+
+        # The load-more pill is shown while older messages exist.
+        pill = widget.query_one("#load-more")
+        assert pill.display is True
+        assert "加载更早" in str(pill.render())
+
+        # Loading a page restores the oldest 50 (msg 10..59) and re-anchors.
+        widget._load_more()
+        await pilot.pause()
+        assert widget._pruned_count == 60 - _PAGE_SIZE
+        assert any(
+            isinstance(c, Static) and str(c.render()) == "msg 10" for c in widget.children
+        )
+        assert not any(
+            isinstance(c, Static) and str(c.render()) == "msg 0" for c in widget.children
+        )
+        # A second page brings the rest (msg 0..9) back too.
+        widget._load_more()
+        await pilot.pause()
+        assert widget._pruned_count == 0
+        assert any(
+            isinstance(c, Static) and str(c.render()) == "msg 0" for c in widget.children
+        )
+
+        # The transcript always keeps the full history.
+        assert "msg 0" in widget.transcript_text()
+        assert f"msg {_MAX_DOM_MESSAGES + 59}" in widget.transcript_text()
+
+
