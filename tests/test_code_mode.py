@@ -65,3 +65,13 @@ def test_system_prompt_code_mode(registry, workdir):
     # The native tool list collapses to run_code only.
     assert "- run_code: " in prompt
     assert "- read: " not in prompt
+
+def test_sdk_teaches_batching_not_drip_feeding(registry):
+    """Code Mode's value is orchestration: the model-facing text must push
+    batching many tool calls into one program, not wrapping single calls
+    (regression guard for observed one-command-per-run_code behavior)."""
+    from limbo.tools.run_code import RunCodeTool
+
+    sdk = render_tools_sdk(registry)
+    assert "round trip" in sdk
+    assert "round trip" in RunCodeTool.description

@@ -257,3 +257,21 @@ def test_tool_call_error_type():
     err = ToolCallError("read", "boom")
     assert err.tool_name == "read"
     assert str(err) == "boom"
+
+def test_multiline_string_literal_survives_wrapping(tool):
+    """Regression: the async-def wrap must not indent string-literal content.
+
+    The old textwrap.indent wrap added 4 spaces to every body line —
+    including lines inside triple-quoted literals — silently corrupting
+    file-writing programs (the write-file-with-literal pattern, which is
+    how Code Mode is supposed to author files).
+    """
+    q = "'" * 3  # a triple quote, spelled out to keep source nesting simple
+    result = tool.run(
+        {
+            "code": f"text = {q}\nalpha\n    beta\ngamma\n{q}\nreturn text",
+            "description": "Return a multi-line literal verbatim",
+        }
+    )
+    assert result.success is True
+    assert result.output == "\nalpha\n    beta\ngamma\n"
