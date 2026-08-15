@@ -196,3 +196,38 @@ async def test_chat_streaming_burst_does_not_duplicate_blocks():
         assert rendered.count("Second paragraph.") == 1
         assert rendered.count("bullet one") == 1
         assert rendered.count("Final paragraph.") == 1
+
+@pytest.mark.asyncio
+async def test_tool_card_run_code_shows_description_and_source():
+    """run_code cards must be observable: header shows the program's
+    description, and expanding shows the full program source (python)
+    before the result — otherwise Code Mode work is a black box."""
+    class TestApp(App[None]):
+        def compose(self):
+            yield ChatWidget(id="chat")
+
+    code = "content = await tools.read(path='a.py')\nreturn content"
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(ChatWidget)
+        card = widget.add_tool_card(
+            "c1",
+            "run_code",
+            {"code": code, "description": "读 a.py 并返回内容"},
+        )
+        await pilot.pause()
+
+        # The one-line header carries the program's intent.
+        assert "读 a.py 并返回内容" in str(card.header.render())
+
+        card.set_success("ok: file content")
+        card.toggle()
+        assert card.body.display is True
+        # Expanding shows the source first, then the result. (The body is a
+        # hidden RichLog: in tests it stays size-unknown so writes land in
+        # _deferred_renders and lines stays empty — assert on the sections
+        # the card was told to render instead.)
+        sections = card._body_content
+        assert sections is not None
+        assert sections[0] == (code, "python")
+        assert sections[1] == ("ok: file content", None)

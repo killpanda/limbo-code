@@ -30,7 +30,9 @@ _STATE_LABELS = {
 }
 
 # Argument keys worth showing in the one-line summary, in priority order.
-_SUMMARY_KEYS = ("path", "command", "pattern", "old_text")
+# ``description`` (run_code's program intent) is last: only tools without
+# a path/command/pattern/old_text hit it.
+_SUMMARY_KEYS = ("path", "command", "pattern", "old_text", "description")
 
 
 class ToolCard(Vertical):
@@ -58,7 +60,7 @@ class ToolCard(Vertical):
         self._started = time.monotonic()
         self._elapsed: float | None = None
         self._has_body = False
-        self._body_content: tuple[str, str | None] | None = None
+        self._body_content: list[tuple[str, str | None]] | None = None
         self.add_class("running")
 
     def compose(self) -> ComposeResult:
@@ -72,7 +74,7 @@ class ToolCard(Vertical):
         # (events can arrive in the same loop turn as the card creation).
         self._refresh_header()
         if self._body_content is not None:
-            self._write_body(*self._body_content)
+            self._write_body(self._body_content)
 
     @property
     def header(self) -> Static:
@@ -127,25 +129,45 @@ class ToolCard(Vertical):
             pass  # Not composed yet; on_mount refreshes.
 
     def _set_body(self, content: str, lexer: str | None = None) -> None:
-        if not content:
+        parts = self._body_parts(content, lexer)
+        if not parts:
             return
         self._has_body = True
-        self._body_content = (content, lexer)
+        self._body_content = parts
         try:
-            self._write_body(content, lexer)
+            self._write_body(parts)
         except NoMatches:
             pass  # Not composed yet; on_mount writes the body.
 
-    def _write_body(self, content: str, lexer: str | None = None) -> None:
-        renderable: Any = Text(content)
-        if lexer:
-            try:
-                from rich.syntax import Syntax
+    def _body_parts(
+        self, content: str, lexer: str | None
+    ) -> list[tuple[str, str | None]]:
+        """Body sections, in display order.
 
-                renderable = Syntax(content, lexer, theme=self._syntax_theme())
-            except Exception:  # noqa: BLE001 - fall back to plain text
-                renderable = Text(content)
-        self.body.write(renderable)
+        run_code's ``code`` argument is the program source itself — the
+        thing a human wants to see to know what Code Mode did — so it is
+        shown first (python-highlighted), then the tool's own result.
+        """
+        parts: list[tuple[str, str | None]] = []
+        if self.tool_name == "run_code":
+            code = self.arguments.get("code")
+            if isinstance(code, str) and code:
+                parts.append((code, "python"))
+        if content:
+            parts.append((content, lexer))
+        return parts
+
+    def _write_body(self, parts: list[tuple[str, str | None]]) -> None:
+        for content, lexer in parts:
+            renderable: Any = Text(content)
+            if lexer:
+                try:
+                    from rich.syntax import Syntax
+
+                    renderable = Syntax(content, lexer, theme=self._syntax_theme())
+                except Exception:  # noqa: BLE001 - fall back to plain text
+                    renderable = Text(content)
+            self.body.write(renderable)
 
     def _syntax_theme(self) -> Any:
         """Match the syntax-highlighting palette to the active UI theme.

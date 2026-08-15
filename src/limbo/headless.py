@@ -755,6 +755,14 @@ class HeadlessFrontend:
         elif isinstance(event, ThinkingDelta):
             self._out(event.text)
         elif isinstance(event, ToolCallRequest):
+            # run_code's `code` argument is the whole program (huge, useless
+            # as a summary): show the model's own description instead — that
+            # is what a reader (human or herdr) wants on one line.
+            if event.name == "run_code":
+                description = event.arguments.get("description")
+                if isinstance(description, str) and description:
+                    self._line(f"\n⚙ run_code · {_first_line(description)}")
+                    return
             args = json.dumps(event.arguments, ensure_ascii=False)
             if len(args) > 100:
                 args = args[:97] + "..."

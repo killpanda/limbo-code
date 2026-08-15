@@ -115,7 +115,7 @@ async def test_bang_runs_without_llm(tmp_path):
 
         assert card.state == "success"
         assert card._body_content is not None
-        assert "hello" in card._body_content[0]
+        assert "hello" in card._body_content[0][0]
         # No LLM request, no history growth (system message only).
         assert client.calls == []
         assert len(screen.agent.messages) == 1
@@ -140,8 +140,8 @@ async def test_bang_nonzero_exit_shows_error_card(tmp_path):
 
         assert card.state == "error"
         assert card._body_content is not None
-        assert "exit code 3" in card._body_content[0]
-        assert "oops" in card._body_content[0]
+        assert "exit code 3" in card._body_content[0][0]
+        assert "oops" in card._body_content[0][0]
 
 
 # -- Test Plan #3: bare '!' shows usage, executes nothing ----------------------
@@ -222,7 +222,7 @@ async def test_bang_while_busy_runs_in_parallel(tmp_path):
 
         assert card.state == "success"
         assert card._body_content is not None
-        assert "parallel" in card._body_content[0]
+        assert "parallel" in card._body_content[0][0]
         # Not queued as steer; the agent's bash tool was never touched.
         assert screen.agent.queued_count == 0
         assert agent_calls == []
@@ -261,7 +261,7 @@ async def test_interrupt_does_not_cancel_bang_card(tmp_path):
         await wait_until(pilot, lambda: card.state != "running")
         assert card.state == "success"
         assert card._body_content is not None
-        assert "bang-done" in card._body_content[0]
+        assert "bang-done" in card._body_content[0][0]
 
 
 @pytest.mark.asyncio
@@ -334,7 +334,7 @@ async def test_bang_worker_exception_renders_error_card(tmp_path, monkeypatch):
 
         assert card.state == "error"
         assert card._body_content is not None
-        assert "内部错误：boom" in card._body_content[0]
+        assert "内部错误：boom" in card._body_content[0][0]
 
 
 # -- Test Plan #9: bang commands join the input history -------------------------
