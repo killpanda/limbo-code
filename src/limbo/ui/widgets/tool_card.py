@@ -79,6 +79,13 @@ class ToolCard(Vertical):
         # (events can arrive in the same loop turn as the card creation).
         self._refresh_header()
 
+    def on_unmount(self) -> None:
+        # The lazily-created body is a dynamic child: it does not survive a
+        # prune/re-mount (compose only yields the header). Drop the dead
+        # RichLog reference so the restored card expands cleanly on the
+        # first click instead of collapsing a stale body.
+        self._body = None
+
     @property
     def header(self) -> Static:
         return self.query_one(".tool-header", Static)

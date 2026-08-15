@@ -62,9 +62,12 @@ class ThinkingBlock(Vertical):
         yield self._body
 
     def on_mount(self) -> None:
-        # Collapsed by default: the body exists but is not displayed.
-        self._body.display = False
+        # Collapsed by default; if the block was pruned while expanded and
+        # re-mounted via load-more, restore the expanded state.
+        self._body.display = not self._collapsed
         self._summary.update(self._summary_text())
+        if not self._collapsed:
+            self._body.update(self._text)
 
     def append(self, text: str) -> None:
         self._text += text
@@ -242,6 +245,9 @@ class ChatWidget(VerticalScroll):
         # explicit flush_stream): two concurrent Markdown.append calls are
         # the block-duplication bug this widget was built to avoid.
         self._flush_in_flight = False
+        # Dedupes the "retry after mount" re-schedule of _prune so a burst
+        # of messages cannot stack unlimited retry callbacks.
+        self._prune_scheduled = False
         # Scroll-follow state: when the user scrolls up, new content no longer
         # drags the view down; a "back to bottom" pill appears instead (P2-4).
         self._follow = True
@@ -494,7 +500,7 @@ class ChatWidget(VerticalScroll):
     def toggle_tool_bodies(self) -> None:
         """Expand/collapse all tool cards that have output."""
         for card in self.tool_cards.values():
-            if card._is_mounted:
+            if card.is_attached:
                 card.toggle()
 
     def cancel_running_tool_cards(self) -> None:
@@ -532,7 +538,7 @@ class ChatWidget(VerticalScroll):
         excess = len(self.messages) - self._pruned_count - _MAX_DOM_MESSAGES
         # How many are safe to remove: skip widgets still mounting, and skip
         # anything inside the current viewport when reading history.
-        viewport_top = self.scroll_y if not self._follow else 0.0
+        # region is screen-relative; overlap with self.region = "visible".
         to_remove = 0
         saw_unmounted = False
         while to_remove < excess:
@@ -540,35 +546,35 @@ class ChatWidget(VerticalScroll):
             if not oldest._is_mounted:
                 saw_unmounted = True
                 break
-            if not self._follow and oldest.region.bottom > viewport_top:
+            if not self._follow and oldest.region.overlaps(self.region):
                 break  # inside the user's current view: leave it
             to_remove += 1
         if to_remove == 0:
             self._update_load_more()
-            if excess > 0 and saw_unmounted:
+            if excess > 0 and saw_unmounted and not self._prune_scheduled:
                 # Every candidate is still mounting (a burst of messages in
                 # one event-loop turn): retry once they have composed.
+                self._prune_scheduled = True
                 self.call_after_refresh(self._prune)
             return
-        # Anchor = first message that stays mounted after the prune; record
-        # its y BEFORE removal (it shifts up by the removed height).
-        stay = self.messages[self._pruned_count + to_remove]
-        anchor_y = stay.region.y
+        # Remove and accumulate the removed height directly: compensation
+        # must not depend on a "stay" widget — a second prune in the same
+        # refresh window removes it too, invalidating its region.
+        removed_height = 0
         for _ in range(to_remove):
+            removed_height += max(0, self.messages[self._pruned_count].region.height)
             self.messages[self._pruned_count].remove()
             self._pruned_count += 1
-        if not self._follow:
-            # region.y is screen-relative: removing H from the top shifts
-            # everything up by H, so compensate with scroll_y + delta where
-            # delta = stay.region.y - anchor_y = -H (same sign as _load_more).
+        if not self._follow and removed_height > 0:
             def _hold_viewport() -> None:
-                delta = stay.region.y - anchor_y
-                self.scroll_y = max(0, self.scroll_y + delta)
+                self.scroll_y = max(0, self.scroll_y - removed_height)
 
             self.call_after_refresh(_hold_viewport)
         self._update_load_more()
+        self._prune_scheduled = False
         # Skipped candidates (still mounting) get another pass once composed.
-        if saw_unmounted:
+        if saw_unmounted and not self._prune_scheduled:
+            self._prune_scheduled = True
             self.call_after_refresh(self._prune)
 
     def _load_more(self) -> None:
@@ -591,6 +597,7 @@ class ChatWidget(VerticalScroll):
 
         self.call_after_refresh(_hold_viewport)
         self._update_load_more()
+        self._prune_scheduled = False
 
     def _update_load_more(self) -> None:
         try:

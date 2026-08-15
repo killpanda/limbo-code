@@ -346,3 +346,80 @@ async def test_prune_holds_viewport_steady_when_scrolled_up():
         assert abs(widget.scroll_y - before) <= 2.0
 
 
+@pytest.mark.asyncio
+async def test_prune_holds_viewport_content_steady_while_scrolled():
+    """Regression (reviewer round 2): pruning while reading history must
+    keep the visible messages unchanged (scroll offset changes because
+    removed height above the viewport, but the content does not)."""
+    class TestApp(App[None]):
+        def compose(self):
+            yield ChatWidget(id="chat")
+
+    from limbo.ui.widgets.chat import _MAX_DOM_MESSAGES
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(ChatWidget)
+        for i in range(_MAX_DOM_MESSAGES + 30):
+            widget.add_info(f"msg {i}")
+        await pilot.pause()
+
+        widget.scroll_y = 40
+        widget._follow = False
+        await pilot.pause()
+        visible = [
+            m for m in widget.messages
+            if getattr(m, "region", None) and m.region.overlaps(widget.region)
+        ]
+        top_before = str(visible[0].render()) if visible else "?"
+
+        # A burst of new messages triggers multiple prunes while scrolled.
+        for i in range(_MAX_DOM_MESSAGES):
+            widget.add_info(f"tail {i}")
+        await pilot.pause()
+        await pilot.pause()
+
+        visible = [
+            m for m in widget.messages
+            if getattr(m, "region", None) and m.region.overlaps(widget.region)
+        ]
+        top_after = str(visible[0].render()) if visible else "?"
+        assert top_before == top_after
+
+
+@pytest.mark.asyncio
+async def test_prune_resumes_bounding_after_scroll_back_to_bottom():
+    """While reading history the DOM may exceed the bound (visible content
+    is protected); returning to the tail must prune back down."""
+    class TestApp(App[None]):
+        def compose(self):
+            yield ChatWidget(id="chat")
+
+    from limbo.ui.widgets.chat import _MAX_DOM_MESSAGES
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(ChatWidget)
+        for i in range(_MAX_DOM_MESSAGES + 30):
+            widget.add_info(f"msg {i}")
+        await pilot.pause()
+        widget.scroll_y = 40
+        widget._follow = False
+        await pilot.pause()
+        for i in range(_MAX_DOM_MESSAGES):
+            widget.add_info(f"tail {i}")
+        await pilot.pause()
+        await pilot.pause()
+
+        widget.scroll_end(animate=False)
+        widget._follow = True
+        await pilot.pause()
+        for i in range(5):
+            widget.add_info(f"more {i}")
+        await pilot.pause()
+        await pilot.pause()
+        mounted = [
+            c for c in widget.children
+            if c.id not in ("back-to-bottom", "load-more")
+        ]
+        assert len(mounted) <= _MAX_DOM_MESSAGES + 2
