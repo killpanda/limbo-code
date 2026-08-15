@@ -18,6 +18,8 @@ from pydantic import (
 )
 from toml import TomlDecodeError
 
+from limbo.llm.catalog import known_provider_ids
+
 DEFAULT_CONFIG_PATH = Path.home() / ".limbo" / "config.toml"
 
 
@@ -244,6 +246,32 @@ def load_config(path: Path | None = None) -> Config:
             stacklevel=2,
         )
         return Config()
+    # [provider.<id>] (singular) is a common typo for [providers.<id>]: the
+    # table lands under a top-level "provider" key nothing reads and pydantic
+    # ignores it silently, so the configured key never resolves. Warn instead
+    # of failing, pointing at the correct section name.
+    if isinstance(data.get("provider"), dict):
+        warnings.warn(
+            "config has a [provider.*] section (singular); Limbo expects "
+            "[providers.<id>] — the section is ignored.",
+            stacklevel=2,
+        )
+    # A [providers.<id>] section whose id no model can resolve to (see
+    # known_provider_ids) is dead config — usually a typo or a section for a
+    # provider the catalog doesn't know. Warn so it surfaces before the
+    # "missing API key" error does. Guard with isinstance: a [[providers]]
+    # array-of-tables (or a scalar [providers] key) is valid TOML but not the
+    # dict shape we expect — pydantic rejects it with a clean ValidationError
+    # fallback, so we must not crash the loop first.
+    providers = data.get("providers")
+    if isinstance(providers, dict):
+        for pid in providers:
+            if pid not in known_provider_ids():
+                warnings.warn(
+                    f"[providers.{pid}] matches no known provider and is never "
+                    "used; check the section name.",
+                    stacklevel=2,
+                )
     try:
         return Config.model_validate(data)
     except ValidationError as e:

@@ -13,6 +13,7 @@ from limbo.llm.catalog import (
     MOONSHOT,
     ModelSpec,
     ProviderSpec,
+    missing_api_key_message,
     resolve_api_key,
     resolve_base_url,
     resolve_headers,
@@ -308,3 +309,35 @@ def test_unknown_model_vision_defaults_to_false():
     # GENERIC_OPENAI fallback: image attachments degrade to path references
     # rather than breaking an unrecognized endpoint with base64 payloads.
     assert resolve_model("my-local-model").vision is False
+
+
+def test_missing_api_key_message_lists_all_sources():
+    spec = resolve_model("deepseek-v4-pro")
+    msg = missing_api_key_message(spec, Config())
+    assert "No API key for provider 'deepseek'" in msg
+    assert "model 'deepseek-v4-pro'" in msg
+    assert "[providers.deepseek]" in msg
+    assert "[llm]" in msg
+    assert "$DEEPSEEK_API_KEY" in msg
+
+
+def test_missing_api_key_message_flags_mismatched_provider_section():
+    # Unknown model -> provider 'custom'; a key under [providers.deepseek]
+    # never resolves. The message must name provider 'custom' and point out
+    # that the configured section does not match.
+    spec = resolve_model("some-unknown-model")
+    cfg = Config()
+    cfg.providers["deepseek"] = ProviderOverride(api_key="k")
+    msg = missing_api_key_message(spec, cfg)
+    assert "No API key for provider 'custom'" in msg
+    assert "[providers.custom]" in msg
+    assert "do not match provider 'custom'" in msg
+
+
+def test_missing_api_key_message_clean_when_provider_section_matches():
+    spec = resolve_model("some-unknown-model")
+    cfg = Config()
+    cfg.providers["custom"] = ProviderOverride(api_key="k")
+    msg = missing_api_key_message(spec, cfg)
+    assert "No API key for provider 'custom'" in msg
+    assert "do not match" not in msg

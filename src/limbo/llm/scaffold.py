@@ -20,8 +20,8 @@ import httpx
 from limbo.config import Config
 from limbo.llm.catalog import (
     ModelSpec,
+    missing_api_key_message,
     resolve_api_key,
-    resolve_api_key_env,
 )
 from limbo.llm.client import RequestHook
 from limbo.llm.retry import RetryPolicy, stream_with_retry
@@ -29,15 +29,10 @@ from limbo.models import Attachment, LLMEvent, Message
 
 
 def require_api_key(spec: ModelSpec, config: Config) -> str:
-    """The provider's API key, or a ValueError naming where to set it."""
+    """The provider's API key, or a ValueError explaining where to set it."""
     api_key = resolve_api_key(spec, config)
     if not api_key:
-        env = resolve_api_key_env(spec, config)
-        raise ValueError(
-            f"No API key for provider {spec.provider.id!r}. "
-            "Set [llm] api_key in ~/.limbo/config.toml"
-            + (f" or the ${env} environment variable." if env else ".")
-        )
+        raise ValueError(missing_api_key_message(spec, config))
     return api_key
 
 
