@@ -861,6 +861,7 @@ def test_agent_trace_session_start_records_resolved_provider(workdir):
         workdir=workdir,
         session_dir=workdir / "sessions",
     )
+    agent.trace.flush()  # background writer: session_start may be in flight
     records = read_trace(agent.trace.path)
     resolved = records[0]["resolved"]
     assert resolved == {

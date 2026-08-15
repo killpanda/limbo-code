@@ -312,3 +312,37 @@ async def test_chat_prunes_old_messages_and_pages_back():
         assert f"msg {_MAX_DOM_MESSAGES + 59}" in widget.transcript_text()
 
 
+@pytest.mark.asyncio
+async def test_prune_holds_viewport_steady_when_scrolled_up():
+    """Regression (S1): pruning above the viewport must compensate the
+    scroll offset so the visible messages do not jump."""
+    class TestApp(App[None]):
+        def compose(self):
+            yield ChatWidget(id="chat")
+
+    from limbo.ui.widgets.chat import _MAX_DOM_MESSAGES
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(ChatWidget)
+        # Build enough messages to force a prune, and scroll up first so
+        # the prune happens away from the tail.
+        for i in range(_MAX_DOM_MESSAGES + 40):
+            widget.add_info(f"msg {i}")
+        await pilot.pause()
+        assert widget._pruned_count > 0
+
+        widget.scroll_y = 50  # not following the tail
+        widget._follow = False
+        await pilot.pause()
+        before = widget.scroll_y
+
+        # A new message triggers another prune while scrolled up.
+        widget.add_info("new tail message")
+        await pilot.pause()
+        await pilot.pause()
+
+        # The viewport did not jump (compensated by the removed height).
+        assert abs(widget.scroll_y - before) <= 2.0
+
+

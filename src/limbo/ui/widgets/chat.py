@@ -20,6 +20,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from rich.cells import cell_len
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
@@ -67,11 +68,11 @@ class ThinkingBlock(Vertical):
 
     def append(self, text: str) -> None:
         self._text += text
-        # Collapsed summary is a cheap one-line update: refresh it right
-        # away so the first chunk shows feedback without waiting for the
-        # flush tick. Expanded bodies stay throttled (refresh_display).
-        if self._collapsed:
-            self._summary.update(self._summary_text())
+        # Summary refresh is throttled to the flush cadence (via
+        # ChatWidget._thinking_dirty): rebuilding the collapsed summary on
+        # every chunk is O(full text) per chunk, and thinking is the
+        # longest/highest-frequency stream — exactly what batching exists
+        # to avoid. First-chunk feedback is at most one slice late.
 
     def refresh_display(self) -> None:
         """Re-render at most once per flush slice (see ChatWidget._tick_flush)."""
@@ -101,11 +102,23 @@ class ThinkingBlock(Vertical):
 
     def _summary_text(self) -> str:
         n = len(self._text)
-        head = " ".join(self._text.split())[:_THINKING_SUMMARY_CHARS]
+        # Truncate by display width (CJK chars are 2 cells), not char count.
+        flat = " ".join(self._text.split())
+        head = ""
+        width = 0
+        truncated = False
+        for ch in flat:
+            w = cell_len(ch)
+            if width + w > _THINKING_SUMMARY_CHARS:
+                truncated = True
+                break
+            width += w
+            head += ch
         if self._collapsed:
-            if head:
-                return f"🧠 thinking… {head}…（{n} 字）"
-            return f"🧠 thinking…（{n} 字）"
+            if not head:
+                return f"🧠 thinking…（{n} 字）"
+            ellipsis = "…" if truncated else ""
+            return f"🧠 thinking… {head}{ellipsis}（{n} 字）"
         return f"🧠 thinking（点击折叠 · {n} 字）"
 
 
@@ -150,15 +163,22 @@ class QueuedMessage(Vertical):
             yield Horizontal(classes="queued-status")
 
     def on_mount(self) -> None:
-        if self.state == "queued":
-            status = self.query_one(".queued-status", Horizontal)
-            status.mount(Static("⏳ 排队中", classes="queued-hint", markup=False))
-            status.mount(Static("✕ 取消", classes="queued-cancel", markup=False))
-        elif self.state == "cancelled":
-            status = self.query_one(".queued-status", Horizontal)
-            status.mount(
-                Static("已取消", classes="queued-hint", markup=False)
-            )
+        # Defensive: a widget can be pruned from the DOM before its first
+        # compose completes (see ChatWidget._prune), in which case Textual
+        # drops the composed children but still dispatches Mount — the
+        # .queued-status query would then raise NoMatches and crash the app.
+        try:
+            if self.state == "queued":
+                status = self.query_one(".queued-status", Horizontal)
+                status.mount(Static("⏳ 排队中", classes="queued-hint", markup=False))
+                status.mount(Static("✕ 取消", classes="queued-cancel", markup=False))
+            elif self.state == "cancelled":
+                status = self.query_one(".queued-status", Horizontal)
+                status.mount(
+                    Static("已取消", classes="queued-hint", markup=False)
+                )
+        except NoMatches:
+            pass  # Pruned mid-mount; the widget is gone from the DOM anyway.
 
     def transcript(self) -> str:
         suffix = {"queued": "（排队中）", "cancelled": "（已取消）"}.get(self.state, "")
@@ -202,7 +222,9 @@ class ChatWidget(VerticalScroll):
         super().__init__(*args, **kwargs)
         # Full logical message list (display order), including messages
         # currently pruned from the DOM (old-message paging).
-        self.messages: list[Any] = []
+        self.messages: list[
+            Static | Markdown | QueuedMessage | ThinkingBlock | ToolCard
+        ] = []
         # How many of the oldest messages are pruned from the DOM.
         self._pruned_count = 0
         # Tool cards keyed by tool-call id; ToolCallRequest events may arrive
@@ -216,6 +238,10 @@ class ChatWidget(VerticalScroll):
         self._assistant_buffer = ""
         self._thinking_dirty = False
         self._flush_timer: Any = None
+        # Re-entrancy guard for concurrent flush paths (timer tick vs
+        # explicit flush_stream): two concurrent Markdown.append calls are
+        # the block-duplication bug this widget was built to avoid.
+        self._flush_in_flight = False
         # Scroll-follow state: when the user scrolls up, new content no longer
         # drags the view down; a "back to bottom" pill appears instead (P2-4).
         self._follow = True
@@ -238,21 +264,32 @@ class ChatWidget(VerticalScroll):
         # interval of the stream ending.
         self._flush_timer = self.set_interval(_FLUSH_INTERVAL, self._tick_flush)
 
+    def on_unmount(self) -> None:
+        # Stop the timer explicitly so a re-mount never stacks a second one.
+        if self._flush_timer is not None:
+            self._flush_timer.stop()
+
     # -- streaming flush ----------------------------------------------------
 
     async def _tick_flush(self) -> None:
         """One time slice: at most one append + one thinking refresh + one scroll."""
-        scrolled = False
-        if self._assistant_buffer and self._current_assistant is not None:
-            buf, self._assistant_buffer = self._assistant_buffer, ""
-            await self._current_assistant.append(buf)
-            scrolled = True
-        if self._thinking_dirty and self._current_thinking is not None:
-            self._current_thinking.refresh_display()
-            self._thinking_dirty = False
-            scrolled = True
-        if scrolled:
-            self._auto_scroll()
+        if self._flush_in_flight:
+            return
+        self._flush_in_flight = True
+        try:
+            scrolled = False
+            if self._assistant_buffer and self._current_assistant is not None:
+                buf, self._assistant_buffer = self._assistant_buffer, ""
+                await self._current_assistant.append(buf)
+                scrolled = True
+            if self._thinking_dirty and self._current_thinking is not None:
+                self._current_thinking.refresh_display()
+                self._thinking_dirty = False
+                scrolled = True
+            if scrolled:
+                self._auto_scroll()
+        finally:
+            self._flush_in_flight = False
 
     # -- messages -----------------------------------------------------------
 
@@ -371,19 +408,31 @@ class ChatWidget(VerticalScroll):
         self._assistant_buffer += text
 
     async def flush_stream(self) -> None:
-        """Render any buffered streaming output immediately (tests/turn end).
+        """Render any buffered streaming output immediately (tests).
 
         The 12 fps flush timer normally handles this within one interval;
         this is an escape hatch for callers that need the text on screen
-        right now (Markdown.append is async and must be awaited).
+        right now (Markdown.append is async and must be awaited). A no-op
+        (empty buffers) never scrolls, and a flush already in flight is
+        skipped to avoid concurrent Markdown.append calls.
         """
-        if self._assistant_buffer and self._current_assistant is not None:
-            buf, self._assistant_buffer = self._assistant_buffer, ""
-            await self._current_assistant.append(buf)
-        if self._thinking_dirty and self._current_thinking is not None:
-            self._current_thinking.refresh_display()
-            self._thinking_dirty = False
-        self._auto_scroll()
+        if self._flush_in_flight:
+            return
+        self._flush_in_flight = True
+        try:
+            scrolled = False
+            if self._assistant_buffer and self._current_assistant is not None:
+                buf, self._assistant_buffer = self._assistant_buffer, ""
+                await self._current_assistant.append(buf)
+                scrolled = True
+            if self._thinking_dirty and self._current_thinking is not None:
+                self._current_thinking.refresh_display()
+                self._thinking_dirty = False
+                scrolled = True
+            if scrolled:
+                self._auto_scroll()
+        finally:
+            self._flush_in_flight = False
 
     def add_assistant_message(self, text: str) -> None:
         """Add a complete (non-streamed) assistant Markdown block."""
@@ -434,13 +483,19 @@ class ChatWidget(VerticalScroll):
         self._current_thinking = None
         card = ToolCard(tool_id, name, arguments, agent_owned=agent_owned)
         self.tool_cards[tool_id] = card
+        # Cards participate in old-message paging like any other message,
+        # so the DOM bound covers them too (they are the bulk of a long
+        # tool-heavy session). The dict keeps its reference for status
+        # updates; toggle/cancel skip pruned (unmounted) cards.
+        self.messages.append(card)
         self._mount_and_scroll(card)
         return card
 
     def toggle_tool_bodies(self) -> None:
         """Expand/collapse all tool cards that have output."""
         for card in self.tool_cards.values():
-            card.toggle()
+            if card._is_mounted:
+                card.toggle()
 
     def cancel_running_tool_cards(self) -> None:
         """Mark still-running agent-owned cards as interrupted (RFC LIM-53).
@@ -452,6 +507,8 @@ class ChatWidget(VerticalScroll):
         their results still arrive.
         """
         for card in self.tool_cards.values():
+            # set_cancelled only mutates instance state + refreshes the
+            # header (NoMatches-safe), so pruned/unmounted cards work too.
             if card.state == "running" and card.agent_owned:
                 card.set_cancelled()
 
@@ -460,32 +517,59 @@ class ChatWidget(VerticalScroll):
     def _prune(self) -> None:
         """Keep at most ``_MAX_DOM_MESSAGES`` messages mounted.
 
-        The oldest mounted message is detached from the DOM (kept in
-        ``self.messages`` for paging back). When the user is not following
-        the tail, the viewport is held steady after the prune via
-        ``call_after_refresh`` (the scroll offset changes by exactly the
-        removed height).
+        The oldest mounted messages are detached from the DOM (kept in
+        ``self.messages`` for paging back). Widgets that have not finished
+        their first mount are never pruned: removing them mid-compose makes
+        Textual drop their composed children while still dispatching Mount,
+        which crashes any on_mount that queries them. While the user is
+        scrolled away from the tail, the viewport is held steady after the
+        prune by compensating the scroll offset by the removed height, and
+        messages currently inside the viewport are left alone.
         """
         if len(self.messages) - self._pruned_count <= _MAX_DOM_MESSAGES:
             self._update_load_more()
             return
-        # Anchor = first message that stays mounted; used to compensate the
-        # scroll offset for the removed height above it.
-        anchor = self.messages[self._pruned_count]
-        anchor_y = anchor.region.y
-        while len(self.messages) - self._pruned_count > _MAX_DOM_MESSAGES:
-            oldest = self.messages[self._pruned_count]
+        excess = len(self.messages) - self._pruned_count - _MAX_DOM_MESSAGES
+        # How many are safe to remove: skip widgets still mounting, and skip
+        # anything inside the current viewport when reading history.
+        viewport_top = self.scroll_y if not self._follow else 0.0
+        to_remove = 0
+        saw_unmounted = False
+        while to_remove < excess:
+            oldest = self.messages[self._pruned_count + to_remove]
+            if not oldest._is_mounted:
+                saw_unmounted = True
+                break
+            if not self._follow and oldest.region.bottom > viewport_top:
+                break  # inside the user's current view: leave it
+            to_remove += 1
+        if to_remove == 0:
+            self._update_load_more()
+            if excess > 0 and saw_unmounted:
+                # Every candidate is still mounting (a burst of messages in
+                # one event-loop turn): retry once they have composed.
+                self.call_after_refresh(self._prune)
+            return
+        # Anchor = first message that stays mounted after the prune; record
+        # its y BEFORE removal (it shifts up by the removed height).
+        stay = self.messages[self._pruned_count + to_remove]
+        anchor_y = stay.region.y
+        for _ in range(to_remove):
+            self.messages[self._pruned_count].remove()
             self._pruned_count += 1
-            oldest.remove()
-        if self._follow:
-            # At the tail: removing top content does not move the bottom.
-            pass
-        else:
+        if not self._follow:
+            # region.y is screen-relative: removing H from the top shifts
+            # everything up by H, so compensate with scroll_y + delta where
+            # delta = stay.region.y - anchor_y = -H (same sign as _load_more).
             def _hold_viewport() -> None:
-                self.scroll_y = max(0, self.scroll_y - (anchor.region.y - anchor_y))
+                delta = stay.region.y - anchor_y
+                self.scroll_y = max(0, self.scroll_y + delta)
 
             self.call_after_refresh(_hold_viewport)
         self._update_load_more()
+        # Skipped candidates (still mounting) get another pass once composed.
+        if saw_unmounted:
+            self.call_after_refresh(self._prune)
 
     def _load_more(self) -> None:
         """Restore the next page of pruned messages above the current ones."""
@@ -531,6 +615,8 @@ class ChatWidget(VerticalScroll):
                 parts.append(msg.transcript())
             elif isinstance(msg, ThinkingBlock):
                 parts.append(msg.content)
+            elif isinstance(msg, ToolCard):
+                continue  # tool cards are UI chrome, not conversation text
             else:
                 parts.append(str(msg.content))
         return "\n".join(parts)

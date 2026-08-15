@@ -184,6 +184,9 @@ class ToolCard(Vertical):
 
     def _write_body(self, parts: list[tuple[str, str | None]]) -> None:
         assert self._body is not None  # only called after _ensure_body
+        # A second set_success/set_error on an expanded card must not
+        # duplicate earlier content in the append-only RichLog.
+        self._body.clear()
         for content, lexer in parts:
             renderable: Any = Text(content)
             if lexer:
