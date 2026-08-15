@@ -1,8 +1,10 @@
+import asyncio
+
 import pytest
 from textual.app import App
 from textual.widgets import Static
 
-from limbo.ui.widgets.chat import ChatWidget
+from limbo.ui.widgets.chat import ChatWidget, QueuedMessage, ThinkingBlock
 from limbo.ui.widgets.input import InputWidget, UserSubmitted
 
 
@@ -521,4 +523,35 @@ async def test_prune_retry_flag_resets_on_clear():
             )
             <= _MAX_DOM_MESSAGES + 2
             and widget._prune_scheduled is False,
+        )
+
+
+@pytest.mark.asyncio
+async def test_thinking_mount_race_with_steer_message():
+    """Regression: a queued steer message during the thinking block's first
+    mount must not crash append_thinking_text (its _close_thinking nulls
+    _current_thinking while the mount await is in flight)."""
+    class TestApp(App[None]):
+        def compose(self):
+            yield ChatWidget(id="chat")
+
+    app = TestApp()
+    async with app.run_test() as pilot:
+        widget = pilot.app.query_one(ChatWidget)
+        await pilot.pause()
+
+        # Start a thinking append; interleave a queued message so it lands
+        # while the thinking block's mount is still in flight.
+        task = asyncio.create_task(widget.append_thinking_text("思考中"))
+        await asyncio.sleep(0)
+        widget.add_queued_message("q1", "用户插话")
+        await task  # must not raise (regression: AttributeError on None)
+        await pilot.pause()
+
+        # The queued message closed the in-flight thinking block; the chunk
+        # is dropped, but nothing crashed and the queue card is present.
+        assert any(isinstance(m, ThinkingBlock) for m in widget.messages)
+        assert any(
+            isinstance(m, QueuedMessage) and m.item_id == "q1"
+            for m in widget.messages
         )

@@ -397,7 +397,8 @@ class ChatWidget(VerticalScroll):
         text is materialized only while expanded. Updates are throttled to
         the flush cadence.
         """
-        if self._current_thinking is None:
+        block = self._current_thinking
+        if block is None:
             # Thinking after assistant text starts a new block.
             self._current_assistant = None
             block = ThinkingBlock()
@@ -405,7 +406,13 @@ class ChatWidget(VerticalScroll):
             self._current_thinking = block
             await self.mount(block)
             self._prune()
-        self._current_thinking.append(text)
+        if self._current_thinking is not block:
+            # The block was closed while its first mount was in flight (a
+            # queued steer message calls _close_thinking): this chunk now
+            # belongs to a detached block — drop it instead of crashing on
+            # the None'd _current_thinking.
+            return
+        block.append(text)
         self._thinking_dirty = True
 
     async def append_assistant_text(self, text: str) -> None:
@@ -475,7 +482,6 @@ class ChatWidget(VerticalScroll):
         self._current_thinking = None
         self._thinking_dirty = False
         self._assistant_buffer = ""
-        self._thinking_dirty = False
         self._pruned_count = 0
         self._pending_count = 0
         self._prune_scheduled = False
