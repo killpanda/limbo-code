@@ -85,7 +85,7 @@ Providers/models live in `llm/catalog.py`; unknown models get generic OpenAI-com
 
 `/model` rebuilds the client mid-session (refused while busy) and persists via tomlkit. Sessions resume via `--continue` / `--resume` / `/sessions`; resume repairs dangling tool calls. Trace events: `session_start`, `user_message`, `llm_request` (full body), `llm_response`, `tool_call`, `tool_result`, `compaction*`, `error`, `turn_end`. `/export [path]` merges meta + trace + message snapshot (Markdown if `.md`).
 
-Skills: `~/.limbo/skills/<name>/SKILL.md` (user) and `<workdir>/.agents/skills/<name>/SKILL.md` (project, wins collisions) — injected as a `<available_skills>` catalog in the system prompt and invocable via `/<name> [args]`.
+Skills: `~/.limbo/skills/<name>/SKILL.md` (user), `~/.agents/skills/<name>/SKILL.md` (global) and `<workdir>/.agents/skills/<name>/SKILL.md` (project, wins collisions) — injected as a `<available_skills>` catalog in the system prompt and invocable via `/<name> [args]`.
 
 ## UI
 

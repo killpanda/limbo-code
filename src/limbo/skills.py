@@ -6,6 +6,7 @@ the same convention used by Claude Code and pi.
 
 Discovery paths (later sources win on name collisions):
 - user:    ``~/.limbo/skills/<name>/SKILL.md``
+- global:  ``~/.agents/skills/<name>/SKILL.md``
 - project: ``<workdir>/.agents/skills/<name>/SKILL.md``
 
 Skills are exposed to the model two ways (dual track):
@@ -28,6 +29,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 DEFAULT_USER_SKILLS_DIR = Path.home() / ".limbo" / "skills"
+GLOBAL_AGENTS_SKILLS_DIR = Path.home() / ".agents" / "skills"
 PROJECT_SKILLS_DIR = ".agents/skills"
 
 # Validation limits per the Agent Skills spec (agentskills.io).
@@ -167,17 +169,23 @@ def _load_skills_from(skills_dir: Path) -> list[Skill]:
 
 
 def discover_skills(
-    workdir: Path, user_dir: Path | None = None
+    workdir: Path, user_dir: Path | None = None, global_dir: Path | None = None
 ) -> list[Skill]:
-    """Discover skills from the user dir and the project (.agents/skills).
+    """Discover skills from the user dir, the global agents dir and the project.
 
-    Project skills override user skills with the same name (a warning is
-    logged for each collision). Sorted by name.
+    Sources in ascending precedence: ``~/.limbo/skills``, ``~/.agents/skills``,
+    ``<workdir>/.agents/skills``. Later sources win name collisions (a warning
+    is logged for each). Sorted by name.
     """
     user_dir = user_dir if user_dir is not None else DEFAULT_USER_SKILLS_DIR
+    global_dir = (
+        global_dir if global_dir is not None else GLOBAL_AGENTS_SKILLS_DIR
+    )
     by_name: dict[str, Skill] = {}
-    for skill in _load_skills_from(user_dir) + _load_skills_from(
-        workdir / PROJECT_SKILLS_DIR
+    for skill in (
+        _load_skills_from(user_dir)
+        + _load_skills_from(global_dir)
+        + _load_skills_from(workdir / PROJECT_SKILLS_DIR)
     ):
         if skill.name in by_name:
             logger.warning(

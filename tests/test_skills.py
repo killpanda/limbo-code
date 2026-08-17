@@ -57,24 +57,67 @@ def test_parse_without_frontmatter_uses_fallback():
 
 def test_discover_from_user_and_project_dirs(tmp_path: Path):
     user_dir = tmp_path / "user_skills"
+    global_dir = tmp_path / "global_skills"
     project_dir = tmp_path / "project" / ".agents" / "skills"
     write_skill(user_dir, "aaa", "---\nname: aaa\ndescription: a\n---\nuser skill\n")
     write_skill(project_dir, "bbb", "---\nname: bbb\ndescription: b\n---\nproject skill\n")
 
     skills = discover_skills(
-        tmp_path / "project", user_dir=user_dir
+        tmp_path / "project", user_dir=user_dir, global_dir=global_dir
     )
 
     assert {s.name for s in skills} == {"aaa", "bbb"}
 
 
+def test_discover_from_global_agents_dir(tmp_path: Path):
+    global_dir = tmp_path / "global_skills"
+    write_skill(global_dir, "ccc", "---\nname: ccc\ndescription: c\n---\nglobal skill\n")
+
+    skills = discover_skills(
+        tmp_path / "project", user_dir=tmp_path / "user_skills", global_dir=global_dir
+    )
+
+    assert {s.name for s in skills} == {"ccc"}
+
+
+def test_global_skill_overrides_user_skill(tmp_path: Path):
+    user_dir = tmp_path / "user_skills"
+    global_dir = tmp_path / "global_skills"
+    write_skill(user_dir, "dup", "---\nname: dup\ndescription: d\n---\nuser version\n")
+    write_skill(global_dir, "dup", "---\nname: dup\ndescription: d\n---\nglobal version\n")
+
+    skills = discover_skills(
+        tmp_path / "project", user_dir=user_dir, global_dir=global_dir
+    )
+
+    assert len(skills) == 1
+    assert skills[0].body.strip() == "global version"
+
+
 def test_project_skill_overrides_user_skill(tmp_path: Path):
     user_dir = tmp_path / "user_skills"
+    global_dir = tmp_path / "global_skills"
     project_dir = tmp_path / "project" / ".agents" / "skills"
     write_skill(user_dir, "dup", "---\nname: dup\ndescription: d\n---\nuser version\n")
     write_skill(project_dir, "dup", "---\nname: dup\ndescription: d\n---\nproject version\n")
 
-    skills = discover_skills(tmp_path / "project", user_dir=user_dir)
+    skills = discover_skills(
+        tmp_path / "project", user_dir=user_dir, global_dir=global_dir
+    )
+
+    assert len(skills) == 1
+    assert skills[0].body.strip() == "project version"
+
+
+def test_project_skill_overrides_global_skill(tmp_path: Path):
+    global_dir = tmp_path / "global_skills"
+    project_dir = tmp_path / "project" / ".agents" / "skills"
+    write_skill(global_dir, "dup", "---\nname: dup\ndescription: d\n---\nglobal version\n")
+    write_skill(project_dir, "dup", "---\nname: dup\ndescription: d\n---\nproject version\n")
+
+    skills = discover_skills(
+        tmp_path / "project", user_dir=tmp_path / "user_skills", global_dir=global_dir
+    )
 
     assert len(skills) == 1
     assert skills[0].body.strip() == "project version"
@@ -87,7 +130,9 @@ def test_skill_name_collision_logs_warning(tmp_path: Path, caplog):
     write_skill(project_dir, "dup", "---\nname: dup\ndescription: d\n---\nproject version\n")
 
     with caplog.at_level(logging.WARNING, logger="limbo.skills"):
-        discover_skills(tmp_path / "project", user_dir=user_dir)
+        discover_skills(
+            tmp_path / "project", user_dir=user_dir, global_dir=tmp_path / "global_skills"
+        )
 
     assert any("collision" in r.message and "dup" in r.message for r in caplog.records)
 
@@ -100,7 +145,9 @@ def test_discover_skips_invalid_skills_with_warning(tmp_path: Path, caplog):
     write_skill(user_dir, "good", "---\nname: good\ndescription: d\n---\nbody\n")
 
     with caplog.at_level(logging.WARNING, logger="limbo.skills"):
-        skills = discover_skills(tmp_path / "project", user_dir=user_dir)
+        skills = discover_skills(
+            tmp_path / "project", user_dir=user_dir, global_dir=tmp_path / "global_skills"
+        )
 
     assert [s.name for s in skills] == ["good"]
     messages = "\n".join(r.message for r in caplog.records)
@@ -115,20 +162,28 @@ def test_discover_ignores_dirs_without_skill_md(tmp_path: Path):
     (user_dir / "not-a-skill" / "readme.txt").write_text("nope")
     write_skill(user_dir, "real", "---\nname: real\ndescription: d\n---\nok\n")
 
-    skills = discover_skills(tmp_path / "project", user_dir=user_dir)
+    skills = discover_skills(
+        tmp_path / "project", user_dir=user_dir, global_dir=tmp_path / "global_skills"
+    )
 
     assert [s.name for s in skills] == ["real"]
 
 
 def test_discover_missing_dirs_returns_empty(tmp_path: Path):
-    assert discover_skills(tmp_path / "nope", user_dir=tmp_path / "gone") == []
+    assert discover_skills(
+        tmp_path / "nope",
+        user_dir=tmp_path / "gone",
+        global_dir=tmp_path / "also-gone",
+    ) == []
 
 
 def test_skill_keeps_path_for_relative_resolution(tmp_path: Path):
     user_dir = tmp_path / "user_skills"
     path = write_skill(user_dir, "tdd", "---\nname: tdd\ndescription: d\n---\nsee tests.md\n")
 
-    skills = discover_skills(tmp_path / "project", user_dir=user_dir)
+    skills = discover_skills(
+        tmp_path / "project", user_dir=user_dir, global_dir=tmp_path / "global_skills"
+    )
 
     assert skills[0].path == path
 
