@@ -5,6 +5,7 @@ import pytest
 from limbo.config import Config, ProviderOverride
 from limbo.llm.anthropic_client import AnthropicMessagesClient
 from limbo.llm.catalog import (
+    CATALOG,
     DEEPSEEK,
     DEFAULT_BASE_URL,
     GENERIC_OPENAI,
@@ -298,11 +299,39 @@ def test_register_client_adds_dialect():
 def test_vision_defaults_to_false():
     # Text-only catalog entries stay non-vision (conservative default).
     assert resolve_model("deepseek-v4-flash").vision is False
-    assert resolve_model("kimi-k3").vision is False
+    assert resolve_model("glm-5.2").vision is False
+
+
+def test_deepseek_flash_vision_exp_is_vision_capable():
+    # Experimental flash variant: accepts image input, same spec as
+    # deepseek-v4-flash otherwise.
+    spec = resolve_model("deepseek-v4-flash-vision-exp")
+    assert spec.provider is DEEPSEEK
+    assert spec.vision is True
+    assert spec.reasoning is True
+    assert spec.thinking_format == "deepseek"
+
+
+def test_all_kimi_models_are_vision_capable():
+    # Every Kimi model (Moonshot API + Kimi For Coding) is multimodal.
+    kimi_ids = {
+        m for m in CATALOG
+        if m.startswith("kimi-") or m in {"k3", "kimi-for-coding", "kimi-for-coding-highspeed"}
+    }
+    assert kimi_ids, "expected at least one Kimi model in the catalog"
+    for model_id in kimi_ids:
+        assert resolve_model(model_id).vision is True, model_id
 
 
 def test_kimi_k2_5_is_vision_capable():
     assert resolve_model("kimi-k2.5").vision is True
+
+
+def test_kimi_k3_is_vision_capable():
+    # k3 (Kimi For Coding) and kimi-k3 (Moonshot) are the same multimodal
+    # model: both accept image input and must pass the vision gate.
+    assert resolve_model("kimi-k3").vision is True
+    assert resolve_model("k3").vision is True
 
 
 def test_unknown_model_vision_defaults_to_false():

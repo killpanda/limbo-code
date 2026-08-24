@@ -175,16 +175,19 @@ def _kimi_coding(
     *,
     context_window: int = 262_144,
     max_tokens: int = 32_768,
+    vision: bool = True,
 ) -> ModelSpec:
     # All Kimi For Coding models reason with Anthropic adaptive thinking
     # (thinking: {type: adaptive} + output_config.effort); thinking cannot
     # be disabled. Replayed thinking blocks may carry an empty signature.
+    # Every Kimi model is multimodal (accepts image input).
     return ModelSpec(
         id=model_id,
         provider=KIMI_CODING,
         context_window=context_window,
         max_tokens=max_tokens,
         reasoning=True,
+        vision=vision,
         thinking_format="anthropic-adaptive",
         thinking_levels={"low": "low", "high": "high", "max": "max"},
         thinking_can_disable=False,
@@ -197,7 +200,9 @@ def _moonshot(
     context_window: int = 262_144,
     max_tokens: int = 262_144,
     reasoning: bool = False,
-    vision: bool = False,
+    # Every Kimi (Moonshot) model is multimodal: image input is supported
+    # across the family, so the helper defaults to vision-capable.
+    vision: bool = True,
     thinking_format: str | None = None,
     thinking_levels: dict[str, str] | None = None,
     thinking_can_disable: bool = True,
@@ -264,6 +269,16 @@ CATALOG: dict[str, ModelSpec] = {
         reasoning=True,
         thinking_format="deepseek",
     ),
+    # Vision-enabled experimental flash variant (accepts image input).
+    "deepseek-v4-flash-vision-exp": ModelSpec(
+        id="deepseek-v4-flash-vision-exp",
+        provider=DEEPSEEK,
+        context_window=1_000_000,
+        max_tokens=65_536,
+        reasoning=True,
+        vision=True,
+        thinking_format="deepseek",
+    ),
     # -- Kimi (Moonshot AI) -------------------------------------------------
     "kimi-k2-0711-preview": _moonshot(
         "kimi-k2-0711-preview", context_window=131_072, max_tokens=16_384
@@ -278,7 +293,7 @@ CATALOG: dict[str, ModelSpec] = {
     ),
     # Kimi K2.5 is Moonshot's multimodal generation (accepts image input).
     "kimi-k2.5": _moonshot(
-        "kimi-k2.5", reasoning=True, thinking_format="deepseek", vision=True
+        "kimi-k2.5", reasoning=True, thinking_format="deepseek"
     ),
     "kimi-k2.6": _moonshot(
         "kimi-k2.6", reasoning=True, thinking_format="deepseek"
