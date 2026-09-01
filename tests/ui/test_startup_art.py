@@ -70,7 +70,10 @@ async def test_startup_art_hidden_when_resuming(tmp_path):
         await pilot.pause()
         chat = pilot.app.screen.query_one("#chat", ChatWidget)
         transcript = chat.transcript_text()
-        assert UPPER not in transcript  # half-block banner not rendered
+        # The tall multi-row banner is not rendered on resume (only the
+        # compact single-row user-message icon may contain ``▀``).
+        art_lines = startup_art_text().plain.splitlines()
+        assert art_lines[len(art_lines) // 2] not in transcript
         assert "已恢复会话" in transcript
 
 

@@ -115,3 +115,27 @@ def startup_art_text() -> Text:
             elif cb is not None:
                 text.append(LOWER, style=_rgb(cb))
     return text
+
+
+def user_icon() -> Text:
+    """A compact single-row mascot icon for user messages (LIM-16 v1.1).
+
+    Half-block compression of the mascot: red shirt on top, yellow pants
+    below, dark outline on the sides. One terminal row tall so it lines up
+    with the message text ("same size as the font") while keeping the
+    brand colors. Prepended before the ``❯`` user-message marker.
+
+    ``DRRRD`` / ``DYYYD`` -> 2 px rows condensed into 1 terminal row via
+    ``▀`` (top pixel as foreground, bottom pixel as background).
+    """
+    top = "DRRRD"
+    bottom = "DYYYD"
+    text = Text()
+    for ct_key, cb_key in zip(top, bottom):
+        ct = _PALETTE[ct_key]
+        cb = _PALETTE[cb_key]
+        if ct == cb:
+            text.append(FULL, style=_rgb(ct))
+        else:
+            text.append(UPPER, style=f"{_rgb(ct)} on {_rgb(cb)}")
+    return text
