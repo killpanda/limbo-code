@@ -35,7 +35,8 @@ ChatWidget {
 }
 .user-message {
     width: 1fr;
-    background: $surface;
+    background: $user-message-bg;
+    color: $user-message-fg;
     border-left: thick $primary;
     padding: 0 1;
     margin-top: 1;

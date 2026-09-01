@@ -92,6 +92,8 @@ def test_palette_snapshot_contains_semantic_tokens():
         "bg-elevated",
         "error-bright",
         "error-bg",
+        "user-message-bg",
+        "user-message-fg",
     ):
         assert token in snap, token
         assert snap[token].startswith("#"), token

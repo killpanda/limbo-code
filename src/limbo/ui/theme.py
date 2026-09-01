@@ -39,6 +39,10 @@ LIMBO_DARK = Theme(
         "text-tertiary": "#7F85A0",
         "border-subtle": "#2C3044",
         "border-default": "#3A3F57",
+        # 用户消息专属蓝：蓝染底 + 蓝字，与 agent 中性前景拉开辨识度
+        # （user-fg on user-bg = 7.26:1，on chat-bg = 7.91:1）
+        "user-message-bg": "#202744",
+        "user-message-fg": "#96B9EA",
         # 错误底块上的文字专用（on error-bg = 4.91:1）
         "error-bright": "#F06661",
         "error-bg": "#342026",
@@ -69,6 +73,10 @@ LIMBO_LIGHT = Theme(
         "text-tertiary": "#6B7186",
         "border-subtle": "#D8DCE8",
         "border-default": "#C4CADD",
+        # 用户消息专属蓝：淡蓝底 + 深蓝字，与 agent 中性前景拉开辨识度
+        # （user-fg on user-bg = 6.69:1，on chat-bg = 8.78:1）
+        "user-message-bg": "#DCE6F5",
+        "user-message-fg": "#1F4E86",
         "error-bright": "#A93230",
         "error-bg": "#F3D6D6",
         "diff-added": "#256B41",
