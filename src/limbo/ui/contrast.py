@@ -33,6 +33,7 @@ _FOREGROUNDS = (
     "error",
     "diff-added",
     "diff-removed",
+    "user-message-fg",
 )
 
 # §6.3 规范中实际使用的「文字 on 背景」组合（低于 4.5 即 FAIL）。
@@ -56,6 +57,8 @@ USED_PAIRS = frozenset(
         # F1：edit diff 的真实渲染路径（pygments Inserted/Deleted on diff 底）
         ("diff-added", "diff-added-bg"),
         ("diff-removed", "diff-removed-bg"),
+        # 用户消息蓝染底上的文字（新语义色，与 agent 中性前景区分）
+        ("user-message-fg", "user-message-bg"),
     }
 )
 
@@ -64,6 +67,7 @@ _EXTRA_PAIRS = (
     ("error-bright", "error-bg"),
     ("diff-added", "diff-added-bg"),
     ("diff-removed", "diff-removed-bg"),
+    ("user-message-fg", "user-message-bg"),  # 用户消息蓝染底文字
 )
 
 

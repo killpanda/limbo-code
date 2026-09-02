@@ -27,6 +27,7 @@ from textual.css.query import NoMatches
 from textual.widgets import Markdown, Static
 
 from limbo.models import Attachment
+from limbo.ui.banner import user_icon
 from limbo.ui.widgets.tool_card import ToolCard
 
 # How many message widgets stay mounted in the DOM. Older ones are pruned
@@ -144,7 +145,11 @@ class QueuedMessage(Vertical):
     def compose(self) -> ComposeResult:
         if self.state == "cancelled":
             self.add_class("cancelled")
-        yield Static(f"❯ {self._text}", classes="user-message", markup=False)
+        yield Static(
+            user_icon() + Text(" ") + Text(f"❯ {self._text}"),
+            classes="user-message",
+            markup=False,
+        )
         if self._attachments:
             chips = []
             for attachment in self._attachments:
@@ -310,7 +315,11 @@ class ChatWidget(VerticalScroll):
     ) -> None:
         self._current_assistant = None
         self._close_thinking()
-        msg = Static(f"❯ {text}", classes="user-message", markup=False)
+        msg = Static(
+            user_icon() + Text(" ") + Text(f"❯ {text}"),
+            classes="user-message",
+            markup=False,
+        )
         self.messages.append(msg)
         self._mount_and_scroll(msg)
         if attachments:
