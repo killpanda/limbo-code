@@ -8,7 +8,7 @@ from typing import Any
 
 from limbo.config import Config
 from limbo.models import ToolResult
-from limbo.tools.base import BaseTool
+from limbo.tools.base import BaseTool, ReplayPolicy
 from limbo.tools.bash import BashTool
 from limbo.tools.edit import EditTool
 from limbo.tools.find import FindTool
@@ -49,6 +49,11 @@ class ToolRegistry:
 
     def get(self, name: str) -> BaseTool | None:
         return self._tools.get(name)
+
+    def replay_policy(self, name: str) -> ReplayPolicy:
+        """How a call to ``name`` is recovered after a crash (unknown: unsafe)."""
+        policy = getattr(self.get(name), "replay", "unsafe")
+        return "safe" if policy == "safe" else "unsafe"
 
     async def execute(self, name: str, arguments: dict[str, Any]) -> ToolResult:
         tool = self.get(name)

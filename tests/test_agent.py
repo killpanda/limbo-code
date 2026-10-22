@@ -756,6 +756,124 @@ async def test_agent_resume_repairs_dangling_tool_calls(workdir):
 
 
 @pytest.mark.asyncio
+async def test_agent_resume_reruns_safe_calls_and_flags_unsafe_ones(workdir):
+    from limbo.history import NOT_STARTED_CONTENT, PARTIAL_CONTENT
+    from limbo.sessions import (
+        SessionMeta,
+        append_session_records,
+        load_session_full,
+        save_session,
+        tool_intent_record,
+    )
+
+    (workdir / "notes.txt").write_text("hello from disk\n")
+    session_dir = workdir / "sessions"
+    session_dir.mkdir()
+    path = session_dir / "crashed.jsonl"
+
+    def call(call_id: str, name: str, arguments: dict) -> dict:
+        return {
+            "id": call_id,
+            "type": "function",
+            "function": {"name": name, "arguments": arguments},
+        }
+
+    save_session(
+        path,
+        SessionMeta(id="crashed", tool_intents=True),
+        [
+            Message(role="user", content="look and change"),
+            Message(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    call("r1", "read", {"path": "notes.txt"}),
+                    call("b1", "bash", {"command": "make deploy"}),
+                    call("w1", "write", {"path": "x.txt", "content": "x"}),
+                ],
+            ),
+        ],
+    )
+    # The process died after read and bash started, before write did.
+    append_session_records(
+        path,
+        [tool_intent_record("r1", "read", "safe"), tool_intent_record("b1", "bash", "unsafe")],
+    )
+
+    agent = Agent(
+        config=Config(),
+        llm_client=FakeLLMClient([[TextChunk(text="ok")]]),
+        workdir=workdir,
+        session_dir=session_dir,
+        resume=path,
+    )
+    events = await _collect(agent.run("continue"))
+
+    reruns = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert [e.id for e in reruns] == ["r1"]
+    sent = agent.llm_client.calls[0][0]
+    contents = {m.tool_call_id: m.content for m in sent if m.role == "tool"}
+    assert "hello from disk" in (contents["r1"] or "")
+    assert contents["b1"] == PARTIAL_CONTENT
+    assert contents["w1"] == NOT_STARTED_CONTENT
+    # The unsafe calls never ran again.
+    assert not (workdir / "x.txt").exists()
+    # The re-run result is what the session file now holds.
+    on_disk = load_session_full(path)
+    disk_contents = {
+        m.tool_call_id: m.content for m in on_disk.messages if m.role == "tool"
+    }
+    assert "hello from disk" in (disk_contents["r1"] or "")
+    trace = read_agent_trace(agent)
+    assert any(
+        r["type"] == "tool_recovery" and r["rerun_tool_call_ids"] == ["r1"]
+        for r in trace
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_resume_of_legacy_session_marks_it_journaled(workdir):
+    from limbo.history import INTERRUPTED_CONTENT
+    from limbo.sessions import SessionMeta, load_session_full, save_session
+
+    session_dir = workdir / "sessions"
+    session_dir.mkdir()
+    path = session_dir / "legacy.jsonl"
+    save_session(
+        path,
+        SessionMeta(id="legacy"),
+        [
+            Message(role="user", content="go"),
+            Message(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    {
+                        "id": "b1",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": {"command": "ls"}},
+                    }
+                ],
+            ),
+        ],
+    )
+
+    agent = Agent(
+        config=Config(),
+        llm_client=FakeLLMClient([[TextChunk(text="ok")]]),
+        workdir=workdir,
+        session_dir=session_dir,
+        resume=path,
+    )
+    await _collect(agent.run("continue"))
+
+    sent = agent.llm_client.calls[0][0]
+    # No intent journal: the fate of the call is unknown.
+    assert [m.content for m in sent if m.role == "tool"] == [INTERRUPTED_CONTENT]
+    assert load_session_full(path).meta.tool_intents is True
+
+
+@pytest.mark.asyncio
 async def test_agent_stores_reasoning_on_assistant_message(workdir):
     from limbo.agent import ThinkingDelta
     from limbo.models import ThinkingChunk
@@ -2450,6 +2568,7 @@ async def test_checkpoints_persist_progress_before_a_crash(workdir):
 @pytest.mark.asyncio
 async def test_tool_calls_are_on_disk_before_tools_run(workdir):
     seen_on_disk: list[list[str]] = []
+    seen_intents: list[tuple[str, str]] = []
 
     class SpyTool:
         name = "spy"
@@ -2457,10 +2576,11 @@ async def test_tool_calls_are_on_disk_before_tools_run(workdir):
         parameters = {"type": "object", "properties": {}}
 
         def execute(self, arguments):
-            from limbo.sessions import load_session
+            from limbo.sessions import load_session_full
 
-            _, messages, _ = load_session(agent.session_path)
-            seen_on_disk.append([m.role for m in messages])
+            loaded = load_session_full(agent.session_path)
+            seen_on_disk.append([m.role for m in loaded.messages])
+            seen_intents.extend((i.call_id, i.replay) for i in loaded.intents)
             return ToolResult(success=True, output="ok")
 
         def cancel(self):
@@ -2483,6 +2603,8 @@ async def test_tool_calls_are_on_disk_before_tools_run(workdir):
     await _collect(agent.run("go"))
 
     assert seen_on_disk == [["system", "user", "assistant"]]
+    # The intent is committed before the effect (unknown policy: unsafe).
+    assert seen_intents == [("c1", "unsafe")]
 
 
 @pytest.mark.asyncio
