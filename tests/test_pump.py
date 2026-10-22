@@ -264,6 +264,9 @@ class FakeAgent:
     def steer(self, text):
         return self._queue.offer(text).id
 
+    def persist_meta(self):
+        pass
+
 
 @pytest.mark.asyncio
 async def test_leftover_steer_outranks_goal_and_yields_steer_events(

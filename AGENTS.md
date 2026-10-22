@@ -103,7 +103,7 @@ Single column: status bar (state/elapsed/tokens/model/workdir/queued + rainbow �
   history — sub-calls never do. `SessionMeta.code_mode` persists the mode
   across resume
 - System prompt = hardcoded tool guidelines + `<workdir>/AGENTS.md` & `~/.limbo/AGENTS.md` (XML-wrapped) + skills catalog. **This file is injected into every request — keep it accurate and lean.**
-- Session files fully rewritten per save (atomic, 0600); trace holds full-fidelity record
+- Session JSONL is checkpointed mid-turn (before/after each LLM request, after each tool batch): new messages are appended; full atomic rewrite (0600) only on first save, compaction, or unpatched meta drift. Typed records `meta_patch` (merged over the meta line on load; goal state via `Agent.persist_meta()`) and `tool_intent` sit between message lines; unknown types are skipped. Trace holds the full-fidelity record
 
 ## Testing
 
