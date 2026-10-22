@@ -1108,6 +1108,7 @@ async def test_agent_trace_records_full_turn(workdir):
     start = records[0]
     assert start["config"]["model"] == "deepseek-v4-pro"
     assert start["resumed"] is False
+    assert start["trace_schema"] == 2
     # The API key must never appear in the trace.
     assert "api_key" not in json.dumps(records)
 
@@ -1115,6 +1116,7 @@ async def test_agent_trace_records_full_turn(workdir):
 
     request = records[2]
     assert request["turn"] == 1 and request["iteration"] == 1
+    assert request["attempt"] == 1
     assert request["body"]["model"] == "fake-model"
     assert request["body"]["messages"][0]["role"] == "system"
     assert request["body"]["tools"]  # full tool definitions included
@@ -1123,17 +1125,24 @@ async def test_agent_trace_records_full_turn(workdir):
     assert response["usage"] == usage
     assert response["cached_tokens"] == 80
     assert response["finish_reason"] == "tool_calls"
-    assert response["tool_calls"] == [{"id": "c1", "name": "read"}]
+    assert response["tool_calls"] == [
+        {"id": "c1", "name": "read", "arguments": {"path": "main.py"}}
+    ]
+    assert response["content"] == ""
+    assert response["started_at"] <= response["ts"]
+    assert records[7]["content"] == "done"
 
     tool_call, tool_result = records[4], records[5]
     assert tool_call["name"] == "read"
     assert tool_call["arguments"] == {"path": "main.py"}
     assert tool_result["success"] is True
     assert tool_result["duration"] >= 0
+    assert tool_result["started_at"] <= tool_result["ts"]
     assert "x = 1" in tool_result["output"]
 
     turn_end = records[-1]
     assert turn_end["status"] == "completed"
+    assert turn_end["started_at"] <= records[1]["ts"]
     assert turn_end["iterations"] == 2
 
 

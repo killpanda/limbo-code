@@ -75,6 +75,7 @@ from limbo.pump import (
     TurnPump,
 )
 from limbo.steer import FOLLOW_UP
+from limbo.tracing.command import TracingViewerCommand
 
 # -- input events (stdin → frontend) ------------------------------------------
 
@@ -157,6 +158,11 @@ class SlashQuit:
 
 
 @dataclass(frozen=True)
+class SlashTracingViewer:
+    arg: str
+
+
+@dataclass(frozen=True)
 class UnknownCommand:
     name: str
 
@@ -170,6 +176,7 @@ Submission = (
     | SlashQueue
     | SlashHelp
     | SlashQuit
+    | SlashTracingViewer
     | UnknownCommand
 )
 
@@ -200,6 +207,8 @@ def parse_submission(text: str) -> Submission:
         return SlashHelp()
     if name in ("quit", "exit"):
         return SlashQuit()
+    if name == "tracing-viewer":
+        return SlashTracingViewer(arg)
     return UnknownCommand(name)
 
 
@@ -439,6 +448,7 @@ HELP_TEXT = """可用命令：
   /model [id]    查看/切换模型
   /new           开始新会话
   /queue <文本>  当前任务做完后再处理这条消息（空闲时直接发送）
+  /tracing-viewer [id|off]  在浏览器查看 trace（打印本地链接）
   /quit          退出
 忙时输入的普通文本会作为插话排队；Esc / Ctrl+C 中断当前任务。"""
 
@@ -497,6 +507,7 @@ class HeadlessFrontend:
         self._eof = False
         self._quit = False
         self._last_tokens = 0
+        self._tracing_viewer = TracingViewerCommand(lambda: self._agent)
 
     # -- main loop ------------------------------------------------------------
 
@@ -525,6 +536,7 @@ class HeadlessFrontend:
             if self._turn_task is not None:
                 self._turn_task.cancel()
             self._reporters.release()
+            self._tracing_viewer.close()
             self._agent.close()
         return 0
 
@@ -557,6 +569,8 @@ class HeadlessFrontend:
                 self._line(f"➤ 已排队，当前任务完成后处理：{_first_line(command.text)}")
             elif isinstance(command, SlashHelp):
                 self._line(HELP_TEXT)
+            elif isinstance(command, SlashTracingViewer):
+                await self._cmd_tracing_viewer(command.arg)
             else:
                 self._line(
                     "当前任务进行中，该命令暂不可用"
@@ -583,6 +597,8 @@ class HeadlessFrontend:
             self._line(HELP_TEXT)
         elif isinstance(command, SlashQuit):
             self._quit = True
+        elif isinstance(command, SlashTracingViewer):
+            await self._cmd_tracing_viewer(command.arg)
         elif isinstance(command, UnknownCommand):
             self._line(f"未知命令 /{command.name}（/help 查看可用命令）")
 
@@ -757,6 +773,9 @@ class HeadlessFrontend:
         )
         for notice in notices:
             self._line(notice)
+
+    async def _cmd_tracing_viewer(self, arg: str) -> None:
+        self._line(await asyncio.to_thread(self._tracing_viewer.run, arg))
 
     def _cmd_new(self) -> None:
         self._agent.close()  # release the old session's trace file handle
