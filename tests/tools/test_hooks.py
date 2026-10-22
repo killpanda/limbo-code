@@ -77,3 +77,58 @@ async def test_plan_mode_blocks_writes_and_allows_reads(workdir, registry):
     assert (await registry.execute("write", {"path": "y.txt", "content": "a"})).success
 
 
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_blocks_run_code_and_its_side_effects(workdir, registry):
+    """run_code executes arbitrary Python, so plan mode must refuse it."""
+    registry.plan_mode = True
+    result = await registry.execute(
+        "run_code",
+        {
+            "code": "open('x.txt', 'w').write('a')",
+            "description": "write a file",
+        },
+    )
+
+    assert result.success is False
+    assert "Plan mode" in (result.error or "")
+    assert not (workdir / "x.txt").exists()
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "sort -o out.txt in.txt",
+        "sort --output=out.txt in.txt",
+        "sed -n 'w out.txt' in.txt",
+        "sed 's/a/b/w out.txt' in.txt",
+        "git log --output=out.txt",
+        "git diff --textconv",
+        "date -s '2020-01-01'",
+        "xxd -r dump.txt out.bin",
+        "echo hi > out.txt",
+    ],
+)
+def test_plan_mode_rejects_commands_that_write(command):
+    from limbo.tools.hooks import is_read_only_command
+
+    assert is_read_only_command(command) is False
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "ls -la",
+        "ls 2>/dev/null",
+        "git status 2>&1",
+        "git log -n 5",
+        "sort in.txt | uniq -c",
+        "sed -n '1,20p' in.txt",
+        "grep 'a>b' in.txt",
+    ],
+)
+def test_plan_mode_allows_read_only_commands(command):
+    from limbo.tools.hooks import is_read_only_command
+
+    assert is_read_only_command(command) is True

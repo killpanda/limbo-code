@@ -54,7 +54,9 @@ class ToolHook:
 
 
 # Commands plan mode lets bash run: read-only inspection only. Anything
-# else (or any output redirection) is blocked while planning.
+# else (or any output redirection) is blocked while planning. This is a
+# best-effort guard, not a security boundary: shell verbs are open-ended
+# and flags can hide writes (see _flag_writes_file for the ones we know).
 _READ_ONLY_COMMANDS = frozenset(
     {
         "cat", "head", "tail", "less", "wc", "ls", "tree", "pwd", "file",
@@ -84,14 +86,62 @@ _FIND_WRITE_ACTIONS = frozenset(
 )
 # Segment separators; a redirection to a file is a write.
 _SEGMENT_SPLIT = re.compile(r"\|\||&&|[|;\n]")
+# Redirections that do not write a file: fd duplication (2>&1) and
+# discarding to /dev/null. Stripped before looking for a real write.
+_QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
+_HARMLESS_REDIRECT = re.compile(r"\d?>>?\s*/dev/null|\d?>&\d")
 _WRITE_REDIRECT = re.compile(r"(?<![0-9&])>|[0-9]>(?!&)|&>")
+# Flags that turn an otherwise read-only command into a writer, or into an
+# arbitrary-command runner. Explicit list: the allowlist never claimed to
+# be exhaustive, but these are the common footguns.
+_GIT_WRITE_ARGS = ("--ext-diff", "--textconv", "--open-files-in-pager")
+_SED_WRITE_COMMAND = re.compile(
+    r"(?:^|[;\n}])\s*(?:[0-9$]+|/[^/]*/)?\s*[wWe](?:\s|$)"
+)
+# `s/…/…/w file` — the write lives in the substitution flags.
+_SED_SUBST_WRITE = re.compile(r"(?:^|[;\n}])\s*s(.).*?\1.*?\1[^;}\n]*\bw\b")
+
+
+def _flag_writes_file(head: str, words: list[str]) -> bool:
+    """Whether an allowlisted command carries a flag that writes a file.
+
+    Only the commands where such a flag exists are checked; unknown flags
+    stay allowed (best-effort, see the allowlist comment).
+    """
+    args = words[1:]
+    if head == "sort":
+        # -o/--output writes the sort result; --compress-program runs it.
+        return any(
+            a in ("-o", "--output", "--compress-program")
+            or a.startswith("--output=")
+            or a.startswith("--compress-program=")
+            or (a.startswith("-o") and not a.startswith("--"))
+            for a in args
+        )
+    if head == "date":
+        # -s/--set changes the system clock.
+        return any(a in ("-s", "--set") or a.startswith("--set=") for a in args)
+    if head == "xxd":
+        # -r reverses a hex dump into a file when given an output path.
+        return any(
+            a == "-r" or (a.startswith("-") and not a.startswith("--") and "r" in a[1:])
+            for a in args
+        )
+    if head == "sed":
+        # -i is handled at the call site; a script can also write (w/W)
+        # or execute (e) as a command.
+        return any(
+            _SED_WRITE_COMMAND.search(a) or _SED_SUBST_WRITE.search(a)
+            for a in args
+        )
+    return False
 
 
 def is_read_only_command(command: str) -> bool:
     """Whether every segment of ``command`` is a known read-only command."""
-    if _WRITE_REDIRECT.search(command.replace(">/dev/null", "").replace(
-        "> /dev/null", ""
-    )):
+    probe = _QUOTED.sub("", command)
+    probe = _HARMLESS_REDIRECT.sub("", probe)
+    if _WRITE_REDIRECT.search(probe):
         return False
     if "$(" in command or "`" in command:
         return False
@@ -106,12 +156,22 @@ def is_read_only_command(command: str) -> bool:
         if not words:
             continue
         head = words[0]
+        if _flag_writes_file(head, words):
+            return False
         if head == "git":
             rest = words[1:]
             # Skip global options; -C/-c take a separate value.
             while rest and rest[0].startswith("-"):
                 rest = rest[2:] if rest[0] in ("-C", "-c") else rest[1:]
             if not rest:
+                return False
+            if any(
+                a.startswith("--output")
+                or a in _GIT_WRITE_ARGS
+                or a.startswith("--open-files-in-pager")
+                or a == "-O"
+                for a in rest
+            ):
                 return False
             sub, args = rest[0], rest[1:]
             if sub in _GIT_LIST_ONLY:
@@ -150,8 +210,9 @@ PLAN_MODE_BLOCK = (
 class PlanModeHook(ToolHook):
     """Read-only mode: only crash-replay-safe tools and read-only bash run.
 
-    ``run_code`` itself is allowed — its tool sub-calls pass through this
-    same hook, so a program cannot reach a write tool either.
+    ``run_code`` is blocked outright: it executes arbitrary Python, so a
+    program could write files or spawn processes without ever touching a
+    tool (the hook chain only sees tool calls).
     """
 
     name = "plan"
@@ -162,7 +223,13 @@ class PlanModeHook(ToolHook):
         self._is_read_only_tool = is_read_only_tool
 
     def before_tool(self, name: str, arguments: dict[str, Any]) -> BeforeDecision:
-        if name == "run_code" or self._is_read_only_tool(name):
+        if name == "run_code":
+            return Block(
+                PLAN_MODE_BLOCK.format(
+                    what="the run_code tool (it runs arbitrary Python)"
+                )
+            )
+        if self._is_read_only_tool(name):
             return None
         if name == "bash":
             command = str(arguments.get("command", ""))
