@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
-from limbo.ui.theme import LIMBO_DARK, LIMBO_LIGHT, palette_snapshot
+from limbo.ui.theme import LIMBO_DARK, LIMBO_DUSK, LIMBO_LIGHT, palette_snapshot
 
 TEXT_MIN = 4.5
 DECORATIVE_MIN = 3.0
@@ -34,6 +34,7 @@ _FOREGROUNDS = (
     "diff-added",
     "diff-removed",
     "user-message-fg",
+    "thinking",
 )
 
 # §6.3 规范中实际使用的「文字 on 背景」组合（低于 4.5 即 FAIL）。
@@ -59,6 +60,8 @@ USED_PAIRS = frozenset(
         ("diff-removed", "diff-removed-bg"),
         # 用户消息蓝染底上的文字（新语义色，与 agent 中性前景区分）
         ("user-message-fg", "user-message-bg"),
+        ("thinking", "bg-base"),  # 推理文本（Limbo Dusk）
+        ("selected-fg", "selected-bg"),  # 列表选中行、激活标签
     }
 )
 
@@ -68,6 +71,7 @@ _EXTRA_PAIRS = (
     ("diff-added", "diff-added-bg"),
     ("diff-removed", "diff-removed-bg"),
     ("user-message-fg", "user-message-bg"),  # 用户消息蓝染底文字
+    ("selected-fg", "selected-bg"),
 )
 
 
@@ -120,9 +124,9 @@ def check_theme(theme_name: str, palette: dict[str, str]) -> list[CheckResult]:
 
 
 def check_palettes() -> tuple[list[CheckResult], int]:
-    """校验 limbo-dark / limbo-light。返回 (结果列表, 失败数)。"""
+    """校验 limbo-dusk / limbo-dark / limbo-light。返回 (结果列表, 失败数)。"""
     results: list[CheckResult] = []
-    for theme in (LIMBO_DARK, LIMBO_LIGHT):
+    for theme in (LIMBO_DUSK, LIMBO_DARK, LIMBO_LIGHT):
         results.extend(check_theme(theme.name, palette_snapshot(theme)))
     failures = sum(1 for r in results if r.status in ("FAIL", "BAD"))
     return results, failures

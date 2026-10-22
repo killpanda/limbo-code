@@ -48,6 +48,20 @@ def _deterministic_ui(monkeypatch):
     frozen = SimpleNamespace(monotonic=lambda: 100.0)
     monkeypatch.setattr("limbo.ui.widgets.status_bar.time", frozen)
     monkeypatch.setattr("limbo.ui.widgets.tool_card.time", frozen)
+    monkeypatch.setattr("limbo.ui.widgets.activity.time", frozen)
+    # Relative times ("3 天前") on the landing and in the session picker are
+    # measured against a fixed "now" so snapshots don't age day by day.
+    import limbo.ui.widgets.landing as landing_module
+
+    class _FrozenDatetime(landing_module.datetime):  # type: ignore[misc]
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[override]
+            return cls(2026, 8, 1, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(landing_module, "datetime", _FrozenDatetime)
+    # __version__ comes from git (vcs versioning): v0.2.2 on a tag,
+    # v0.2.3.devN+g<sha> on a branch checkout in CI.
+    monkeypatch.setattr(landing_module, "__version__", "0.0.0")
     from limbo.ui.widgets.status_bar import StatusBar
 
     monkeypatch.setattr(StatusBar, "_tick", lambda self: None)
@@ -57,6 +71,8 @@ def _deterministic_ui(monkeypatch):
             return self
 
     monkeypatch.setattr("limbo.ui.app.Path", _NoResolvePath)
+    # The sidebar lists discovered skills, which include ~/.limbo/skills.
+    monkeypatch.setattr("limbo.ui.screens.main.discover_skills", lambda workdir: [])
 
 
 def make_app(tmp_path: Path) -> LimboApp:
@@ -89,6 +105,29 @@ def test_snapshot_thinking_and_running_tool(snap_compare, tmp_path):
         await pilot.pause()
 
     assert snap_compare(app, terminal_size=(90, 28), run_before=run_before)
+
+
+def test_snapshot_wide_layout_with_sidebar(snap_compare, tmp_path):
+    """Wide terminal: chat column beside the session sidebar (Limbo Dusk)."""
+    app = make_app(tmp_path)
+
+    async def run_before(pilot) -> None:
+        await pilot.pause()
+        screen = pilot.app.screen
+        chat = screen.query_one("#chat", ChatWidget)
+        chat.add_user_message("把 provider 解析抽成独立模块")
+        card = chat.add_tool_card(
+            "c1", "edit", {"path": "src/limbo/config.py", "old_text": "a\nb", "new_text": "c"}
+        )
+        card.set_success("ok")
+        sidebar = screen.query_one("#sidebar")
+        sidebar.record_tool_result(
+            "edit", {"path": "src/limbo/config.py", "old_text": "a\nb", "new_text": "c"}
+        )
+        sidebar.set_usage(12_000, 42_000, 128_000)
+        await pilot.pause()
+
+    assert snap_compare(app, terminal_size=(140, 32), run_before=run_before)
 
 
 def test_snapshot_tool_error_and_error_message(snap_compare, tmp_path):

@@ -1,19 +1,29 @@
-/* Limbo TUI — pi 风格单栏布局，集中管理所有样式。
+/* Limbo TUI — Limbo Dusk：聊天流 + 右侧栏，窄屏收成单栏，集中管理所有样式。
  *
  * 用色规范见 RFC LIM-16 v1.1 §6.3：本文件只允许引用主题语义变量
  * （limbo-dark / limbo-light 由 src/limbo/ui/theme.py 注册），禁止裸 hex。
  * 例外：Game2048 tile 色为游戏语义色，豁免。
  */
 
-/* ---- 顶部状态栏 ---- */
+/* ---- 顶部状态栏：状态 + ╱ 斜线纹理；窄屏时再加字标和上下文摘要 ---- */
 #statusbar {
     height: 1;
     padding: 0 1;
-    background: $surface;
+    background: $background;
+}
+#statusbar-logo {
+    width: auto;
+    display: none;
 }
 #statusbar-state {
-    width: 1fr;
+    width: auto;
+    padding-right: 1;
     color: $text-secondary;
+}
+#statusbar-diag {
+    width: 1fr;
+    color: $diag;
+    overflow: hidden;
 }
 #statusbar-state.thinking {
     color: $primary;
@@ -23,8 +33,54 @@
 }
 #statusbar-context {
     width: auto;
+    padding-left: 1;
     color: $text-secondary;
     text-align: right;
+    display: none;
+}
+MainScreen #statusbar {
+    display: none;
+}
+MainScreen.-compact #statusbar {
+    display: block;
+}
+MainScreen.-compact #statusbar-logo,
+MainScreen.-compact #statusbar-context {
+    display: block;
+}
+
+/* ---- 主体：聊天列 + 右侧栏 ---- */
+#body {
+    height: 1fr;
+    layers: base overlay;
+}
+#main-col {
+    width: 1fr;
+    height: 1fr;
+}
+#sidebar {
+    width: 36;
+    height: 1fr;
+    padding: 1 2;
+    background: $surface;
+    border-left: vkey $border-subtle;
+    scrollbar-size-vertical: 1;
+}
+#sidebar Static {
+    height: auto;
+}
+#sidebar .sb-group {
+    margin-top: 1;
+}
+MainScreen.-compact #sidebar {
+    display: none;
+}
+/* ctrl+d：窄屏下把侧栏临时盖在聊天右侧 */
+MainScreen.-compact.-peek #sidebar {
+    display: block;
+    dock: right;
+    layer: overlay;
+    border-left: tall $primary;
 }
 
 /* ---- 聊天流 ---- */
@@ -55,7 +111,7 @@ ChatWidget {
     margin-top: 1;
 }
 .thinking-summary {
-    color: $text-tertiary;
+    color: $thinking;
     text-style: italic;
 }
 .thinking-summary:hover {
@@ -64,6 +120,8 @@ ChatWidget {
 .thinking-body {
     color: $text-tertiary;
     text-style: italic;
+    padding-left: 2;
+    border-left: solid $diag;
 }
 .error-message {
     width: 1fr;
@@ -157,42 +215,74 @@ MarkdownBlock > .code_inline {
     color: $accent;
 }
 
-/* ---- 工具调用卡片 ---- */
+/* ---- 工具调用：一行语法（✓ Read  path  0.1s），展开体挂在 │ 竖线下 ---- */
 ToolCard {
     height: auto;
-    padding-left: 1;
-    background: $surface;
-    border-left: thick $primary;
-}
-ToolCard.success {
-    border-left: thick $success;
-}
-ToolCard.error {
-    border-left: thick $error;
-    background: $error-bg;
+    padding: 0 1;
 }
 ToolCard .tool-header {
     height: 1;
-    color: $text-secondary;
 }
-ToolCard.running .tool-header {
-    color: $primary;
-}
-ToolCard.success .tool-header {
-    color: $success;
-}
-ToolCard.error .tool-header {
-    color: $error-bright;
+ToolCard:hover .tool-header {
+    text-style: underline;
 }
 ToolCard .tool-body {
     height: auto;
     max-height: 24;
+    margin-left: 2;
     padding-left: 1;
-    border-left: solid $border-default;
-    background: $surface;
+    border-left: solid $diag;
+    background: $background;
 }
 ToolCard.error .tool-body {
     background: $error-bg;
+}
+
+/* ---- 启动页：渐变字标 + 环境 + 下一步 ---- */
+Landing {
+    height: auto;
+    padding: 1 1 0 1;
+}
+Landing .landing-diag {
+    height: 1;
+    overflow: hidden;
+}
+Landing .landing-head {
+    height: auto;
+    margin: 1 0;
+}
+Landing .landing-logo {
+    width: auto;
+    height: auto;
+    margin-right: 4;
+}
+Landing .landing-info {
+    width: 1fr;
+    height: auto;
+}
+Landing .landing-cols {
+    height: auto;
+    margin-top: 1;
+}
+Landing .landing-recent, Landing .landing-tips {
+    width: 1fr;
+    height: auto;
+}
+MainScreen.-compact Landing .landing-info {
+    display: none;
+}
+
+/* ---- 活动行（Tide）：忙碌时出现在输入框上方 ---- */
+#activity {
+    height: 1;
+    padding: 0 2;
+    margin-top: 1;
+}
+
+/* ---- 输入框上方的状态胶囊 ---- */
+#pills {
+    height: 1;
+    padding: 0 2;
 }
 
 /* ---- 斜杠命令自动补全菜单 ---- */
@@ -222,70 +312,95 @@ ToolCard.error .tool-body {
 #hint {
     height: 1;
     padding: 0 2;
+    background: $surface;
     color: $text-secondary;
 }
 
-/* ---- 会话选择弹窗 ---- */
-SessionPicker {
+/* ---- Dialog 基座：遮罩 + 卡片 + 标题 ╱ 线 ---- */
+Dialog {
     align: center middle;
+    background: $background 60%;
 }
-SessionPicker #session-picker {
+Dialog .dialog {
     width: 80%;
-    max-width: 110;
+    max-width: 96;
     height: auto;
     max-height: 80%;
-    border: round $accent;
     background: $surface;
+    border: tall $panel;
     padding: 1 2;
 }
-SessionPicker #picker-title {
-    text-style: bold;
+Dialog .dialog-title {
+    height: 1;
     margin-bottom: 1;
+    text-wrap: nowrap;
+    text-overflow: clip;
 }
-SessionPicker ListView {
+Dialog .dialog-hint {
+    height: 1;
+    margin-top: 1;
+}
+Dialog ListView, Dialog OptionList {
     height: auto;
     max-height: 20;
-}
-SessionPicker ListView:focus > ListItem.-highlight {
-    background: $panel;
-    color: $accent;
-}
-
-/* ---- 模型选择弹窗 ---- */
-ModelPicker {
-    align: center middle;
-}
-ModelPicker #model-picker {
-    width: 80%;
-    max-width: 110;
-    height: auto;
-    max-height: 80%;
-    border: round $accent;
     background: $surface;
-    padding: 1 2;
+    border: none;
+    padding: 0;
 }
-ModelPicker #picker-title {
-    text-style: bold;
+Dialog ListView > ListItem.-highlight,
+Dialog ListView:focus > ListItem.-highlight {
+    background: $selected-bg;
+    color: $selected-fg;
+}
+Dialog OptionList > .option-list--option-highlighted {
+    background: $selected-bg;
+    color: $selected-fg;
+}
+CommandPalette .palette-tabs {
+    height: 1;
     margin-bottom: 1;
 }
-ModelPicker ListView {
-    height: auto;
-    max-height: 24;
-}
-ModelPicker ListView:focus > ListItem.-highlight {
+CommandPalette .palette-input {
+    border: none;
     background: $panel;
-    color: $accent;
+    padding: 0 1;
+    height: 1;
+    margin-bottom: 1;
 }
-ModelPicker .provider-header {
+
+/* ---- 模型选择 / 登录弹窗 ---- */
+ModelPicker #model-search, AuthDialog Input {
+    border: none;
+    background: $panel;
+    padding: 0 1;
+    height: 1;
+    margin-bottom: 1;
+}
+AuthDialog Input:focus {
+    background: $selected-bg;
+}
+ModelPicker ListView {
+    max-height: 16;
+}
+ModelPicker .provider-header, ModelPicker .recent-header {
     color: $text-secondary;
     text-style: bold;
 }
 ModelPicker .unavailable {
     color: $text-tertiary;
 }
+ModelPicker .custom-row {
+    color: $primary;
+}
 ModelPicker #picker-hint {
     color: $warning;
-    margin-top: 1;
+    height: auto;
+}
+AuthDialog .auth-intro {
+    height: auto;
+    margin-bottom: 1;
+}
+AuthDialog .auth-status {
     height: auto;
 }
 

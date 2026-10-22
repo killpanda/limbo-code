@@ -158,11 +158,16 @@ class KittyKeyboardMode(str, Enum):
 
 
 class UIConfig(BaseModel):
-    # Theme name: built-in "limbo-dark" (default) / "limbo-light", or any
-    # Textual built-in theme (e.g. "textual-dark", "dracula", "nord").
+    # Theme name. Unset / "auto" follows the Omarchy system theme when it is
+    # installed and uses "limbo-dusk" otherwise; "omarchy" always follows it.
+    # Also accepts "limbo-dusk" / "limbo-dark" / "limbo-light" or any Textual
+    # built-in theme (e.g. "textual-dark", "dracula", "nord").
     theme: str | None = None
-    # Show the startup ASCII-art banner on fresh sessions.
+    # Show the startup landing (gradient wordmark + tips) on fresh sessions.
     show_banner: bool = True
+    # Animation level (Limbo Motion): "full" / "reduced" / "off". Unset =
+    # full, or reduced inside an SSH session. LIMBO_MOTION overrides it.
+    motion: str | None = None
     # Kitty keyboard protocol handling (see KittyKeyboardMode):
     #   auto     - enable normally, except inside the herdr multiplexer where
     #              it breaks IME/Chinese input (default)
@@ -315,6 +320,30 @@ def save_model_to_config(model: str, path: Path | None = None) -> bool:
             llm = tomlkit.table()
             doc["llm"] = llm
         llm["model"] = model
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+    except Exception:  # noqa: BLE001 - any failure degrades to session-only
+        return False
+    return True
+
+
+def save_thinking_to_config(level: str | None, path: Path | None = None) -> bool:
+    """Persist ``[llm] thinking_effort`` (None removes it); same contract as
+    :func:`save_model_to_config`."""
+    path = path or DEFAULT_CONFIG_PATH
+    try:
+        if path.exists():
+            doc = tomlkit.parse(path.read_text(encoding="utf-8"))
+        else:
+            doc = tomlkit.document()
+        llm = doc.get("llm")
+        if not isinstance(llm, dict):
+            llm = tomlkit.table()
+            doc["llm"] = llm
+        if level is None:
+            llm.pop("thinking_effort", None)
+        else:
+            llm["thinking_effort"] = level
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(tomlkit.dumps(doc), encoding="utf-8")
     except Exception:  # noqa: BLE001 - any failure degrades to session-only

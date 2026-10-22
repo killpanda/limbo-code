@@ -7,8 +7,10 @@ import re
 import secrets
 from pathlib import Path
 
+from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import Static
 
@@ -25,7 +27,7 @@ from limbo.agent import (
     UsageUpdate,
 )
 from limbo.compaction import is_summary_message
-from limbo.config import Config
+from limbo.config import Config, save_thinking_to_config
 from limbo.goal import (
     STATUS_ACTIVE,
     GoalClear,
@@ -36,6 +38,7 @@ from limbo.goal import (
     parse_verify_proposal,
 )
 from limbo.integrations import AgentState, create_reporters, install_exit_hooks
+from limbo.llm.catalog import resolve_model, thinking_choices
 from limbo.llm.client import LLMClient
 from limbo.llm.factory import create_llm_client
 from limbo.model_switch import (
@@ -59,34 +62,49 @@ from limbo.skills import Skill, discover_skills
 from limbo.steer import FOLLOW_UP, STEER
 from limbo.tools.bash import BashTool
 from limbo.tracing.command import TracingViewerCommand
-from limbo.ui.banner import startup_art_text
+from limbo.ui import recent_models
 from limbo.ui.commands import SlashCommand, SlashCommandRegistry
 from limbo.ui.path_input import attachments_from_text, looks_like_path
 from limbo.ui.screens.btw import BtwScreen
+from limbo.ui.screens.command_palette import CommandPalette, PaletteChoice
 from limbo.ui.screens.game2048 import Game2048Screen
 from limbo.ui.screens.model_picker import ModelPicker
 from limbo.ui.screens.session_picker import SessionPicker
 from limbo.ui.screens.verify_picker import EDIT as VERIFY_EDIT
 from limbo.ui.screens.verify_picker import VerifyPicker
+from limbo.ui.widgets.activity import ActivityLine
 from limbo.ui.widgets.chat import ChatWidget, QueuedMessage
 from limbo.ui.widgets.command_menu import SlashCommandMenu
 from limbo.ui.widgets.input import InputWidget, PasteMarkersInvalid, UserSubmitted
+from limbo.ui.widgets.key_hints import BUSY_HINTS, IDLE_HINTS, KeyHints
+from limbo.ui.widgets.landing import Landing
+from limbo.ui.widgets.pills import Pills
+from limbo.ui.widgets.sidebar import WIDE_MIN_WIDTH, Sidebar, git_branch
 from limbo.ui.widgets.status_bar import StatusBar
 
 # Key hints under the input. While a turn runs, Enter steers it and
 # Alt+Enter queues a follow-up for after the task (pi-durable's inbox).
-_HINT_IDLE = (
-    "Enter 发送 · Shift+Enter 换行 · ↑↓ 历史 · /! 命令 · ctrl+o 工具输出 · ctrl+g 2048"
-)
-_HINT_BUSY = (
-    "Enter 插话 · Alt+Enter 做完再做 · Shift+Enter 换行 · Esc 中断 · ctrl+o 工具输出"
-)
+_HINT_IDLE = IDLE_HINTS
+_HINT_BUSY = BUSY_HINTS
 
 class MainScreen(Screen[None]):
-    """Single-column chat screen: status bar / chat flow / input / hint."""
+    """Chat screen (Limbo Dusk): status bar / chat flow + input beside a
+    session sidebar / key hints.
+
+    Terminals narrower than ``WIDE_MIN_WIDTH`` get the ``-compact`` class:
+    the sidebar hides and the status bar shows the wordmark and a context
+    summary instead; ``ctrl+d`` peeks the sidebar as an overlay.
+    """
 
     BINDINGS = [
         Binding("ctrl+o", "toggle_tools", "展开/收起工具输出"),
+        Binding("ctrl+p", "command_palette", "命令面板", priority=True),
+        Binding("ctrl+s", "sessions", "会话", priority=True),
+        Binding("ctrl+l", "models", "模型", priority=True),
+        Binding("shift+tab", "cycle_thinking", "思考档位", priority=True),
+        # Only enabled in compact mode (see check_action), so the input's
+        # own ctrl+d keeps working on wide terminals.
+        Binding("ctrl+d", "toggle_sidebar", "侧栏详情", priority=True),
         Binding("ctrl+g", "game2048", "2048 小游戏"),
         # Screen-level ESC (LIM-53): the input widget's priority binding
         # wins while it is focused (slash-menu close lives there); this
@@ -170,8 +188,8 @@ class MainScreen(Screen[None]):
         """Report semantic lifecycle state to active integrations."""
         self._integrations.report(state, message=message)
 
-    def _set_hint(self, text: str) -> None:
-        self.query_one("#hint", Static).update(text)
+    def _set_hint(self, hints: tuple[tuple[str, str], ...]) -> None:
+        self.query_one("#hint", KeyHints).set_hints(hints)
 
     def _report_session(self) -> None:
         """Report the current session identity (startup, /new, /sessions)."""
@@ -185,21 +203,27 @@ class MainScreen(Screen[None]):
             workdir=str(self.workdir),
             id="statusbar",
         )
-        yield ChatWidget(id="chat")
-        yield SlashCommandMenu(id="slash-menu")
-        yield InputWidget(id="input")
-        yield Static(
-            _HINT_IDLE,
-            id="hint",
-            markup=False,
-        )
+        with Horizontal(id="body"):
+            with Vertical(id="main-col"):
+                yield ChatWidget(id="chat")
+                yield ActivityLine(id="activity")
+                yield Pills(id="pills")
+                yield SlashCommandMenu(id="slash-menu")
+                yield InputWidget(id="input")
+            yield Sidebar(
+                model=self.config.llm.model,
+                workdir=self.workdir,
+                id="sidebar",
+            )
+        yield KeyHints(id="hint")
 
     def on_mount(self) -> None:
         chat = self.query_one("#chat", ChatWidget)
         resumed = len(self.agent.messages) > 1
         if not resumed and self.config.ui.show_banner:
-            chat.add_art(startup_art_text())
-        chat.add_info(f"Limbo ready · {self.config.llm.model} · {self.workdir}")
+            chat.add_landing(self._landing())
+        else:
+            chat.add_info(f"Limbo ready · {self.config.llm.model} · {self.workdir}")
         if resumed:
             self._render_history()
             meta = self.agent.session_meta
@@ -210,10 +234,68 @@ class MainScreen(Screen[None]):
         self._refresh_goal_indicator()  # D6: silent resume, badge only
         # Code Mode badge: sync on startup so a resumed code-mode session
         # shows it without a fresh toggle.
-        self.query_one("#statusbar", StatusBar).set_code_mode(self.agent.code_mode)
+        statusbar = self.query_one("#statusbar", StatusBar)
+        statusbar.set_code_mode(self.agent.code_mode)
+        statusbar.on_state(self.query_one("#activity", ActivityLine).set_state)
+        self._apply_layout(self.size.width)
+        self._sync_sidebar()
         self.query_one("#input", InputWidget).focus()
         self._report_session()
         self._report_state("idle")
+
+    def _landing(self) -> Landing:
+        spec = resolve_model(self.config.llm.model)
+        detail = spec.provider.id
+        if spec.reasoning and self.config.llm.thinking_effort:
+            detail += f" · 思考 {self.config.llm.thinking_effort}"
+        try:
+            recent = list_sessions(self.session_dir, workdir=self.workdir)
+        except OSError:
+            recent = []
+        return Landing(
+            model=self.config.llm.model,
+            detail=detail,
+            branch=git_branch(self.workdir),
+            recent=recent,
+        )
+
+    # -- layout: sidebar on wide terminals, compact header on narrow ones ------
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._apply_layout(event.size.width)
+
+    def _apply_layout(self, width: int) -> None:
+        compact = width < WIDE_MIN_WIDTH
+        self.set_class(compact, "-compact")
+        if not compact:
+            self.remove_class("-peek")
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action == "toggle_sidebar":
+            return self.has_class("-compact")
+        return True
+
+    def action_toggle_sidebar(self) -> None:
+        self.toggle_class("-peek")
+
+    def _sync_sidebar(self) -> None:
+        """Push model / session / usage / mode state into the sidebar."""
+        sidebar = self.query_one("#sidebar", Sidebar)
+        spec = resolve_model(self.config.llm.model)
+        thinking = self.config.llm.thinking_effort if spec.reasoning else None
+        sidebar.set_model(self.config.llm.model, spec.provider.id, thinking)
+        sidebar.set_title(self.agent.session_meta.title or "")
+        sidebar.set_code_mode(self.agent.code_mode)
+        sidebar.set_skills([skill.name for skill in discover_skills(self.workdir)])
+        self._sync_usage()
+
+    def _sync_usage(self, total_tokens: int | None = None) -> None:
+        sidebar = self.query_one("#sidebar", Sidebar)
+        statusbar = self.query_one("#statusbar", StatusBar)
+        total = sidebar._tokens if total_tokens is None else total_tokens
+        sidebar.set_usage(total, self.agent.context_tokens(), self.agent.context_window)
+        statusbar.set_context(sidebar.context_percent)
+        statusbar.set_changes(sidebar.file_totals)
 
     # -- slash command menu ---------------------------------------------------
 
@@ -347,13 +429,20 @@ class MainScreen(Screen[None]):
         """Sync the status-bar badge with pump state (rainbow = running)."""
         statusbar = self.query_one("#statusbar", StatusBar)
         state = self.pump.status()
+        sidebar = self.query_one("#sidebar", Sidebar)
         if state is not None and state.status == STATUS_ACTIVE:
             statusbar.set_goal(
                 (state.rounds_completed, state.max_rounds),
                 running=self.pump.running,
             )
+            sidebar.set_goal(state.text, (state.rounds_completed, state.max_rounds))
+            self.query_one("#pills", Pills).set_goal(
+                (state.rounds_completed, state.max_rounds)
+            )
         else:
             statusbar.set_goal(None)
+            sidebar.set_goal(None)
+            self.query_one("#pills", Pills).set_goal(None)
 
     # -- M2: model-proposed verify command confirmation ------------------------
 
@@ -577,6 +666,10 @@ class MainScreen(Screen[None]):
             input_widget.disabled = False
             input_widget.focus()
             statusbar.set_state("idle")
+            self.query_one("#sidebar", Sidebar).set_title(
+                self.agent.session_meta.title or ""
+            )
+            self._sync_usage()
             self._report_state("idle")
 
     def _show_help(self) -> None:
@@ -601,6 +694,26 @@ class MainScreen(Screen[None]):
             self._on_model_picked,
         )
 
+    def action_models(self) -> None:
+        self._switch_model("")
+
+    def action_cycle_thinking(self) -> None:
+        """shift+tab: step ``thinking_effort`` through the model's levels."""
+        spec = resolve_model(self.config.llm.model)
+        choices = thinking_choices(spec)
+        if not choices:
+            self.app.notify(f"{spec.id} 没有可调的思考档位", timeout=2)
+            return
+        current = self.config.llm.thinking_effort
+        index = choices.index(current) if current in choices else 0
+        level = choices[(index + 1) % len(choices)]
+        # The clients read config.llm.thinking_effort per request, so the
+        # next request uses the new level without swapping the client.
+        self.config.llm.thinking_effort = level
+        save_thinking_to_config(level)
+        self._sync_sidebar()
+        self.app.notify(f"思考档位 · {level or '默认'}", timeout=2)
+
     def _on_model_picked(self, model_id: str | None) -> None:
         if model_id is not None:
             self._apply_model_switch(model_id)
@@ -611,10 +724,13 @@ class MainScreen(Screen[None]):
 
     def _apply_model_switch(self, model_id: str) -> None:
         chat = self.query_one("#chat", ChatWidget)
+        previous = self.config.llm.model
         verdict = prepare_model_switch(model_id, self.config)
         for notice in verdict.notices:
             chat.add_info(notice)
         if verdict.switched:
+            recent_models.push(previous)
+            recent_models.push(model_id)
             self.run_worker(self._swap_llm_client())
 
     # -- /code-mode: Code Mode presentation toggle ---------------------------
@@ -644,6 +760,7 @@ class MainScreen(Screen[None]):
                    else "恢复逐个直接调用工具")
             )
             self.query_one("#statusbar", StatusBar).set_code_mode(enabled)
+            self.query_one("#sidebar", Sidebar).set_code_mode(enabled)
         else:
             chat.add_info(f"Code Mode 已是{'开启' if enabled else '关闭'}状态")
 
@@ -656,6 +773,7 @@ class MainScreen(Screen[None]):
             self.config, self.llm_client, self.agent
         )
         self.query_one("#statusbar", StatusBar).set_model(model_id)
+        self._sync_sidebar()
         for notice in notices:
             chat.add_info(notice)
 
@@ -669,6 +787,8 @@ class MainScreen(Screen[None]):
         self.pump = self._new_pump(self.agent)
         chat.clear()
         chat.add_info(f"已开始新会话 {self.agent.session_id}")
+        self.query_one("#sidebar", Sidebar).reset_session()
+        self._sync_sidebar()
         self._report_session()
 
     def _invoke_skill(self, skill: Skill, arg: str) -> None:
@@ -693,6 +813,43 @@ class MainScreen(Screen[None]):
         chat.add_user_message(display)
         self.run_worker(self._handle_turn(prompt))
 
+    def action_command_palette(self) -> None:
+        if isinstance(self.app.screen, CommandPalette):
+            return
+        palette = CommandPalette(
+            self._commands.all(),
+            list_sessions(self.session_dir, workdir=self.workdir),
+            discover_skills(self.workdir),
+            current_session=self.agent.session_id,
+        )
+        self.app.push_screen(palette, self._on_palette_choice)
+
+    def action_sessions(self) -> None:
+        if self._agent_busy:
+            command = self._commands.get("/sessions")
+            if command is not None:
+                self._reject_busy_command(command)
+            return
+        self._open_session_picker()
+
+    def _on_palette_choice(self, choice: PaletteChoice | None) -> None:
+        if choice is None:
+            return
+        input_widget = self.query_one("#input", InputWidget)
+        if choice.kind == "session":
+            if self._agent_busy:
+                command = self._commands.get("/sessions")
+                if command is not None:
+                    self._reject_busy_command(command)
+                return
+            self._on_session_picked(Path(choice.value))
+        elif choice.takes_args:
+            input_widget.load_text(f"{choice.value} ")
+            input_widget.move_cursor(input_widget.document.end)
+        else:
+            self._handle_command(choice.value)
+        input_widget.focus()
+
     def _open_session_picker(self) -> None:
         chat = self.query_one("#chat", ChatWidget)
         sessions = list_sessions(self.session_dir, workdir=self.workdir)
@@ -716,6 +873,8 @@ class MainScreen(Screen[None]):
         meta = self.agent.session_meta
         chat.add_info(f"已切换到会话 {meta.id} · {meta.title or '(无标题)'}")
         self._render_restored_queue()
+        self.query_one("#sidebar", Sidebar).reset_session()
+        self._sync_sidebar()
         self._report_session()
 
     def _render_history(self) -> None:
@@ -998,6 +1157,7 @@ class MainScreen(Screen[None]):
 
     def _update_queue_status(self) -> None:
         self.query_one("#statusbar", StatusBar).set_queued(self.agent.queued_count)
+        self.query_one("#pills", Pills).set_queued(self.agent.queued_count)
 
     def cancel_queued(self, item_id: str) -> None:
         """Cancel one queued steer message (the card's ✕ affordance)."""
@@ -1094,6 +1254,10 @@ class MainScreen(Screen[None]):
             # the user can keep typing without clicking.
             input_widget.focus()
             statusbar.set_state("idle")
+            self.query_one("#sidebar", Sidebar).set_title(
+                self.agent.session_meta.title or ""
+            )
+            self._sync_usage()
             self._report_state("idle")
             self._set_hint(_HINT_IDLE)
             self._refresh_goal_indicator()
@@ -1124,6 +1288,7 @@ class MainScreen(Screen[None]):
                 chat.add_info(event.warning)
         elif isinstance(event, UsageUpdate):
             statusbar.set_tokens(event.total_tokens)
+            self._sync_usage(event.total_tokens)
         elif isinstance(event, SteerEvent):
             chat.mark_steer_delivered(event.id)
             self._update_queue_status()
@@ -1174,6 +1339,10 @@ class MainScreen(Screen[None]):
             card = chat.add_tool_card(event.id, event.name, event.arguments)
             if result.success:
                 card.set_success(result.output or "")
+                self.query_one("#sidebar", Sidebar).record_tool_result(
+                    event.name, event.arguments
+                )
+                self._sync_usage()
             else:
                 card.set_error(result.error or "Tool failed.")
             # Success or failure, the turn continues with another LLM call

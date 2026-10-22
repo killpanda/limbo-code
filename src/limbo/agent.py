@@ -443,6 +443,15 @@ class Agent:
             self._meta.title = derive_title(self.messages)
         return self._meta
 
+    @property
+    def context_window(self) -> int:
+        """Context window of the active model, in tokens."""
+        return self._context_window
+
+    def context_tokens(self) -> int:
+        """Estimated prompt size of the next request (the UI context meter)."""
+        return self._estimated_next_prompt_tokens()
+
     def _init_system_message(self) -> None:
         prompt = build_system_prompt(self.registry, self.workdir)
         if self.messages and self.messages[0].role == "system":

@@ -11,6 +11,7 @@ import limbo.config as config_module
 from limbo.config import Config, ProviderOverride
 from limbo.llm.openai_client import OpenAICompatibleClient
 from limbo.ui.app import LimboApp
+from limbo.ui.screens.auth_dialog import AuthDialog
 from limbo.ui.screens.main import MainScreen
 from limbo.ui.screens.model_picker import ModelPicker
 from limbo.ui.widgets.chat import ChatWidget
@@ -155,7 +156,7 @@ async def test_picker_marks_unavailable_providers(
 
 
 @pytest.mark.asyncio
-async def test_picker_select_unavailable_keeps_open_with_hint(
+async def test_picker_select_unavailable_opens_auth_dialog(
     tmp_path, isolated_config_path, clear_key_envs
 ):
     isolated_config_path.write_text('[llm]\nmodel = "deepseek-v4-pro"\n')
@@ -173,9 +174,13 @@ async def test_picker_select_unavailable_keeps_open_with_hint(
         list_view.index = 1
         await pilot.press("enter")
         await pilot.pause()
-        assert pilot.app.screen_stack[-1] is picker
         hint = str(picker.query_one("#picker-hint").render())
         assert "未配置 deepseek 的 API key" in hint
+        # The picker opens the paste-a-key dialog instead of dead-ending.
+        assert isinstance(pilot.app.screen_stack[-1], AuthDialog)
+        await pilot.press("escape")
+        await pilot.pause()
+        assert pilot.app.screen_stack[-1] is picker
 
 
 @pytest.mark.asyncio
@@ -391,3 +396,135 @@ async def test_switch_degrades_when_write_back_fails(
         assert screen.config.llm.model == "glm-4.7"  # session switch worked
 
     assert isolated_config_path.read_text() == "[unclosed = "
+
+
+# -- Limbo Dusk model dialog: search, inline login, thinking -----------------
+
+
+@pytest.fixture
+def fake_key_check(monkeypatch):
+    from limbo.llm import verify
+
+    seen = []
+
+    async def check(provider, key, base_url=None, timeout=8.0):
+        seen.append((provider.id, key, base_url))
+        if key == "bad":
+            return verify.KeyCheck(verify.INVALID, "拒绝")
+        return verify.KeyCheck(verify.VALID, "key 有效")
+
+    monkeypatch.setattr(verify, "check_key", check)
+    return seen
+
+
+@pytest.mark.asyncio
+async def test_ctrl_l_opens_picker_and_search_filters(tmp_path):
+    app = make_app(tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        await pilot.press("ctrl+l")
+        await pilot.pause()
+        picker = pilot.app.screen_stack[-1]
+        assert isinstance(picker, ModelPicker)
+        await pilot.press(*"glm")
+        await pilot.pause()
+        labels = item_labels(picker)
+        assert labels[0] == "▸ glm"
+        assert all("deepseek" not in t for t in labels)
+        await pilot.press("enter")
+        await pilot.pause()
+        assert isinstance(pilot.app.screen_stack[-1], MainScreen)
+        await wait_for_chat(pilot, "已切换模型 glm-")
+
+
+@pytest.mark.asyncio
+async def test_inline_login_saves_key_and_switches(
+    tmp_path, isolated_config_path, clear_key_envs, fake_key_check
+):
+    from limbo import auth
+
+    isolated_config_path.write_text('[llm]\nmodel = "deepseek-v4-pro"\n')
+
+    def configure(cfg):
+        cfg.llm.api_key = None
+
+    app = make_app(tmp_path, configure=configure)
+    async with app.run_test() as pilot:
+        await submit(pilot, "/model")
+        picker = pilot.app.screen_stack[-1]
+        await pilot.press(*"glm-4.7")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        dialog = pilot.app.screen_stack[-1]
+        assert isinstance(dialog, AuthDialog)
+        await pilot.press(*"bad")
+        await pilot.press("enter")
+        await pilot.pause()
+        assert pilot.app.screen_stack[-1] is dialog  # rejected key keeps it open
+        dialog.query_one("#auth-key").value = "glm-secret"
+        await pilot.press("enter")
+        await pilot.pause()
+        await pilot.pause()
+        assert picker not in pilot.app.screen_stack
+        await wait_for_chat(pilot, "已切换模型 glm-4.7 (glm)")
+        assert auth.get("glm").key == "glm-secret"
+
+
+@pytest.mark.asyncio
+async def test_custom_endpoint_form(tmp_path, fake_key_check):
+    from limbo import auth
+
+    app = make_app(tmp_path)
+    async with app.run_test() as pilot:
+        await submit(pilot, "/model")
+        picker = pilot.app.screen_stack[-1]
+        await pilot.press(*"custom")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        dialog = pilot.app.screen_stack[-1]
+        assert isinstance(dialog, AuthDialog) and dialog.custom
+        dialog.query_one("#auth-base-url").value = "http://localhost:8000/v1"
+        dialog.query_one("#auth-model").value = "qwen3-coder"
+        dialog.query_one("#auth-key").value = "local"
+        dialog.query_one("#auth-key").focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert picker not in pilot.app.screen_stack
+        await wait_for_chat(pilot, "已切换模型 qwen3-coder (custom)")
+        assert auth.get("custom").base_url == "http://localhost:8000/v1"
+        assert fake_key_check[-1] == ("custom", "local", "http://localhost:8000/v1")
+
+
+@pytest.mark.asyncio
+async def test_shift_tab_cycles_thinking(tmp_path, isolated_config_path):
+    from limbo.llm.catalog import resolve_model, thinking_choices
+
+    app = make_app(tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = pilot.app.screen
+        choices = thinking_choices(resolve_model(screen.config.llm.model))
+        assert len(choices) >= 2
+        await pilot.press("shift+tab")
+        await pilot.pause()
+        assert screen.config.llm.thinking_effort == choices[1]
+        assert f'thinking_effort = "{choices[1]}"' in isolated_config_path.read_text()
+        for _ in range(len(choices) - 1):
+            await pilot.press("shift+tab")
+        await pilot.pause()
+        assert screen.config.llm.thinking_effort is None
+
+
+@pytest.mark.asyncio
+async def test_recent_models_listed_first(tmp_path):
+    app = make_app(tmp_path)
+    async with app.run_test() as pilot:
+        await submit(pilot, "/model glm-4.7")
+        await wait_for_chat(pilot, "已切换模型 glm-4.7 (glm)")
+        await submit(pilot, "/model")
+        picker = pilot.app.screen_stack[-1]
+        labels = item_labels(picker)
+        assert labels[0] == "◷ 最近"
+        assert labels[1].strip().startswith("deepseek-v4-pro")
