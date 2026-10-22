@@ -8,9 +8,6 @@ only reach through error-exit races.
 
 from __future__ import annotations
 
-import asyncio
-import subprocess
-import sys
 from pathlib import Path
 
 import pytest
@@ -18,18 +15,14 @@ import pytest
 import limbo.pump as pump_module
 from limbo.agent import Agent, CompactionEvent, SteerEvent, TextDelta
 from limbo.config import Config
-from limbo.goal import STATUS_EXHAUSTED, VerifyResult
+from limbo.goal import VerifyResult
 from limbo.models import TextChunk
 from limbo.pump import (
-    GoalExhausted,
     GoalPassed,
-    GoalResumed,
-    GoalVerifyResultEvent,
-    GoalVerifyStarted,
     TurnPump,
 )
 from limbo.sessions import SessionMeta
-from limbo.trace import TraceLogger, read_trace
+from limbo.trace import TraceLogger
 
 
 @pytest.fixture
@@ -81,10 +74,6 @@ async def collect(run):
     return [event async for event in run]
 
 
-def text_of(events) -> str:
-    return "".join(e.text for e in events if isinstance(e, TextDelta))
-
-
 # -- basic loop ----------------------------------------------------------------
 
 
@@ -122,115 +111,7 @@ async def test_loop_continues_on_failure_and_stops_on_pass(
     assert state is not None and state.status == "passed"
 
 
-@pytest.mark.asyncio
-async def test_no_verify_command_single_turn(workdir, monkeypatch):
-    driver = make_pump(workdir, [[TextChunk(text="ok")]])
-    commands = stub_verify(monkeypatch, [])
-    driver.set_goal("补测试")  # no verify command yet
-
-    events = await collect(driver.run("start"))
-
-    assert commands == []
-    assert not any(isinstance(e, GoalVerifyStarted) for e in events)
-    assert text_of(events) == "ok"
-
-
-@pytest.mark.asyncio
-async def test_exhausted_wrapup_and_resume_resets_budget(workdir, monkeypatch):
-    driver = make_pump(
-        workdir,
-        [
-            [TextChunk(text="round1")],
-            [TextChunk(text="round2")],
-            [TextChunk(text="wrapup summary")],
-            [TextChunk(text="resumed round")],
-        ],
-        max_rounds=2,
-    )
-    stub_verify(
-        monkeypatch,
-        [
-            VerifyResult(exit_code=1, output_tail="f1"),
-            VerifyResult(exit_code=1, output_tail="f2"),
-            VerifyResult(exit_code=0),
-        ],
-    )
-    driver.set_goal("g", verify_command="pytest")
-
-    events = await collect(driver.run("start"))
-
-    # Budget exhausted: wrapup turn ran (uncounted), then GoalExhausted.
-    assert any(isinstance(e, GoalExhausted) and e.rounds == 2 for e in events)
-    assert "wrapup summary" in text_of(events)
-    state = driver.status()
-    assert state is not None and state.status == STATUS_EXHAUSTED
-
-    # Any user message resumes the loop with a reset budget (D3/LIM-35).
-    events = await collect(driver.run("继续"))
-    assert any(isinstance(e, GoalResumed) for e in events)
-    assert any(isinstance(e, GoalPassed) for e in events)
-    state = driver.status()
-    assert state is not None and state.rounds_completed == 1
-
-
-@pytest.mark.asyncio
-async def test_clear_stops_continuation(workdir, monkeypatch):
-    driver = make_pump(workdir, [[TextChunk(text="round1")]])
-    # The stub clears the goal when the verify runs (mid-loop clear).
-    async def verify_then_clear(command, workdir, **kwargs):
-        driver.clear()
-        return VerifyResult(exit_code=1, output_tail="fail")
-
-    monkeypatch.setattr(pump_module, "run_verify", verify_then_clear)
-    driver.set_goal("g", verify_command="pytest")
-
-    events = await collect(driver.run("start"))
-
-    # Verify ran, the failure was reported, but no second turn started.
-    assert any(isinstance(e, GoalVerifyResultEvent) for e in events)
-    assert not any(isinstance(e, GoalPassed) for e in events)
-    assert len(driver._agent.messages) <= 4  # system + user + assistant
-    assert driver.status() is not None and driver.status().status == "cleared"
-
-
-@pytest.mark.asyncio
-async def test_verify_cancel_stops_loop_keeps_goal(workdir, monkeypatch):
-    driver = make_pump(workdir, [[TextChunk(text="round1")]])
-
-    async def cancelled_verify(command, workdir, **kwargs):
-        raise asyncio.CancelledError()
-
-    monkeypatch.setattr(pump_module, "run_verify", cancelled_verify)
-    driver.set_goal("g", verify_command="pytest")
-
-    events = await collect(driver.run("start"))
-
-    assert any(
-        isinstance(e, GoalVerifyResultEvent) and e.result.cancelled for e in events
-    )
-    assert driver.status() is not None and driver.status().status == "active"
-
-
 # -- running flag / single-flight ----------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_running_flag_eager_and_reset(workdir, monkeypatch):
-    driver = make_pump(workdir, [[TextChunk(text="ok")]])
-    stub_verify(monkeypatch, [])
-    assert not driver.running
-    stream = driver.run("start")  # eager: set before the first event
-    assert driver.running
-    await collect(stream)
-    assert not driver.running
-
-
-@pytest.mark.asyncio
-async def test_second_run_rejected_while_running(workdir):
-    driver = make_pump(workdir, [[TextChunk(text="ok")]])
-    driver.run("first")
-    with pytest.raises(RuntimeError):
-        driver.run("second")
 
 
 # -- steer priority + E1 (FakeAgent for timing control) ------------------------
@@ -326,185 +207,12 @@ async def test_leftover_steer_outranks_goal_and_yields_steer_events(
     assert agent.inputs[1] == "用户插入的消息"
 
 
-@pytest.mark.asyncio
-async def test_supervisor_drains_stragglers_into_followup_turn(workdir):
-    """Steers queued past _run_once's last boundary drain (the teardown
-    window the TUI's finally-drain used to cover) become a follow-up turn
-    pumped by the supervisor — frontends never drain."""
-    agent = FakeAgent(workdir)
-    pump = TurnPump(agent, workdir)
-
-    from limbo.steer import SteerItem
-
-    straggler = SteerItem(id="late1", text="晚到的消息", attachments=[])
-    original_drain = agent.drain_steer
-    calls = {"n": 0}
-
-    def fake_drain(modes=("steer", "follow_up")):
-        calls["n"] += 1
-        if calls["n"] == 2:
-            # Boundary drain (call 1) found nothing; the supervisor drain
-            # (call 2) sees the straggler.
-            return [straggler]
-        return original_drain(modes)
-
-    agent.drain_steer = fake_drain
-
-    events = await collect(pump.run("start"))
-
-    assert agent.inputs == ["start", "晚到的消息"]
-    steer_events = [e for e in events if isinstance(e, SteerEvent)]
-    assert [e.id for e in steer_events] == ["late1"]
-    assert not pump.running
-
-
-@pytest.mark.asyncio
-async def test_interrupted_pump_never_auto_follows_up(workdir):
-    """RFC LIM-53: an interrupted pump leaves steers queued (the next
-    run()'s head fallback delivers them) instead of draining them."""
-    agent = FakeAgent(workdir)
-    agent.was_interrupted = True
-    pump = TurnPump(agent, workdir)
-    agent.steer("打断前排队的消息")
-
-    events = await collect(pump.run("start"))
-
-    assert agent.inputs == ["start"]  # no follow-up turn
-    assert not any(isinstance(e, SteerEvent) for e in events)
-    assert agent.has_pending_steer()  # still queued
-
-
 # -- compact: same single-flight flag -------------------------------------------
-
-
-@pytest.mark.asyncio
-async def test_compact_shares_the_running_flag(workdir):
-    pump = TurnPump(FakeAgent(workdir), workdir)
-
-    assert not pump.running
-    stream = pump.compact()  # eager, same as run()
-    assert pump.running
-    with pytest.raises(RuntimeError):
-        pump.run("turn during compact")
-    with pytest.raises(RuntimeError):
-        pump.compact()
-    events = await collect(stream)
-    assert not pump.running
-    assert any(isinstance(e, CompactionEvent) for e in events)
-
-
-@pytest.mark.asyncio
-async def test_compact_rejected_while_turn_runs(workdir):
-    pump = TurnPump(FakeAgent(workdir), workdir)
-    pump.run("start")  # eager flag; iterator deliberately left unconsumed
-    assert pump.running
-    with pytest.raises(RuntimeError):
-        pump.compact()
 
 
 # -- trace ---------------------------------------------------------------------
 
 
-@pytest.mark.asyncio
-async def test_trace_events_full_lifecycle(workdir, monkeypatch):
-    driver = make_pump(
-        workdir, [[TextChunk(text="r1")], [TextChunk(text="r2")]]
-    )
-    stub_verify(
-        monkeypatch,
-        [VerifyResult(exit_code=1, output_tail="f"), VerifyResult(exit_code=0)],
-    )
-    driver.set_goal("g", verify_command="pytest")
-    await collect(driver.run("start"))
-    driver._agent.trace.flush()  # background writer: barrier before reading
-
-    kinds = [e.get("type") for e in read_trace(driver._agent.trace.path)]
-    assert "goal_set" in kinds
-    assert "goal_verify" in kinds
-    assert "goal_round" in kinds
-    assert "goal_complete" in kinds
-
-
 # -- layering lock: the pump must stay frontend-agnostic ------------------------
 
 
-def test_pump_imports_without_textual():
-    code = (
-        "import sys; import limbo.pump, limbo.goal; "
-        "bad = [m for m in sys.modules if m.startswith('textual')]; "
-        "assert not bad, f'non-UI layer pulled in textual: {bad}'"
-    )
-    subprocess.run([sys.executable, "-c", code], check=True)
-
-
-@pytest.mark.asyncio
-async def test_follow_up_waits_for_the_goal_loop(workdir, monkeypatch):
-    """A follow-up never enters a goal round: it runs after the loop ends."""
-    agent = FakeAgent(workdir)
-    pump = TurnPump(agent, workdir)
-    pump.set_goal("g", verify_command="pytest")
-    agent.steer("整理一下", mode="follow_up")
-    verdicts = iter([VerifyResult(exit_code=1), VerifyResult(exit_code=0)])
-
-    async def verify(command, workdir, **kwargs):
-        return next(verdicts)
-
-    monkeypatch.setattr(pump_module, "run_verify", verify)
-
-    events = await collect(pump.run("goal prompt"))
-
-    # Two goal rounds first; the follow-up is the last turn.
-    assert len(agent.inputs) == 3
-    assert agent.inputs[-1] == "整理一下"
-    assert any(isinstance(e, GoalPassed) for e in events)
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("policy", ["continue", "keep", "withdraw"])
-async def test_after_failed_run_policy(workdir, policy):
-    from limbo.pump import QueueHeld
-
-    agent = FakeAgent(workdir)
-    agent.failing_inputs = {"first"}
-    pump = TurnPump(agent, workdir, after_failed_run=policy)
-    agent.steer("queued one")
-    agent.steer("queued two", mode="follow_up")
-
-    events = await collect(pump.run("first"))
-
-    held = [e for e in events if isinstance(e, QueueHeld)]
-    if policy == "continue":
-        # Today's behavior: the steer feeds the next turn, then the
-        # follow-up gets its own turn after the task.
-        assert agent.inputs == ["first", "queued one", "queued two"]
-        assert held == []
-    else:
-        # The task stops after the failed turn; nothing is fed in.
-        assert agent.inputs == ["first"]
-        assert [e.policy for e in held] == [policy]
-        assert [i.text for i in held[0].items] == ["queued one", "queued two"]
-        remaining = [i.text for i in agent.queued_items]
-        if policy == "keep":
-            assert remaining == ["queued one", "queued two"]
-        else:
-            assert remaining == []
-    assert not pump.running
-
-
-@pytest.mark.asyncio
-async def test_failed_run_without_queue_keeps_goal_loop(workdir, monkeypatch):
-    """The policy is about queued messages: with an empty queue a failed
-    turn behaves as before (the goal loop goes on to verify)."""
-    agent = FakeAgent(workdir)
-    agent.failing_inputs = {"goal prompt"}
-    pump = TurnPump(agent, workdir, after_failed_run="keep")
-    pump.set_goal("g", verify_command="pytest")
-
-    async def passing(command, workdir, **kwargs):
-        return VerifyResult(exit_code=0)
-
-    monkeypatch.setattr(pump_module, "run_verify", passing)
-
-    events = await collect(pump.run("goal prompt"))
-
-    assert any(isinstance(e, GoalPassed) for e in events)

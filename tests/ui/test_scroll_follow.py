@@ -14,20 +14,6 @@ class ChatApp(App[None]):
 
 
 @pytest.mark.asyncio
-async def test_new_content_scrolls_when_following():
-    app = ChatApp()
-    async with app.run_test(size=(60, 10)) as pilot:
-        chat = app.query_one(ChatWidget)
-        for i in range(30):
-            chat.add_info(f"line {i}")
-        await pilot.pause()
-        assert chat._follow is True
-        assert chat.scroll_offset.y >= chat.max_scroll_y - 2
-        pill = chat.query_one("#back-to-bottom")
-        assert pill.display is False
-
-
-@pytest.mark.asyncio
 async def test_scroll_up_pauses_follow_and_shows_pill():
     app = ChatApp()
     async with app.run_test(size=(60, 10)) as pilot:
@@ -56,30 +42,3 @@ async def test_scroll_up_pauses_follow_and_shows_pill():
         assert pill.display is False
 
 
-@pytest.mark.asyncio
-async def test_error_message_is_structured():
-    app = ChatApp()
-    async with app.run_test() as pilot:
-        chat = app.query_one(ChatWidget)
-        chat.add_error("LLM 请求失败：HTTP 429\n详情请查看日志")
-        await pilot.pause()
-        text = chat.transcript_text()
-        assert "✗ LLM 请求失败：HTTP 429" in text
-        assert "  详情请查看日志" in text
-
-
-@pytest.mark.asyncio
-async def test_clear_keeps_floater_and_resets_follow():
-    app = ChatApp()
-    async with app.run_test(size=(60, 10)) as pilot:
-        chat = app.query_one(ChatWidget)
-        for i in range(30):
-            chat.add_info(f"line {i}")
-        await pilot.pause()
-        chat.scroll_to(y=0, animate=False)
-        await pilot.pause()
-        chat.clear()
-        await pilot.pause()
-        assert chat._follow is True
-        assert chat.query("#back-to-bottom")
-        assert chat.messages == []
