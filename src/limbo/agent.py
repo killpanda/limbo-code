@@ -369,6 +369,16 @@ class Agent:
             resolved=_resolved_llm_trace_fields(config),
         )
         self._apply_prompt_cache_key()
+        self.registry.trace_log = self._trace_sub_call
+
+    def _trace_sub_call(self, event: str, **fields: Any) -> None:
+        self.trace.log(
+            event,
+            turn=self._turn_count,
+            iteration=self._iteration_count,
+            kind="sub_call",
+            **fields,
+        )
 
     def _apply_prompt_cache_key(self) -> None:
         """Route this session's requests to one provider cache (Responses)."""
@@ -820,7 +830,7 @@ class Agent:
         started_at = utc_now_iso()
         start = time.monotonic()
         try:
-            result = await self.registry.execute(name, arguments)
+            result = await self.registry.execute(name, arguments, call_id=call_id)
         except Exception as e:  # noqa: BLE001
             self.trace.log(
                 "tool_result",

@@ -25,13 +25,16 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import os
+import re
 import sys
 import unicodedata
 from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from limbo.agent import (
     Agent,
@@ -485,8 +488,11 @@ class HeadlessFrontend:
         pump_factory: Callable[[Agent], TurnPump],
         echo_input: bool = False,
         max_tool_lines: int = 60,
+        json_mode: bool = False,
     ) -> None:
         self._config = config
+        # --json: every output line is one JSON object (events + info).
+        self._json = json_mode
         self._agent = agent
         self._pump = pump
         self._llm_client = llm_client
@@ -517,11 +523,22 @@ class HeadlessFrontend:
         forwarder = asyncio.create_task(self._forward(inputs))
         self._report_session()
         self._report("idle")
-        self._line(
-            f"limbo headless · model {self._config.llm.model} · "
-            f"workdir {self._agent.workdir}"
-        )
-        self._line("输入消息回车发送；/help 查看命令；Esc/Ctrl+C 中断当前任务")
+        if self._json:
+            self._emit(
+                {
+                    "type": "ready",
+                    "model": self._config.llm.model,
+                    "workdir": str(self._agent.workdir),
+                    "session_id": self._agent.session_id,
+                    "total_tokens": self._last_tokens,
+                }
+            )
+        else:
+            self._line(
+                f"limbo headless · model {self._config.llm.model} · "
+                f"workdir {self._agent.workdir}"
+            )
+            self._line("输入消息回车发送；/help 查看命令；Esc/Ctrl+C 中断当前任务")
         try:
             while not self._quit:
                 event = await self._queue.get()
@@ -647,7 +664,10 @@ class HeadlessFrontend:
         except Exception as e:  # noqa: BLE001 - mirror the TUI: surface it
             self._line(f"✗ 内部错误：{e}")
         finally:
-            self._line(f"── limbo idle · 累计 tokens {self._last_tokens} ──")
+            if self._json:
+                self._emit({"type": "idle", "total_tokens": self._last_tokens})
+            else:
+                self._line(f"── limbo idle · 累计 tokens {self._last_tokens} ──")
             self._report("idle")
 
     def _turn_finished(self, task: asyncio.Task[None]) -> None:
@@ -790,9 +810,20 @@ class HeadlessFrontend:
     # -- rendering ------------------------------------------------------------
 
     def _line(self, text: str = "") -> None:
-        self._out(text + "\n")
+        if self._json:
+            self._emit({"type": "info", "text": text})
+        else:
+            self._out(text + "\n")
+
+    def _emit(self, record: dict[str, Any]) -> None:
+        self._out(json.dumps(record, ensure_ascii=False, default=_json_default) + "\n")
 
     def _render(self, event: PumpEvent) -> None:
+        if self._json:
+            if isinstance(event, UsageUpdate):
+                self._last_tokens = event.total_tokens
+            self._emit(event_to_json(event))
+            return
         if isinstance(event, TextDelta):
             self._out(event.text)
         elif isinstance(event, ThinkingDelta):
@@ -890,6 +921,30 @@ class HeadlessFrontend:
         )
 
 
+# -- --json event stream ------------------------------------------------------------
+
+
+def _snake(name: str) -> str:
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
+def event_to_json(event: PumpEvent) -> dict[str, Any]:
+    """One agent/goal event as a JSON-ready dict: ``type`` + its fields."""
+    record: dict[str, Any] = {"type": _snake(type(event).__name__)}
+    if dataclasses.is_dataclass(event):
+        for field in dataclasses.fields(event):
+            record[field.name] = getattr(event, field.name)
+    return record
+
+
+def _json_default(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return dataclasses.asdict(value)
+    return str(value)
+
+
 # -- entry point ------------------------------------------------------------------
 
 
@@ -899,10 +954,11 @@ def run_headless(
     config: Config,
     session_dir: Path | None,
     resume: Path | None,
+    json_mode: bool = False,
 ) -> int:
     """Synchronous entry for ``limbo --headless`` (called from app.main)."""
     try:
-        return asyncio.run(_run(workdir, config, session_dir, resume))
+        return asyncio.run(_run(workdir, config, session_dir, resume, json_mode))
     except KeyboardInterrupt:
         return 130
 
@@ -912,6 +968,7 @@ async def _run(
     config: Config,
     session_dir: Path | None,
     resume: Path | None,
+    json_mode: bool = False,
 ) -> int:
     workdir = workdir.resolve()
     reporters = create_reporters()
@@ -947,7 +1004,8 @@ async def _run(
         sys.stdout.write(text)
         sys.stdout.flush()
 
-    use_tty = os.name != "nt" and sys.stdin.isatty()
+    # --json is for scripts: plain line reads, no raw-mode echo.
+    use_tty = not json_mode and os.name != "nt" and sys.stdin.isatty()
     inputs = (
         read_tty(sys.stdin.fileno(), out) if use_tty else read_pipe(sys.stdin)
     )
@@ -960,7 +1018,8 @@ async def _run(
         out=out,
         agent_factory=make_agent,
         pump_factory=make_pump,
-        echo_input=not use_tty,
+        echo_input=not use_tty and not json_mode,
+        json_mode=json_mode,
     )
     if use_tty:
         with _terminal_mode(sys.stdin.fileno()):

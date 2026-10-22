@@ -9,6 +9,7 @@ stdin. Output is collected into a list of written chunks.
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
@@ -39,7 +40,7 @@ from limbo.headless import (
     parse_submission,
     parse_verify_answer,
 )
-from limbo.models import TextChunk, ToolCallEvent
+from limbo.models import CompletionMeta, TextChunk, ToolCallEvent
 from limbo.pump import TurnPump
 
 
@@ -82,7 +83,7 @@ class RecordingReporter:
         return [c[1] for c in self.calls if c[0] == "report"]
 
 
-def make_frontend(workdir: Path, responses, reporter=None):
+def make_frontend(workdir: Path, responses, reporter=None, json_mode=False):
     """Build a frontend wired to a real Agent + scripted LLM."""
     config = Config()
     agent = Agent(
@@ -112,7 +113,8 @@ def make_frontend(workdir: Path, responses, reporter=None):
         out=chunks.append,
         agent_factory=make_agent,
         pump_factory=lambda a: TurnPump(a, workdir),
-        echo_input=True,
+        echo_input=not json_mode,
+        json_mode=json_mode,
     )
     return frontend, chunks, reporter
 
@@ -192,6 +194,32 @@ async def test_tool_call_and_result_render(workdir):
 
 
 # -- steer while busy ----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_json_mode_prints_only_json_events(workdir):
+    (workdir / "hello.txt").write_text("hi")
+    frontend, chunks, _ = make_frontend(
+        workdir,
+        [
+            [ToolCallEvent(id="c1", name="ls", arguments={})],
+            [TextChunk(text="done"), CompletionMeta(usage={"total_tokens": 9})],
+        ],
+        json_mode=True,
+    )
+
+    rc = await frontend.run(feed([Submit("列一下目录"), Submit("/bogus"), Eof()]))
+
+    assert rc == 0
+    records = [json.loads(line) for line in output_of(chunks).splitlines()]
+    types = [r["type"] for r in records]
+    assert types[0] == "ready"
+    assert {"tool_call_request", "tool_result_event", "text_delta"} <= set(types)
+    result = next(r for r in records if r["type"] == "tool_result_event")
+    assert result["result"]["success"] is True
+    assert "hello.txt" in result["result"]["output"]
+    assert {"type": "idle", "total_tokens": 9} in records
+    assert any(r["type"] == "info" for r in records)  # status lines are JSON too
 
 
 @pytest.mark.asyncio

@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
+import secrets
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +22,13 @@ from limbo.tools.read import ReadTool
 from limbo.tools.run_code import RunCodeTool
 from limbo.tools.write import WriteTool
 
+# The tool call currently executing in this context. asyncio.to_thread and
+# run_code's private event loop both copy the context, so a Code Mode
+# sub-call sees its run_code call here (its parent).
+_CURRENT_CALL: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "limbo_current_tool_call", default=None
+)
+
 
 class ToolRegistry:
     """Registers and executes tools."""
@@ -32,6 +43,9 @@ class ToolRegistry:
         # system prompt on toggle.
         self.code_mode = False
         self._tools: dict[str, BaseTool] = {}
+        # Trace sink for Code Mode sub-calls (set by the agent): each one is
+        # logged as tool_call/tool_result with its run_code parent_call_id.
+        self.trace_log: Callable[..., None] | None = None
         for tool_class in [EditTool, WriteTool, LsTool, ReadTool, GrepTool, FindTool]:
             self.register(tool_class)  # type: ignore[type-abstract]
         if self.config.tools.bash_enabled:
@@ -55,11 +69,51 @@ class ToolRegistry:
         policy = getattr(self.get(name), "replay", "unsafe")
         return "safe" if policy == "safe" else "unsafe"
 
-    async def execute(self, name: str, arguments: dict[str, Any]) -> ToolResult:
+    async def execute(
+        self, name: str, arguments: dict[str, Any], call_id: str | None = None
+    ) -> ToolResult:
+        parent = _CURRENT_CALL.get()
+        if parent is not None and call_id is None:
+            # A Code Mode sub-call: give it an id and trace it under its
+            # run_code parent (sub-calls never enter history).
+            call_id = f"{parent}.{secrets.token_hex(3)}"
+            return await self._execute_traced(name, arguments, call_id, parent)
+        return await self._execute(name, arguments, call_id)
+
+    async def _execute(
+        self, name: str, arguments: dict[str, Any], call_id: str | None
+    ) -> ToolResult:
         tool = self.get(name)
         if tool is None:
             return ToolResult(success=False, error=f"Unknown tool: {name}")
-        return await asyncio.to_thread(tool.execute, arguments)
+        token = _CURRENT_CALL.set(call_id) if call_id is not None else None
+        try:
+            return await asyncio.to_thread(tool.execute, arguments)
+        finally:
+            if token is not None:
+                _CURRENT_CALL.reset(token)
+
+    async def _execute_traced(
+        self, name: str, arguments: dict[str, Any], call_id: str, parent: str
+    ) -> ToolResult:
+        log = self.trace_log
+        if log is not None:
+            log("tool_call", id=call_id, parent_call_id=parent, name=name,
+                arguments=arguments)
+        start = time.monotonic()
+        result = await self._execute(name, arguments, call_id)
+        if log is not None:
+            log(
+                "tool_result",
+                id=call_id,
+                parent_call_id=parent,
+                name=name,
+                success=result.success,
+                output=result.output,
+                error=result.error,
+                duration=time.monotonic() - start,
+            )
+        return result
 
     def cancel_active(self) -> None:
         """Cancel in-flight interruptible tools (ESC interrupt, RFC LIM-53).
