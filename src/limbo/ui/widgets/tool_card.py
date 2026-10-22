@@ -4,6 +4,10 @@ A tool card renders as a single summary line (state symbol + tool name +
 argument summary + elapsed time) and can be expanded to show the full tool
 output. State machine: running → success | error.
 
+Limbo Dusk: one line grammar — ``✓ Read  src/x.py  0.1s`` — with a braille
+spinner while running and a Settle flash (Limbo Motion) when the call ends:
+the row background flashes mint (success) or red (failure) and fades out.
+
 The output body is lazy: it is created only when the card is expanded and
 destroyed again when collapsed, so a long session's DOM stays dominated by
 one-line headers instead of hundreds of `RichLog`s full of tool output.
@@ -14,20 +18,23 @@ from __future__ import annotations
 import time
 from typing import Any
 
+from rich.style import Style
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Vertical
 from textual.css.query import NoMatches
 from textual.widgets import RichLog, Static
 
+from limbo.ui import motion
+
 _STATE_SYMBOLS = {
-    "running": "…",
+    "running": "⠋",
     "success": "✓",
     "error": "✗",
     "cancelled": "⏹",
 }
 _STATE_LABELS = {
-    "running": "运行中",
+    "running": "",
     "success": "",
     "error": "失败",
     "cancelled": "已打断",
@@ -66,6 +73,8 @@ class ToolCard(Vertical):
         self._has_body = False
         self._body_content: list[tuple[str, str | None]] | None = None
         self._body: RichLog | None = None
+        self._step = 0
+        self._settle_from: int | None = None
         self.add_class("running")
 
     def compose(self) -> ComposeResult:
@@ -78,8 +87,30 @@ class ToolCard(Vertical):
         # State transitions may have happened before composition finished
         # (events can arrive in the same loop turn as the card creation).
         self._refresh_header()
+        if self.state == "running":
+            motion.get_clock(self.app).subscribe(self, self._on_frame)
+
+    def _on_frame(self, step: int) -> None:
+        self._step = step
+        if self.state == "running":
+            self._refresh_header()
+            return
+        clock = motion.get_clock(self.app)
+        if self._settle_from is None:
+            self._settle_from = step
+        frame = step - self._settle_from
+        theme = self.app.current_theme
+        flash = str(theme.success if self.state == "success" else theme.error)
+        color = motion.settle_color(frame, str(theme.background), flash, clock.mode)
+        self.styles.background = color
+        if color is None:
+            clock.unsubscribe(self)
 
     def on_unmount(self) -> None:
+        try:
+            motion.get_clock(self.app).unsubscribe(self)
+        except Exception:  # noqa: BLE001 - app already gone
+            pass
         # The lazily-created body is a dynamic child: it does not survive a
         # prune/re-mount (compose only yields the header). Drop the dead
         # RichLog reference so the restored card expands cleanly on the
@@ -137,6 +168,16 @@ class ToolCard(Vertical):
         if state != "running" and self._elapsed is None:
             self._elapsed = time.monotonic() - self._started
         self._refresh_header()
+        if state in ("success", "error") and self.is_mounted:
+            # Settle: keep the clock subscription for the flash frames.
+            clock = motion.get_clock(self.app)
+            if clock.mode == motion.FULL:
+                self._settle_from = None
+                clock.subscribe(self, self._on_frame)
+            else:
+                clock.unsubscribe(self)
+        elif state != "running" and self.is_mounted:
+            motion.get_clock(self.app).unsubscribe(self)
 
     def _refresh_header(self) -> None:
         try:
@@ -211,13 +252,14 @@ class ToolCard(Vertical):
         Returns a Pygments ``Style`` subclass; rich accepts it at runtime
         though its type hints only declare ``str | SyntaxTheme``.
         """
-        from limbo.ui.syntax import LimboDarkStyle, LimboLightStyle
+        from limbo.ui.syntax import style_for_theme
+        from limbo.ui.theme import LIMBO_DUSK
 
         try:
-            dark = self.app.current_theme.dark
+            theme = self.app.current_theme
         except Exception:  # noqa: BLE001 - no app/theme context (tests)
-            dark = True
-        return LimboDarkStyle if dark else LimboLightStyle
+            theme = LIMBO_DUSK
+        return style_for_theme(theme)
 
     def _lexer_for_body(self) -> str | None:
         """Pick a syntax-highlighting lexer based on the tool and its target."""
@@ -249,15 +291,48 @@ class ToolCard(Vertical):
                 )
         return ""
 
-    def _header_text(self) -> str:
+    @property
+    def display_name(self) -> str:
+        """``read`` → ``Read``, ``run_code`` → ``RunCode``."""
+        return "".join(part.capitalize() for part in self.tool_name.split("_"))
+
+    def _header_text(self) -> Text:
+        palette = self._palette()
         symbol = _STATE_SYMBOLS.get(self.state, "?")
-        parts = [f"{symbol} {self.tool_name}"]
+        if self.state == "running":
+            mode = motion.get_clock(self.app).mode if self.is_attached else motion.OFF
+            symbol = motion.spinner(self._step, mode) if mode == motion.FULL else "●"
+        symbol_color = {
+            "running": palette["primary"],
+            "success": palette["success"],
+            "error": palette["error"],
+        }.get(self.state, palette["dim"])
+        text = Text()
+        text.append(symbol, Style(color=symbol_color))
+        text.append(" ")
+        text.append(self.display_name, Style(color=palette["fg"], bold=True))
         summary = self._summary()
         if summary:
-            parts.append(summary)
+            text.append("  " + summary, Style(color=palette["mid"]))
         label = _STATE_LABELS.get(self.state, "")
         if label:
-            parts.append(f"({label})")
+            text.append(f"  {label}", Style(color=symbol_color))
         if self._elapsed is not None and self._elapsed >= 0.05:
-            parts.append(f"{self._elapsed:.1f}s")
-        return "  ".join(parts)
+            text.append(f"  {self._elapsed:.1f}s", Style(color=palette["dim"]))
+        return text
+
+    def _palette(self) -> dict[str, str | None]:
+        """Theme colours for the header (None outside an app: plain text)."""
+        try:
+            theme = self.app.current_theme
+        except Exception:  # noqa: BLE001 - no app context (unit tests)
+            return dict.fromkeys(("primary", "success", "error", "fg", "mid", "dim"))
+        v = theme.variables
+        return {
+            "primary": str(theme.primary),
+            "success": str(theme.success or theme.primary),
+            "error": str(theme.error or theme.primary),
+            "fg": str(theme.foreground),
+            "mid": v.get("text-secondary"),
+            "dim": v.get("text-tertiary"),
+        }

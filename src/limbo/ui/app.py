@@ -10,10 +10,15 @@ from textual.app import App
 
 from limbo.config import Config
 from limbo.llm.client import LLMClient
+from limbo.ui import omarchy
 from limbo.ui.clipboard import write_clipboard_text
 from limbo.ui.key_fixes import apply_key_fixes
+from limbo.ui.motion import MotionClock, resolve_mode
 from limbo.ui.screens.main import MainScreen
-from limbo.ui.theme import BUILTIN_THEMES, DEFAULT_THEME, LIMBO_DARK
+from limbo.ui.theme import BUILTIN_THEMES, DEFAULT_THEME, LIMBO_DUSK
+
+# How often to look for an Omarchy theme switch (a stat() of colors.toml).
+OMARCHY_POLL_SECONDS = 1.0
 
 
 class LimboApp(App[None]):
@@ -21,6 +26,8 @@ class LimboApp(App[None]):
 
     TITLE = "Limbo"
     CSS_PATH = "app.tcss"
+    # ctrl+p opens limbo's own palette (MainScreen.action_command_palette).
+    ENABLE_COMMAND_PALETTE = False
 
     def __init__(
         self,
@@ -39,15 +46,52 @@ class LimboApp(App[None]):
         self.llm_client = llm_client
         self.session_dir = session_dir
         self.resume = resume
+        self.motion = MotionClock(self, resolve_mode(config.ui.motion if config else None))
         for builtin in BUILTIN_THEMES:
             self.register_theme(builtin)
-        theme_name = (config.ui.theme if config else None) or DEFAULT_THEME
+        theme_name = (config.ui.theme if config else None) or "auto"
+        # "auto" follows Omarchy when it is installed, else limbo-dusk;
+        # "omarchy" follows it too and also falls back to limbo-dusk.
+        self._follow_omarchy = theme_name in ("auto", omarchy.THEME_NAME)
+        self._omarchy_state: omarchy.OmarchyState | None = None
+        if self._follow_omarchy:
+            theme_name = DEFAULT_THEME
+            if self._load_omarchy_theme():
+                theme_name = omarchy.THEME_NAME
         try:
             self.theme = theme_name
         except Exception:  # noqa: BLE001 - unknown theme name, use limbo default
             self.theme = DEFAULT_THEME
 
+    def _load_omarchy_theme(self) -> bool:
+        """(Re)register the theme built from Omarchy's colors.toml."""
+        state = omarchy.current_state()
+        theme = omarchy.load_theme() if state else None
+        self._omarchy_state = state
+        if theme is None:
+            return False
+        self.register_theme(theme)
+        return True
+
+    def _sync_omarchy_theme(self) -> None:
+        """Pick up an ``omarchy theme set`` without a restart."""
+        state = omarchy.current_state()
+        if state == self._omarchy_state:
+            return
+        if state is not None and self._load_omarchy_theme():
+            if self.theme == omarchy.THEME_NAME:
+                # Same name, new colours: re-run the theme watcher.
+                self.mutate_reactive(LimboApp.theme)
+            else:
+                self.theme = omarchy.THEME_NAME
+        else:
+            self._omarchy_state = state
+            if self.theme == omarchy.THEME_NAME:
+                self.theme = DEFAULT_THEME
+
     def on_mount(self) -> None:
+        if self._follow_omarchy:
+            self.set_interval(OMARCHY_POLL_SECONDS, self._sync_omarchy_theme)
         self.push_screen(
             MainScreen(
                 workdir=self.workdir,
@@ -106,4 +150,4 @@ class LimboApp(App[None]):
         without breaking app.tcss (which references ``$text-tertiary`` etc.).
         The limbo themes define their own values for all of these.
         """
-        return dict(LIMBO_DARK.variables)
+        return dict(LIMBO_DUSK.variables)

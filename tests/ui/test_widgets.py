@@ -268,7 +268,7 @@ async def test_thinking_collapsed_by_default_and_expandable():
         assert block.collapsed
         assert block._body.display is False
         summary = str(block._summary.render())
-        assert "thinking" in summary and "字" in summary
+        assert "思考" in summary and "字" in summary
         assert "step one" not in summary
 
         # Expand shows the full accumulated text.

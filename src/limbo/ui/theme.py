@@ -1,4 +1,5 @@
-"""Limbo 主题：limbo-dark / limbo-light。
+"""Limbo 主题：limbo-dusk（默认）/ limbo-dark / limbo-light，外加运行时从
+Omarchy 生成的 ``omarchy`` 主题（见 ``limbo.ui.omarchy``）。
 
 三层色彩架构（RFC LIM-16 v1.1 §6.2）：
 
@@ -14,7 +15,62 @@ from __future__ import annotations
 
 from textual.theme import Theme
 
-DEFAULT_THEME = "limbo-dark"
+DEFAULT_THEME = "limbo-dusk"
+
+# Limbo Dusk 在 Textual 标准槽位之外新增的语义变量。每个 limbo 主题（以及
+# Omarchy 生成的主题）都必须给出全部取值，app.tcss 和渐变渲染只认这些名字。
+#   diag        —— ``╱`` 斜线纹理
+#   thinking    —— 推理文本
+#   selected-bg / selected-fg —— 列表选中行、激活标签
+#   grad-from / grad-mid / grad-to —— 字标、上下文进度条、主按钮的渐变
+DUSK_VARIABLES = (
+    "diag",
+    "thinking",
+    "selected-bg",
+    "selected-fg",
+    "grad-from",
+    "grad-mid",
+    "grad-to",
+)
+
+LIMBO_DUSK = Theme(
+    name="limbo-dusk",
+    # 吉祥物蓝提亮：运行中、焦点边框、提示符
+    primary="#5B9BF0",
+    secondary="#A4A9C0",
+    warning="#F0A35A",
+    error="#ED5853",
+    success="#6FD6A8",
+    # 吉祥物黄：选中项、思考强度、数字强调
+    accent="#FDE75C",
+    foreground="#E3E5EF",
+    background="#11121C",
+    surface="#171928",
+    panel="#1F2235",
+    dark=True,
+    variables={
+        "text-secondary": "#A4A9C0",
+        "text-tertiary": "#7C82A3",
+        "border-subtle": "#2A2D44",
+        "border-default": "#3C4060",
+        "user-message-bg": "#1C2340",
+        "user-message-fg": "#A9C6F2",
+        "error-bright": "#F2706B",
+        "error-bg": "#331D24",
+        "diff-added": "#6FD6A8",
+        "diff-added-bg": "#17291F",
+        "diff-removed": "#F2706B",
+        "diff-removed-bg": "#331D24",
+        "diag": "#3C4060",
+        "thinking": "#A48CFF",
+        "selected-bg": "#2A3F66",
+        "selected-fg": "#E3E5EF",
+        # 黄昏渐变：深蓝 → 天蓝 → 黄
+        "grad-from": "#3069A9",
+        "grad-mid": "#5B9BF0",
+        "grad-to": "#FDE75C",
+    },
+)
 
 LIMBO_DARK = Theme(
     name="limbo-dark",
@@ -51,6 +107,13 @@ LIMBO_DARK = Theme(
         "diff-added-bg": "#1E2E26",
         "diff-removed": "#F06661",
         "diff-removed-bg": "#342026",
+        "diag": "#3A3F57",
+        "thinking": "#A99BE0",
+        "selected-bg": "#2A3756",
+        "selected-fg": "#DDE1EC",
+        "grad-from": "#3069A9",
+        "grad-mid": "#6B9BD2",
+        "grad-to": "#E8C85A",
     },
 )
 
@@ -83,10 +146,17 @@ LIMBO_LIGHT = Theme(
         "diff-added-bg": "#D9EBDD",
         "diff-removed": "#A93230",
         "diff-removed-bg": "#F3D6D6",
+        "diag": "#C4CADD",
+        "thinking": "#5B4A9E",
+        "selected-bg": "#D3DEF0",
+        "selected-fg": "#1E2433",
+        "grad-from": "#2F5D8F",
+        "grad-mid": "#3069A9",
+        "grad-to": "#9A7A0C",
     },
 )
 
-BUILTIN_THEMES = (LIMBO_DARK, LIMBO_LIGHT)
+BUILTIN_THEMES = (LIMBO_DUSK, LIMBO_DARK, LIMBO_LIGHT)
 
 
 def palette_snapshot(theme: Theme) -> dict[str, str]:

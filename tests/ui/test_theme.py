@@ -1,4 +1,4 @@
-"""Tests for the limbo-dark / limbo-light themes (RFC LIM-16 v1.1 P0-1)."""
+"""Tests for the limbo themes (RFC LIM-16 v1.1 P0-1, Limbo Dusk)."""
 
 from __future__ import annotations
 
@@ -29,11 +29,11 @@ def make_app(tmp_path: Path, config: Config | None = None) -> LimboApp:
 
 
 @pytest.mark.asyncio
-async def test_default_theme_is_limbo_dark(tmp_path):
+async def test_default_theme_is_limbo_dusk(tmp_path):
     app = make_app(tmp_path)
     async with app.run_test() as pilot:
         await pilot.pause()
-        assert pilot.app.theme == DEFAULT_THEME == "limbo-dark"
+        assert pilot.app.theme == DEFAULT_THEME == "limbo-dusk"
 
 
 @pytest.mark.asyncio
@@ -42,6 +42,7 @@ async def test_builtin_themes_registered(tmp_path):
     async with app.run_test() as pilot:
         await pilot.pause()
         available = pilot.app.available_themes
+        assert "limbo-dusk" in available
         assert "limbo-dark" in available
         assert "limbo-light" in available
 
@@ -67,13 +68,13 @@ async def test_theme_override_to_textual_builtin(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_unknown_theme_falls_back_to_limbo_dark(tmp_path):
+async def test_unknown_theme_falls_back_to_limbo_dusk(tmp_path):
     cfg = Config()
     cfg.ui.theme = "no-such-theme"
     app = make_app(tmp_path, config=cfg)
     async with app.run_test() as pilot:
         await pilot.pause()
-        assert pilot.app.theme == "limbo-dark"
+        assert pilot.app.theme == "limbo-dusk"
 
 
 def test_palette_snapshot_contains_semantic_tokens():

@@ -28,6 +28,7 @@ from textual.widgets import Markdown, Static
 
 from limbo.models import Attachment
 from limbo.ui.banner import user_icon
+from limbo.ui.widgets.landing import Landing
 from limbo.ui.widgets.tool_card import ToolCard
 
 # How many message widgets stay mounted in the DOM. Older ones are pruned
@@ -113,8 +114,8 @@ class ThinkingBlock(Vertical):
         n = len(self._text)
         # Collapsed: title only — no content preview (click to expand).
         if self._collapsed:
-            return f"🧠 thinking…（{n} 字）"
-        return f"🧠 thinking（点击折叠 · {n} 字）"
+            return f"∴ 思考 · {n} 字 · 点击展开"
+        return f"∴ 思考 · {n} 字 · 点击折叠"
 
 
 class QueuedMessage(Vertical):
@@ -227,7 +228,7 @@ class ChatWidget(VerticalScroll):
         # Full logical message list (display order), including messages
         # currently pruned from the DOM (old-message paging).
         self.messages: list[
-            Static | Markdown | QueuedMessage | ThinkingBlock | ToolCard
+            Static | Markdown | QueuedMessage | ThinkingBlock | ToolCard | Landing
         ] = []
         # How many of the oldest messages are pruned from the DOM.
         self._pruned_count = 0
@@ -387,6 +388,11 @@ class ChatWidget(VerticalScroll):
         msg = Static(text, classes="ascii-art", markup=False)
         self.messages.append(msg)
         self._mount_and_scroll(msg)
+
+    def add_landing(self, landing: Landing) -> None:
+        """Mount the fresh-session landing card (Limbo Dusk)."""
+        self.messages.append(landing)
+        self._mount_and_scroll(landing)
 
     def add_error(self, text: str) -> None:
         self._current_assistant = None
@@ -693,6 +699,8 @@ class ChatWidget(VerticalScroll):
                 parts.append(msg.content)
             elif isinstance(msg, ToolCard):
                 continue  # tool cards are UI chrome, not conversation text
+            elif isinstance(msg, Landing):
+                parts.append(msg.transcript)
             else:
                 parts.append(str(msg.content))
         return "\n".join(parts)

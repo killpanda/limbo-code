@@ -558,7 +558,7 @@ async def test_alt_enter_while_busy_queues_follow_up_after_the_task(tmp_path):
 
         screen.run_worker(screen._handle_turn("read main.py"))
         await wait_until(pilot, lambda: len(client.calls) == 2)
-        assert "Alt+Enter" in str(screen.query_one("#hint").render())
+        assert "alt+enter" in str(screen.query_one("#hint").render()).lower()
 
         input_widget.text = "然后写总结"
         await pilot.press("alt+enter")
@@ -577,7 +577,7 @@ async def test_alt_enter_while_busy_queues_follow_up_after_the_task(tmp_path):
         assert all(m.content != "然后写总结" for m in client.calls[1])
         assert client.calls[2][-1].content == "然后写总结"
         assert not screen._agent_busy
-        assert "Alt+Enter" not in str(screen.query_one("#hint").render())
+        assert "alt+enter" not in str(screen.query_one("#hint").render()).lower()
 
 
 @pytest.mark.asyncio
