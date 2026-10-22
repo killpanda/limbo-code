@@ -7,8 +7,10 @@ import re
 import secrets
 from pathlib import Path
 
+from textual import events
 from textual.app import ComposeResult
 from textual.binding import Binding
+from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
 from textual.widgets import Static
 
@@ -36,6 +38,7 @@ from limbo.goal import (
     parse_verify_proposal,
 )
 from limbo.integrations import AgentState, create_reporters, install_exit_hooks
+from limbo.llm.catalog import resolve_model
 from limbo.llm.client import LLMClient
 from limbo.llm.factory import create_llm_client
 from limbo.model_switch import (
@@ -68,14 +71,25 @@ from limbo.ui.screens.verify_picker import VerifyPicker
 from limbo.ui.widgets.chat import ChatWidget, QueuedMessage
 from limbo.ui.widgets.command_menu import SlashCommandMenu
 from limbo.ui.widgets.input import InputWidget, PasteMarkersInvalid, UserSubmitted
+from limbo.ui.widgets.key_hints import KeyHints
+from limbo.ui.widgets.sidebar import WIDE_MIN_WIDTH, Sidebar
 from limbo.ui.widgets.status_bar import StatusBar
 
 
 class MainScreen(Screen[None]):
-    """Single-column chat screen: status bar / chat flow / input / hint."""
+    """Chat screen (Limbo Dusk): status bar / chat flow + input beside a
+    session sidebar / key hints.
+
+    Terminals narrower than ``WIDE_MIN_WIDTH`` get the ``-compact`` class:
+    the sidebar hides and the status bar shows the wordmark and a context
+    summary instead; ``ctrl+d`` peeks the sidebar as an overlay.
+    """
 
     BINDINGS = [
         Binding("ctrl+o", "toggle_tools", "展开/收起工具输出"),
+        # Only enabled in compact mode (see check_action), so the input's
+        # own ctrl+d keeps working on wide terminals.
+        Binding("ctrl+d", "toggle_sidebar", "侧栏详情", priority=True),
         Binding("ctrl+g", "game2048", "2048 小游戏"),
         # Screen-level ESC (LIM-53): the input widget's priority binding
         # wins while it is focused (slash-menu close lives there); this
@@ -169,14 +183,17 @@ class MainScreen(Screen[None]):
             workdir=str(self.workdir),
             id="statusbar",
         )
-        yield ChatWidget(id="chat")
-        yield SlashCommandMenu(id="slash-menu")
-        yield InputWidget(id="input")
-        yield Static(
-            "Enter 发送 · Shift+Enter 换行 · ↑↓ 历史 · /! 命令 · ctrl+o 工具输出 · ctrl+g 2048",
-            id="hint",
-            markup=False,
-        )
+        with Horizontal(id="body"):
+            with Vertical(id="main-col"):
+                yield ChatWidget(id="chat")
+                yield SlashCommandMenu(id="slash-menu")
+                yield InputWidget(id="input")
+            yield Sidebar(
+                model=self.config.llm.model,
+                workdir=self.workdir,
+                id="sidebar",
+            )
+        yield KeyHints(id="hint")
 
     def on_mount(self) -> None:
         chat = self.query_one("#chat", ChatWidget)
@@ -194,9 +211,49 @@ class MainScreen(Screen[None]):
         # Code Mode badge: sync on startup so a resumed code-mode session
         # shows it without a fresh toggle.
         self.query_one("#statusbar", StatusBar).set_code_mode(self.agent.code_mode)
+        self._apply_layout(self.size.width)
+        self._sync_sidebar()
         self.query_one("#input", InputWidget).focus()
         self._report_session()
         self._report_state("idle")
+
+    # -- layout: sidebar on wide terminals, compact header on narrow ones ------
+
+    def on_resize(self, event: events.Resize) -> None:
+        self._apply_layout(event.size.width)
+
+    def _apply_layout(self, width: int) -> None:
+        compact = width < WIDE_MIN_WIDTH
+        self.set_class(compact, "-compact")
+        if not compact:
+            self.remove_class("-peek")
+
+    def check_action(self, action: str, parameters: tuple[object, ...]) -> bool | None:
+        if action == "toggle_sidebar":
+            return self.has_class("-compact")
+        return True
+
+    def action_toggle_sidebar(self) -> None:
+        self.toggle_class("-peek")
+
+    def _sync_sidebar(self) -> None:
+        """Push model / session / usage / mode state into the sidebar."""
+        sidebar = self.query_one("#sidebar", Sidebar)
+        spec = resolve_model(self.config.llm.model)
+        thinking = self.config.llm.thinking_effort if spec.reasoning else None
+        sidebar.set_model(self.config.llm.model, spec.provider.id, thinking)
+        sidebar.set_title(self.agent.session_meta.title or "")
+        sidebar.set_code_mode(self.agent.code_mode)
+        sidebar.set_skills([skill.name for skill in discover_skills(self.workdir)])
+        self._sync_usage()
+
+    def _sync_usage(self, total_tokens: int | None = None) -> None:
+        sidebar = self.query_one("#sidebar", Sidebar)
+        statusbar = self.query_one("#statusbar", StatusBar)
+        total = sidebar._tokens if total_tokens is None else total_tokens
+        sidebar.set_usage(total, self.agent.context_tokens(), self.agent.context_window)
+        statusbar.set_context(sidebar.context_percent)
+        statusbar.set_changes(sidebar.file_totals)
 
     # -- slash command menu ---------------------------------------------------
 
@@ -330,13 +387,16 @@ class MainScreen(Screen[None]):
         """Sync the status-bar badge with pump state (rainbow = running)."""
         statusbar = self.query_one("#statusbar", StatusBar)
         state = self.pump.status()
+        sidebar = self.query_one("#sidebar", Sidebar)
         if state is not None and state.status == STATUS_ACTIVE:
             statusbar.set_goal(
                 (state.rounds_completed, state.max_rounds),
                 running=self.pump.running,
             )
+            sidebar.set_goal(state.text, (state.rounds_completed, state.max_rounds))
         else:
             statusbar.set_goal(None)
+            sidebar.set_goal(None)
 
     # -- M2: model-proposed verify command confirmation ------------------------
 
@@ -551,6 +611,10 @@ class MainScreen(Screen[None]):
             input_widget.disabled = False
             input_widget.focus()
             statusbar.set_state("idle")
+            self.query_one("#sidebar", Sidebar).set_title(
+                self.agent.session_meta.title or ""
+            )
+            self._sync_usage()
             self._report_state("idle")
 
     def _show_help(self) -> None:
@@ -618,6 +682,7 @@ class MainScreen(Screen[None]):
                    else "恢复逐个直接调用工具")
             )
             self.query_one("#statusbar", StatusBar).set_code_mode(enabled)
+            self.query_one("#sidebar", Sidebar).set_code_mode(enabled)
         else:
             chat.add_info(f"Code Mode 已是{'开启' if enabled else '关闭'}状态")
 
@@ -630,6 +695,7 @@ class MainScreen(Screen[None]):
             self.config, self.llm_client, self.agent
         )
         self.query_one("#statusbar", StatusBar).set_model(model_id)
+        self._sync_sidebar()
         for notice in notices:
             chat.add_info(notice)
 
@@ -643,6 +709,8 @@ class MainScreen(Screen[None]):
         self.pump = self._new_pump(self.agent)
         chat.clear()
         chat.add_info(f"已开始新会话 {self.agent.session_id}")
+        self.query_one("#sidebar", Sidebar).reset_session()
+        self._sync_sidebar()
         self._report_session()
 
     def _invoke_skill(self, skill: Skill, arg: str) -> None:
@@ -689,6 +757,8 @@ class MainScreen(Screen[None]):
         self._render_history()
         meta = self.agent.session_meta
         chat.add_info(f"已切换到会话 {meta.id} · {meta.title or '(无标题)'}")
+        self.query_one("#sidebar", Sidebar).reset_session()
+        self._sync_sidebar()
         self._report_session()
 
     def _render_history(self) -> None:
@@ -1015,6 +1085,10 @@ class MainScreen(Screen[None]):
             # the user can keep typing without clicking.
             input_widget.focus()
             statusbar.set_state("idle")
+            self.query_one("#sidebar", Sidebar).set_title(
+                self.agent.session_meta.title or ""
+            )
+            self._sync_usage()
             self._report_state("idle")
             self._refresh_goal_indicator()
             # M2: a proposal round that ends without leftover steers pops
@@ -1044,6 +1118,7 @@ class MainScreen(Screen[None]):
                 chat.add_info(event.warning)
         elif isinstance(event, UsageUpdate):
             statusbar.set_tokens(event.total_tokens)
+            self._sync_usage(event.total_tokens)
         elif isinstance(event, SteerEvent):
             chat.mark_steer_delivered(event.id)
             self._update_queue_status()
@@ -1092,6 +1167,10 @@ class MainScreen(Screen[None]):
             card = chat.add_tool_card(event.id, event.name, event.arguments)
             if result.success:
                 card.set_success(result.output or "")
+                self.query_one("#sidebar", Sidebar).record_tool_result(
+                    event.name, event.arguments
+                )
+                self._sync_usage()
             else:
                 card.set_error(result.error or "Tool failed.")
             # Success or failure, the turn continues with another LLM call

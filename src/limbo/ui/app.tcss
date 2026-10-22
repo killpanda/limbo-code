@@ -1,19 +1,29 @@
-/* Limbo TUI — pi 风格单栏布局，集中管理所有样式。
+/* Limbo TUI — Limbo Dusk：聊天流 + 右侧栏，窄屏收成单栏，集中管理所有样式。
  *
  * 用色规范见 RFC LIM-16 v1.1 §6.3：本文件只允许引用主题语义变量
  * （limbo-dark / limbo-light 由 src/limbo/ui/theme.py 注册），禁止裸 hex。
  * 例外：Game2048 tile 色为游戏语义色，豁免。
  */
 
-/* ---- 顶部状态栏 ---- */
+/* ---- 顶部状态栏：状态 + ╱ 斜线纹理；窄屏时再加字标和上下文摘要 ---- */
 #statusbar {
     height: 1;
     padding: 0 1;
-    background: $surface;
+    background: $background;
+}
+#statusbar-logo {
+    width: auto;
+    display: none;
 }
 #statusbar-state {
-    width: 1fr;
+    width: auto;
+    padding-right: 1;
     color: $text-secondary;
+}
+#statusbar-diag {
+    width: 1fr;
+    color: $diag;
+    overflow: hidden;
 }
 #statusbar-state.thinking {
     color: $primary;
@@ -23,8 +33,48 @@
 }
 #statusbar-context {
     width: auto;
+    padding-left: 1;
     color: $text-secondary;
     text-align: right;
+    display: none;
+}
+MainScreen.-compact #statusbar-logo,
+MainScreen.-compact #statusbar-context {
+    display: block;
+}
+
+/* ---- 主体：聊天列 + 右侧栏 ---- */
+#body {
+    height: 1fr;
+    layers: base overlay;
+}
+#main-col {
+    width: 1fr;
+    height: 1fr;
+}
+#sidebar {
+    width: 36;
+    height: 1fr;
+    padding: 1 2;
+    background: $surface;
+    border-left: vkey $border-subtle;
+    scrollbar-size-vertical: 1;
+}
+#sidebar Static {
+    height: auto;
+}
+#sidebar .sb-group {
+    margin-top: 1;
+}
+MainScreen.-compact #sidebar {
+    display: none;
+}
+/* ctrl+d：窄屏下把侧栏临时盖在聊天右侧 */
+MainScreen.-compact.-peek #sidebar {
+    display: block;
+    dock: right;
+    layer: overlay;
+    border-left: tall $primary;
 }
 
 /* ---- 聊天流 ---- */
@@ -222,6 +272,7 @@ ToolCard.error .tool-body {
 #hint {
     height: 1;
     padding: 0 2;
+    background: $surface;
     color: $text-secondary;
 }
 

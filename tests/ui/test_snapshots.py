@@ -57,6 +57,8 @@ def _deterministic_ui(monkeypatch):
             return self
 
     monkeypatch.setattr("limbo.ui.app.Path", _NoResolvePath)
+    # The sidebar lists discovered skills, which include ~/.limbo/skills.
+    monkeypatch.setattr("limbo.ui.screens.main.discover_skills", lambda workdir: [])
 
 
 def make_app(tmp_path: Path) -> LimboApp:
@@ -89,6 +91,29 @@ def test_snapshot_thinking_and_running_tool(snap_compare, tmp_path):
         await pilot.pause()
 
     assert snap_compare(app, terminal_size=(90, 28), run_before=run_before)
+
+
+def test_snapshot_wide_layout_with_sidebar(snap_compare, tmp_path):
+    """Wide terminal: chat column beside the session sidebar (Limbo Dusk)."""
+    app = make_app(tmp_path)
+
+    async def run_before(pilot) -> None:
+        await pilot.pause()
+        screen = pilot.app.screen
+        chat = screen.query_one("#chat", ChatWidget)
+        chat.add_user_message("把 provider 解析抽成独立模块")
+        card = chat.add_tool_card(
+            "c1", "edit", {"path": "src/limbo/config.py", "old_text": "a\nb", "new_text": "c"}
+        )
+        card.set_success("ok")
+        sidebar = screen.query_one("#sidebar")
+        sidebar.record_tool_result(
+            "edit", {"path": "src/limbo/config.py", "old_text": "a\nb", "new_text": "c"}
+        )
+        sidebar.set_usage(12_000, 42_000, 128_000)
+        await pilot.pause()
+
+    assert snap_compare(app, terminal_size=(140, 32), run_before=run_before)
 
 
 def test_snapshot_tool_error_and_error_message(snap_compare, tmp_path):

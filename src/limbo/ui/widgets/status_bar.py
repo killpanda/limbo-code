@@ -3,6 +3,11 @@
 Active states (thinking / tool) animate a braille spinner and show the
 elapsed time of the current activity (RFC LIM-16 v1.1 P1-1); token usage is
 updated by the main screen as ``UsageUpdate`` events arrive from the agent.
+
+Limbo Dusk: a ``╱`` diagonal field fills the gap between the two sides. On
+narrow terminals (sidebar hidden) the bar also shows the gradient wordmark
+and the context summary; on wide ones the sidebar carries those, so the CSS
+hides the logo and the right-hand summary.
 """
 
 from __future__ import annotations
@@ -15,12 +20,10 @@ from textual.app import ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import Static
 
-_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⴦⦧⦇⦏"
+from limbo.ui.gradient import gradient_text, ramp, theme_gradient
 
-# Rainbow palette for the goal-mode indicator (LIM-40): while a goal loop
-# is executing, the badge cycles hues per frame; an active-but-idle goal
-# shows a static cyan badge instead.
-_RAINBOW = ("red", "orange1", "yellow1", "green1", "cyan1", "blue1", "magenta1")
+_SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
+_DIAG = "╱" * 400
 
 
 def _format_tokens(total: int) -> str:
@@ -41,7 +44,11 @@ class StatusBar(Horizontal):
         self._code_mode = False
         # NOTE: attribute names must not collide with MessagePump internals
         # (e.g. `_context` is a method on MessagePump).
+        self._context_percent: int | None = None
+        self._changes: tuple[int, int, int] = (0, 0, 0)
+        self._logo_label = Static(id="statusbar-logo", markup=False)
         self._state_label = Static("● idle", id="statusbar-state", markup=False)
+        self._diag_label = Static(_DIAG, id="statusbar-diag", markup=False)
         self._context_label = Static(self._context_text(), id="statusbar-context", markup=False)
         self._style = "idle"
         self._text = "idle"
@@ -53,55 +60,78 @@ class StatusBar(Horizontal):
         self._goal_running = False
 
     def compose(self) -> ComposeResult:
+        yield self._logo_label
         yield self._state_label
+        yield self._diag_label
         yield self._context_label
 
     def _context_text(self) -> str:
         parts = [self._model]
+        if self._context_percent is not None:
+            parts.append(f"{self._context_percent}%")
         if self._code_mode:
             parts.append("⌨code")
         if self._tokens:
             parts.append(f"↓↑ {_format_tokens(self._tokens)}")
+        files, added, removed = self._changes
+        if files:
+            parts.append(f"+{added}−{removed}")
         if self._queued:
             parts.append(f"⏳ {self._queued} 条排队中")
         parts.append(self._workdir)
         return " · ".join(parts)
+
+    def _refresh_context(self) -> None:
+        try:
+            self._context_label.update(self._context_text())
+        except Exception:  # noqa: BLE001 - not composed yet
+            pass
+
+    def set_context(self, percent: int | None) -> None:
+        """Context-window fill, shown in the compact (narrow) summary."""
+        if percent != self._context_percent:
+            self._context_percent = percent
+            self._refresh_context()
+
+    def set_changes(self, totals: tuple[int, int, int]) -> None:
+        """(files, lines added, lines removed) changed this session."""
+        if totals != self._changes:
+            self._changes = totals
+            self._refresh_context()
+
+    def _render_logo(self) -> None:
+        theme = self.app.current_theme
+        text = Text("Limbo™ ", style=theme.variables.get("text-tertiary", ""))
+        text.append_text(gradient_text("LIMBO", theme_gradient(theme), True))
+        text.append(" ")
+        try:
+            self._logo_label.update(text)
+        except Exception:  # noqa: BLE001 - not composed yet
+            pass
 
     def set_queued(self, count: int) -> None:
         """Update the queued-steer-message counter (RFC LIM-20)."""
         if count == self._queued:
             return
         self._queued = count
-        try:
-            self._context_label.update(self._context_text())
-        except Exception:  # noqa: BLE001 - not composed yet
-            pass
+        self._refresh_context()
 
     def set_tokens(self, total: int) -> None:
         """Update the cumulative token counter on the right side."""
         self._tokens = total
-        try:
-            self._context_label.update(self._context_text())
-        except Exception:  # noqa: BLE001 - not composed yet
-            pass
+        self._refresh_context()
 
     def set_model(self, model: str) -> None:
         """Update the displayed model name (after a /model switch)."""
         self._model = model
-        try:
-            self._context_label.update(self._context_text())
-        except Exception:  # noqa: BLE001 - not composed yet
-            pass
+        self._refresh_context()
 
     def set_code_mode(self, enabled: bool) -> None:
         """Show/hide the ⌨code badge (Code Mode presentation toggle)."""
         if enabled == self._code_mode:
             return
         self._code_mode = enabled
-        try:
-            self._context_label.update(self._context_text())
-        except Exception:  # noqa: BLE001 - not composed yet
-            pass
+        self._refresh_context()
 
     def set_goal(
         self, goal: tuple[int, int] | None, *, running: bool = False
@@ -119,13 +149,16 @@ class StatusBar(Horizontal):
     def _goal_badge(self) -> Text:
         rounds, max_rounds = self._goal if self._goal is not None else (0, 0)
         label = f"🎯GOAL {rounds}/{max_rounds} "
+        stops = theme_gradient(self.app.current_theme)
         text = Text()
         if self._goal_running:
+            # The theme gradient flows through the badge while the loop runs.
+            span = max(1, len(label) - 1)
             for i, ch in enumerate(label):
-                color = _RAINBOW[(i + self._frame) % len(_RAINBOW)]
-                text.append(ch, style=f"bold {color}")
+                t = ((i / span) + self._frame * 0.08) % 1.0
+                text.append(ch, style=f"bold {ramp(stops, 1 - abs(2 * t - 1))}")
         else:
-            text.append(label, style="bold cyan")
+            text.append(label, style=f"bold {stops[-1]}")
         return text
 
     def set_state(self, text: str, style: str = "idle") -> None:
@@ -160,6 +193,8 @@ class StatusBar(Horizontal):
             pass
 
     def on_mount(self) -> None:
+        self._render_logo()
+        self.app.theme_changed_signal.subscribe(self, lambda _theme: self._render_logo())
         # 8 fps spinner; cheap no-op while idle.
         self.set_interval(1 / 8, self._tick)
 
