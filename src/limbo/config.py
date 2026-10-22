@@ -163,8 +163,11 @@ class UIConfig(BaseModel):
     # Also accepts "limbo-dusk" / "limbo-dark" / "limbo-light" or any Textual
     # built-in theme (e.g. "textual-dark", "dracula", "nord").
     theme: str | None = None
-    # Show the startup ASCII-art banner on fresh sessions.
+    # Show the startup landing (gradient wordmark + tips) on fresh sessions.
     show_banner: bool = True
+    # Animation level (Limbo Motion): "full" / "reduced" / "off". Unset =
+    # full, or reduced inside an SSH session. LIMBO_MOTION overrides it.
+    motion: str | None = None
     # Kitty keyboard protocol handling (see KittyKeyboardMode):
     #   auto     - enable normally, except inside the herdr multiplexer where
     #              it breaks IME/Chinese input (default)

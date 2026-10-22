@@ -55,3 +55,25 @@ def isolated_omarchy_state(tmp_path, monkeypatch):
     monkeypatch.setattr(
         omarchy_module, "DEFAULT_STATE_DIR", tmp_path / "omarchy-state"
     )
+
+
+@pytest.fixture(autouse=True)
+def motion_off(monkeypatch):
+    """Animations render their final frame in tests (Limbo Motion ``off``).
+
+    Tests that exercise motion itself pass an explicit mode or env mapping.
+    """
+    monkeypatch.setenv("LIMBO_MOTION", "off")
+
+
+@pytest.fixture(autouse=True)
+def isolated_auth_file(tmp_path, monkeypatch):
+    """Stored logins (``limbo auth login``) live in a per-test auth.json.
+
+    API-key resolution reads ~/.limbo/auth.json; without this a developer's
+    real logins would leak into "no key configured" tests.
+    """
+    monkeypatch.delenv("LIMBO_AUTH_FILE", raising=False)
+    import limbo.auth as auth_module
+
+    monkeypatch.setattr(auth_module, "DEFAULT_AUTH_PATH", tmp_path / "auth.json")

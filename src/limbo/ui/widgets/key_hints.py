@@ -12,7 +12,7 @@ DEFAULT_HINTS: tuple[tuple[str, str], ...] = (
     ("enter", "发送"),
     ("shift+enter", "换行"),
     ("/", "命令"),
-    ("!", "shell"),
+    ("ctrl+p", "面板"),
     ("ctrl+o", "展开"),
     ("esc", "中断"),
 )

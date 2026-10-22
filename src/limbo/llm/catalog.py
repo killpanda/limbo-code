@@ -22,6 +22,8 @@ import os
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
+from limbo import auth
+
 if TYPE_CHECKING:
     from limbo.config import Config
 
@@ -384,6 +386,9 @@ def resolve_base_url(spec: ModelSpec, config: Config) -> str:
     override = config.providers.get(spec.provider.id)
     if override and override.base_url:
         return override.base_url
+    stored = auth.get(spec.provider.id)
+    if stored and stored.base_url:
+        return stored.base_url
     configured = config.llm.base_url
     if configured != DEFAULT_BASE_URL or not spec.provider.base_url:
         return configured
@@ -394,18 +399,76 @@ def resolve_api_key(spec: ModelSpec, config: Config) -> str | None:
     """Resolve the API key for a model.
 
     Resolution order (first hit wins): ``[providers.<id>] api_key``, then
+    a stored login (``limbo auth login``, ``~/.limbo/auth.json``), then
     ``[llm] api_key``, then the environment variable named by
     ``resolve_api_key_env``.
     """
     override = config.providers.get(spec.provider.id)
     if override and override.api_key:
         return override.api_key
+    stored = auth.get(spec.provider.id)
+    if stored:
+        return stored.key
     if config.llm.api_key:
         return config.llm.api_key
     env = resolve_api_key_env(spec, config)
     if env:
         return os.environ.get(env)
     return None
+
+
+def api_key_source(spec: ModelSpec, config: Config) -> str | None:
+    """Where :func:`resolve_api_key` finds the key, for display (None = nowhere)."""
+    override = config.providers.get(spec.provider.id)
+    if override and override.api_key:
+        return f"config [providers.{spec.provider.id}]"
+    if auth.get(spec.provider.id):
+        return "auth.json"
+    if config.llm.api_key:
+        return "config [llm]"
+    env = resolve_api_key_env(spec, config)
+    if env and os.environ.get(env):
+        return f"${env}"
+    return None
+
+
+PROVIDER_NAMES = {
+    "deepseek": "DeepSeek",
+    "moonshotai": "Moonshot",
+    "kimi-coding": "Kimi For Coding",
+    "glm": "GLM Coding Plan",
+    "codex": "OpenAI Codex",
+    "custom": "自定义 OpenAI 兼容",
+}
+
+
+def provider_display_name(provider_id: str) -> str:
+    return PROVIDER_NAMES.get(provider_id, provider_id)
+
+
+def providers() -> list[ProviderSpec]:
+    """Catalog providers in first-appearance order."""
+    seen: dict[str, ProviderSpec] = {}
+    for spec in CATALOG.values():
+        seen.setdefault(spec.provider.id, spec.provider)
+    return list(seen.values())
+
+
+def thinking_choices(spec: ModelSpec) -> list[str | None]:
+    """Values ``[llm] thinking_effort`` can take for ``spec``, None = provider default.
+
+    Drives shift+tab cycling and the model dialog; empty when the model has
+    no thinking switch at all.
+    """
+    if not spec.reasoning or spec.thinking_format is None:
+        return []
+    choices: list[str | None] = [None, *spec.thinking_levels]
+    if spec.thinking_format in ("deepseek", "zai"):
+        if not spec.thinking_levels:
+            choices.append("on")
+        if spec.thinking_can_disable:
+            choices.append("off")
+    return choices
 
 
 def resolve_api_key_env(spec: ModelSpec, config: Config) -> str | None:
@@ -447,6 +510,7 @@ def missing_api_key_message(spec: ModelSpec, config: Config) -> str:
     ]
     if env:
         lines.append(f"  or set the ${env} env var")
+    lines.append(f"  or run: limbo auth login {provider}")
     if config.providers and provider not in config.providers:
         configured = ", ".join(sorted(config.providers))
         lines.append(

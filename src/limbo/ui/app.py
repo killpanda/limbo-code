@@ -13,6 +13,7 @@ from limbo.llm.client import LLMClient
 from limbo.ui import omarchy
 from limbo.ui.clipboard import write_clipboard_text
 from limbo.ui.key_fixes import apply_key_fixes
+from limbo.ui.motion import MotionClock, resolve_mode
 from limbo.ui.screens.main import MainScreen
 from limbo.ui.theme import BUILTIN_THEMES, DEFAULT_THEME, LIMBO_DUSK
 
@@ -25,6 +26,8 @@ class LimboApp(App[None]):
 
     TITLE = "Limbo"
     CSS_PATH = "app.tcss"
+    # ctrl+p opens limbo's own palette (MainScreen.action_command_palette).
+    ENABLE_COMMAND_PALETTE = False
 
     def __init__(
         self,
@@ -43,6 +46,7 @@ class LimboApp(App[None]):
         self.llm_client = llm_client
         self.session_dir = session_dir
         self.resume = resume
+        self.motion = MotionClock(self, resolve_mode(config.ui.motion if config else None))
         for builtin in BUILTIN_THEMES:
             self.register_theme(builtin)
         theme_name = (config.ui.theme if config else None) or "auto"

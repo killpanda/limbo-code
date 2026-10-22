@@ -38,6 +38,12 @@
     text-align: right;
     display: none;
 }
+MainScreen #statusbar {
+    display: none;
+}
+MainScreen.-compact #statusbar {
+    display: block;
+}
 MainScreen.-compact #statusbar-logo,
 MainScreen.-compact #statusbar-context {
     display: block;
@@ -105,7 +111,7 @@ ChatWidget {
     margin-top: 1;
 }
 .thinking-summary {
-    color: $text-tertiary;
+    color: $thinking;
     text-style: italic;
 }
 .thinking-summary:hover {
@@ -114,6 +120,8 @@ ChatWidget {
 .thinking-body {
     color: $text-tertiary;
     text-style: italic;
+    padding-left: 2;
+    border-left: solid $diag;
 }
 .error-message {
     width: 1fr;
@@ -207,42 +215,74 @@ MarkdownBlock > .code_inline {
     color: $accent;
 }
 
-/* ---- 工具调用卡片 ---- */
+/* ---- 工具调用：一行语法（✓ Read  path  0.1s），展开体挂在 │ 竖线下 ---- */
 ToolCard {
     height: auto;
-    padding-left: 1;
-    background: $surface;
-    border-left: thick $primary;
-}
-ToolCard.success {
-    border-left: thick $success;
-}
-ToolCard.error {
-    border-left: thick $error;
-    background: $error-bg;
+    padding: 0 1;
 }
 ToolCard .tool-header {
     height: 1;
-    color: $text-secondary;
 }
-ToolCard.running .tool-header {
-    color: $primary;
-}
-ToolCard.success .tool-header {
-    color: $success;
-}
-ToolCard.error .tool-header {
-    color: $error-bright;
+ToolCard:hover .tool-header {
+    text-style: underline;
 }
 ToolCard .tool-body {
     height: auto;
     max-height: 24;
+    margin-left: 2;
     padding-left: 1;
-    border-left: solid $border-default;
-    background: $surface;
+    border-left: solid $diag;
+    background: $background;
 }
 ToolCard.error .tool-body {
     background: $error-bg;
+}
+
+/* ---- 启动页：渐变字标 + 环境 + 下一步 ---- */
+Landing {
+    height: auto;
+    padding: 1 1 0 1;
+}
+Landing .landing-diag {
+    height: 1;
+    overflow: hidden;
+}
+Landing .landing-head {
+    height: auto;
+    margin: 1 0;
+}
+Landing .landing-logo {
+    width: auto;
+    height: auto;
+    margin-right: 4;
+}
+Landing .landing-info {
+    width: 1fr;
+    height: auto;
+}
+Landing .landing-cols {
+    height: auto;
+    margin-top: 1;
+}
+Landing .landing-recent, Landing .landing-tips {
+    width: 1fr;
+    height: auto;
+}
+MainScreen.-compact Landing .landing-info {
+    display: none;
+}
+
+/* ---- 活动行（Tide）：忙碌时出现在输入框上方 ---- */
+#activity {
+    height: 1;
+    padding: 0 2;
+    margin-top: 1;
+}
+
+/* ---- 输入框上方的状态胶囊 ---- */
+#pills {
+    height: 1;
+    padding: 0 2;
 }
 
 /* ---- 斜杠命令自动补全菜单 ---- */
@@ -276,30 +316,56 @@ ToolCard.error .tool-body {
     color: $text-secondary;
 }
 
-/* ---- 会话选择弹窗 ---- */
-SessionPicker {
+/* ---- Dialog 基座：遮罩 + 卡片 + 标题 ╱ 线 ---- */
+Dialog {
     align: center middle;
+    background: $background 60%;
 }
-SessionPicker #session-picker {
+Dialog .dialog {
     width: 80%;
-    max-width: 110;
+    max-width: 96;
     height: auto;
     max-height: 80%;
-    border: round $accent;
     background: $surface;
+    border: tall $panel;
     padding: 1 2;
 }
-SessionPicker #picker-title {
-    text-style: bold;
+Dialog .dialog-title {
+    height: 1;
     margin-bottom: 1;
+    text-wrap: nowrap;
+    text-overflow: clip;
 }
-SessionPicker ListView {
+Dialog .dialog-hint {
+    height: 1;
+    margin-top: 1;
+}
+Dialog ListView, Dialog OptionList {
     height: auto;
     max-height: 20;
+    background: $surface;
+    border: none;
+    padding: 0;
 }
-SessionPicker ListView:focus > ListItem.-highlight {
+Dialog ListView > ListItem.-highlight,
+Dialog ListView:focus > ListItem.-highlight {
+    background: $selected-bg;
+    color: $selected-fg;
+}
+Dialog OptionList > .option-list--option-highlighted {
+    background: $selected-bg;
+    color: $selected-fg;
+}
+CommandPalette .palette-tabs {
+    height: 1;
+    margin-bottom: 1;
+}
+CommandPalette .palette-input {
+    border: none;
     background: $panel;
-    color: $accent;
+    padding: 0 1;
+    height: 1;
+    margin-bottom: 1;
 }
 
 /* ---- 模型选择弹窗 ---- */

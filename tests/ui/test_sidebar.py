@@ -143,3 +143,92 @@ async def test_new_session_resets_sidebar(tmp_path):
         screen._start_new_session()
         await pilot.pause()
         assert sidebar.file_totals == (0, 0, 0)
+
+
+@pytest.mark.asyncio
+async def test_pills_show_queue_and_goal(tmp_path):
+    from limbo.ui.widgets.pills import Pills
+
+    app = make_app(tmp_path)
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        pills = pilot.app.screen.query_one("#pills", Pills)
+        assert not pills.display
+        pills.set_queued(2)
+        pills.set_goal((3, 10))
+        assert "排队 2" in pills.plain
+        assert "目标 3/10" in pills.plain
+        assert pills.display
+        pills.set_queued(0)
+        pills.set_goal(None)
+        assert not pills.display
+
+
+@pytest.mark.asyncio
+async def test_status_bar_hidden_on_wide_layout(tmp_path):
+    app = make_app(tmp_path)
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        bar = pilot.app.screen.query_one("#statusbar", StatusBar)
+        assert bar.styles.display == "none"
+        await pilot.resize_terminal(100, 40)
+        await pilot.pause()
+        assert bar.styles.display == "block"
+
+
+def test_fuzzy_score():
+    from limbo.ui.screens.command_palette import fuzzy_score
+
+    assert fuzzy_score("", "anything") == 0
+    assert fuzzy_score("cmp", "/compact") is not None
+    assert fuzzy_score("xyz", "/compact") is None
+    assert fuzzy_score("new", "/new") > fuzzy_score("nw", "/new")
+
+
+@pytest.mark.asyncio
+async def test_command_palette_filters_tabs_and_runs(tmp_path):
+    from limbo.ui.screens.command_palette import CommandPalette
+
+    app = make_app(tmp_path)
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        main = pilot.app.screen
+        await pilot.press("ctrl+p")
+        await pilot.pause()
+        palette = pilot.app.screen
+        assert isinstance(palette, CommandPalette)
+        assert palette.tab == "system"
+        await pilot.press(*"mode")
+        await pilot.pause()
+        assert palette.shown[0].value in ("/model", "/code-mode")
+        await pilot.press("tab")
+        await pilot.pause()
+        assert palette.tab == "sessions"
+        await pilot.press("shift+tab")
+        await pilot.press("ctrl+a")
+        for _ in range(4):
+            await pilot.press("backspace")
+        await pilot.press(*"/model")
+        await pilot.pause()
+        assert palette.shown[0].value == "/model"
+        await pilot.press("enter")
+        await pilot.pause()
+        assert pilot.app.screen is main
+        # /model takes arguments, so it is prefilled rather than run.
+        assert main.query_one("#input").text == "/model "
+
+
+@pytest.mark.asyncio
+async def test_command_palette_runs_argless_command(tmp_path):
+    app = make_app(tmp_path)
+    async with app.run_test(size=(140, 40)) as pilot:
+        await pilot.pause()
+        main = pilot.app.screen
+        old = main.agent.session_id
+        await pilot.press("ctrl+p")
+        await pilot.press(*"/new")
+        await pilot.pause()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert pilot.app.screen is main
+        assert main.agent.session_id != old

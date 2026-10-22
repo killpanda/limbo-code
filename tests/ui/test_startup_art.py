@@ -1,4 +1,5 @@
-"""Tests for the startup ASCII-art banner on the main screen."""
+"""Tests for the startup landing (Limbo Dusk wordmark) and the legacy
+half-block mascot art module."""
 
 from __future__ import annotations
 
@@ -22,6 +23,7 @@ from limbo.ui.banner import (
     startup_art_text,
 )
 from limbo.ui.widgets.chat import ChatWidget
+from limbo.ui.widgets.landing import WORDMARK, Landing, relative_time
 
 
 class FakeLLMClient:
@@ -49,9 +51,8 @@ async def test_startup_art_shown_on_fresh_start(tmp_path):
         await pilot.pause()
         chat = pilot.app.screen.query_one("#chat", ChatWidget)
         transcript = chat.transcript_text()
-        # A distinctive mid-art line proves the banner was rendered verbatim.
-        art_lines = startup_art_text().plain.splitlines()
-        assert art_lines[len(art_lines) // 2] in transcript
+        assert WORDMARK[2] in transcript
+        assert len(chat.query(Landing)) == 1
 
 
 @pytest.mark.asyncio
@@ -70,10 +71,7 @@ async def test_startup_art_hidden_when_resuming(tmp_path):
         await pilot.pause()
         chat = pilot.app.screen.query_one("#chat", ChatWidget)
         transcript = chat.transcript_text()
-        # The tall multi-row banner is not rendered on resume (only the
-        # compact single-row user-message icon may contain ``▀``).
-        art_lines = startup_art_text().plain.splitlines()
-        assert art_lines[len(art_lines) // 2] not in transcript
+        assert WORDMARK[2] not in transcript
         assert "已恢复会话" in transcript
 
 
@@ -87,7 +85,7 @@ async def test_startup_art_hidden_when_show_banner_false(tmp_path):
         await pilot.pause()
         chat = pilot.app.screen.query_one("#chat", ChatWidget)
         transcript = chat.transcript_text()
-        assert UPPER not in transcript  # half-block banner not rendered
+        assert WORDMARK[2] not in transcript
         assert "Limbo ready" in transcript
 
 
@@ -138,3 +136,14 @@ def test_startup_art_text_uses_palette_colors_only():
             assert i in covered
         else:
             assert i not in covered
+
+
+def test_relative_time():
+    from datetime import datetime, timezone
+
+    now = datetime(2026, 10, 22, 12, 0, tzinfo=timezone.utc)
+    assert relative_time("2026-10-22T11:59:30+00:00", now) == "刚刚"
+    assert relative_time("2026-10-22T11:48:00+00:00", now) == "12 分钟前"
+    assert relative_time("2026-10-22T09:00:00+00:00", now) == "3 小时前"
+    assert relative_time("2026-10-20T12:00:00+00:00", now) == "2 天前"
+    assert relative_time("garbage", now) == ""

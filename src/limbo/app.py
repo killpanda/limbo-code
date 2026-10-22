@@ -38,7 +38,29 @@ def _apply_kitty_keyboard_workaround(config) -> None:
         os.environ["TEXTUAL_DISABLE_KITTY_KEY"] = "1"
 
 
+def _first_run_login(spec, config) -> bool:  # noqa: ANN001
+    """No key anywhere and a real terminal: offer to log in instead of exiting."""
+    from limbo.cli_auth import login  # noqa: PLC0415 - only on first run
+    from limbo.llm.catalog import provider_display_name  # noqa: PLC0415
+
+    name = provider_display_name(spec.provider.id)
+    print(f"欢迎使用 limbo。还没有 {name} 的 API key（模型 {spec.id}）。")
+    print("粘贴一个 key 就能开始，它会保存在 ~/.limbo/auth.json（仅自己可读）。")
+    print("想换提供商：Ctrl+C 退出后运行 limbo auth login，或用 -m 指定模型。\n")
+    try:
+        if login(spec.provider.id) != 0:
+            return False
+    except (KeyboardInterrupt, EOFError):
+        print()
+        return False
+    return resolve_api_key(spec, config) is not None
+
+
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] in ("auth", "models"):
+        from limbo.cli_auth import run  # noqa: PLC0415 - subcommands skip the TUI imports
+
+        return run(sys.argv[1:])
     parser = argparse.ArgumentParser(description="Limbo TUI coding agent")
     parser.add_argument(
         "--workdir",
@@ -66,9 +88,11 @@ def main() -> int:
         help="Resume a session by id (or unique id prefix)",
     )
     parser.add_argument(
+        "-m",
         "--model",
         default=None,
-        help="Override the configured model for this run (e.g. glm-4.7)",
+        help="Override the configured model for this run (e.g. glm-4.7, "
+        "kimi-k3:high to also set the thinking level)",
     )
     parser.add_argument(
         "--headless",
@@ -82,9 +106,15 @@ def main() -> int:
     config = load_config()
     _apply_kitty_keyboard_workaround(config)
     if args.model:
-        config.llm.model = args.model
+        from limbo.cli_auth import split_model_arg  # noqa: PLC0415
+
+        config.llm.model, level = split_model_arg(args.model)
+        if level:
+            config.llm.thinking_effort = level
     spec = resolve_model(config.llm.model)
-    if not resolve_api_key(spec, config):
+    if not resolve_api_key(spec, config) and not (
+        sys.stdin.isatty() and sys.stdout.isatty() and _first_run_login(spec, config)
+    ):
         print("Error: " + missing_api_key_message(spec, config), file=sys.stderr)
         return 1
 

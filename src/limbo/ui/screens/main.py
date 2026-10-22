@@ -59,20 +59,23 @@ from limbo.pump import (
 from limbo.sessions import derive_title, export_jsonl, export_markdown, list_sessions
 from limbo.skills import Skill, discover_skills
 from limbo.tools.bash import BashTool
-from limbo.ui.banner import startup_art_text
 from limbo.ui.commands import SlashCommand, SlashCommandRegistry
 from limbo.ui.path_input import attachments_from_text, looks_like_path
 from limbo.ui.screens.btw import BtwScreen
+from limbo.ui.screens.command_palette import CommandPalette, PaletteChoice
 from limbo.ui.screens.game2048 import Game2048Screen
 from limbo.ui.screens.model_picker import ModelPicker
 from limbo.ui.screens.session_picker import SessionPicker
 from limbo.ui.screens.verify_picker import EDIT as VERIFY_EDIT
 from limbo.ui.screens.verify_picker import VerifyPicker
+from limbo.ui.widgets.activity import ActivityLine
 from limbo.ui.widgets.chat import ChatWidget, QueuedMessage
 from limbo.ui.widgets.command_menu import SlashCommandMenu
 from limbo.ui.widgets.input import InputWidget, PasteMarkersInvalid, UserSubmitted
 from limbo.ui.widgets.key_hints import KeyHints
-from limbo.ui.widgets.sidebar import WIDE_MIN_WIDTH, Sidebar
+from limbo.ui.widgets.landing import Landing
+from limbo.ui.widgets.pills import Pills
+from limbo.ui.widgets.sidebar import WIDE_MIN_WIDTH, Sidebar, git_branch
 from limbo.ui.widgets.status_bar import StatusBar
 
 
@@ -87,6 +90,8 @@ class MainScreen(Screen[None]):
 
     BINDINGS = [
         Binding("ctrl+o", "toggle_tools", "展开/收起工具输出"),
+        Binding("ctrl+p", "command_palette", "命令面板", priority=True),
+        Binding("ctrl+s", "sessions", "会话", priority=True),
         # Only enabled in compact mode (see check_action), so the input's
         # own ctrl+d keeps working on wide terminals.
         Binding("ctrl+d", "toggle_sidebar", "侧栏详情", priority=True),
@@ -186,6 +191,8 @@ class MainScreen(Screen[None]):
         with Horizontal(id="body"):
             with Vertical(id="main-col"):
                 yield ChatWidget(id="chat")
+                yield ActivityLine(id="activity")
+                yield Pills(id="pills")
                 yield SlashCommandMenu(id="slash-menu")
                 yield InputWidget(id="input")
             yield Sidebar(
@@ -199,8 +206,9 @@ class MainScreen(Screen[None]):
         chat = self.query_one("#chat", ChatWidget)
         resumed = len(self.agent.messages) > 1
         if not resumed and self.config.ui.show_banner:
-            chat.add_art(startup_art_text())
-        chat.add_info(f"Limbo ready · {self.config.llm.model} · {self.workdir}")
+            chat.add_landing(self._landing())
+        else:
+            chat.add_info(f"Limbo ready · {self.config.llm.model} · {self.workdir}")
         if resumed:
             self._render_history()
             meta = self.agent.session_meta
@@ -210,12 +218,30 @@ class MainScreen(Screen[None]):
         self._refresh_goal_indicator()  # D6: silent resume, badge only
         # Code Mode badge: sync on startup so a resumed code-mode session
         # shows it without a fresh toggle.
-        self.query_one("#statusbar", StatusBar).set_code_mode(self.agent.code_mode)
+        statusbar = self.query_one("#statusbar", StatusBar)
+        statusbar.set_code_mode(self.agent.code_mode)
+        statusbar.on_state(self.query_one("#activity", ActivityLine).set_state)
         self._apply_layout(self.size.width)
         self._sync_sidebar()
         self.query_one("#input", InputWidget).focus()
         self._report_session()
         self._report_state("idle")
+
+    def _landing(self) -> Landing:
+        spec = resolve_model(self.config.llm.model)
+        detail = spec.provider.id
+        if spec.reasoning and self.config.llm.thinking_effort:
+            detail += f" · 思考 {self.config.llm.thinking_effort}"
+        try:
+            recent = list_sessions(self.session_dir, workdir=self.workdir)
+        except OSError:
+            recent = []
+        return Landing(
+            model=self.config.llm.model,
+            detail=detail,
+            branch=git_branch(self.workdir),
+            recent=recent,
+        )
 
     # -- layout: sidebar on wide terminals, compact header on narrow ones ------
 
@@ -394,9 +420,13 @@ class MainScreen(Screen[None]):
                 running=self.pump.running,
             )
             sidebar.set_goal(state.text, (state.rounds_completed, state.max_rounds))
+            self.query_one("#pills", Pills).set_goal(
+                (state.rounds_completed, state.max_rounds)
+            )
         else:
             statusbar.set_goal(None)
             sidebar.set_goal(None)
+            self.query_one("#pills", Pills).set_goal(None)
 
     # -- M2: model-proposed verify command confirmation ------------------------
 
@@ -735,6 +765,43 @@ class MainScreen(Screen[None]):
         chat.add_user_message(display)
         self.run_worker(self._handle_turn(prompt))
 
+    def action_command_palette(self) -> None:
+        if isinstance(self.app.screen, CommandPalette):
+            return
+        palette = CommandPalette(
+            self._commands.all(),
+            list_sessions(self.session_dir, workdir=self.workdir),
+            discover_skills(self.workdir),
+            current_session=self.agent.session_id,
+        )
+        self.app.push_screen(palette, self._on_palette_choice)
+
+    def action_sessions(self) -> None:
+        if self._agent_busy:
+            command = self._commands.get("/sessions")
+            if command is not None:
+                self._reject_busy_command(command)
+            return
+        self._open_session_picker()
+
+    def _on_palette_choice(self, choice: PaletteChoice | None) -> None:
+        if choice is None:
+            return
+        input_widget = self.query_one("#input", InputWidget)
+        if choice.kind == "session":
+            if self._agent_busy:
+                command = self._commands.get("/sessions")
+                if command is not None:
+                    self._reject_busy_command(command)
+                return
+            self._on_session_picked(Path(choice.value))
+        elif choice.takes_args:
+            input_widget.load_text(f"{choice.value} ")
+            input_widget.move_cursor(input_widget.document.end)
+        else:
+            self._handle_command(choice.value)
+        input_widget.focus()
+
     def _open_session_picker(self) -> None:
         chat = self.query_one("#chat", ChatWidget)
         sessions = list_sessions(self.session_dir, workdir=self.workdir)
@@ -990,6 +1057,7 @@ class MainScreen(Screen[None]):
 
     def _update_queue_status(self) -> None:
         self.query_one("#statusbar", StatusBar).set_queued(self.agent.queued_count)
+        self.query_one("#pills", Pills).set_queued(self.agent.queued_count)
 
     def cancel_queued(self, item_id: str) -> None:
         """Cancel one queued steer message (the card's ✕ affordance)."""

@@ -13,6 +13,7 @@ hides the logo and the right-hand summary.
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 from typing import Any
 
 from rich.text import Text
@@ -58,6 +59,7 @@ class StatusBar(Horizontal):
         # active, None otherwise; _goal_running toggles the rainbow.
         self._goal: tuple[int, int] | None = None
         self._goal_running = False
+        self._state_listeners: list[Callable[[str, str], None]] = []
 
     def compose(self) -> ComposeResult:
         yield self._logo_label
@@ -86,6 +88,9 @@ class StatusBar(Horizontal):
             self._context_label.update(self._context_text())
         except Exception:  # noqa: BLE001 - not composed yet
             pass
+
+    def on_state(self, listener: Callable[[str, str], None]) -> None:
+        self._state_listeners.append(listener)
 
     def set_context(self, percent: int | None) -> None:
         """Context-window fill, shown in the compact (narrow) summary."""
@@ -162,7 +167,13 @@ class StatusBar(Horizontal):
         return text
 
     def set_state(self, text: str, style: str = "idle") -> None:
-        """Update the left side. ``style`` is one of idle/thinking/tool."""
+        """Update the left side. ``style`` is one of idle/thinking/tool.
+
+        Listeners registered via ``on_state`` (the activity line) see every
+        transition too, so the many call sites stay single-sourced here.
+        """
+        for listener in self._state_listeners:
+            listener(text, style)
         active = style in ("thinking", "tool")
         # Reset the clock when the activity kind changes or a new one starts.
         if active and (self._style != style or self._started is None):
