@@ -1,0 +1,560 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Limbo Trace</title>
+<style>
+:root {
+  --bg: #14151F; --surface: #1B1D2A; --panel: #232637;
+  --fg: #DDE1EC; --fg2: #9AA0B5; --fg3: #7F85A0;
+  --border: #2C3044; --border2: #3A3F57;
+  --primary: #6B9BD2; --accent: #E8C85A; --success: #7EC88F;
+  --warning: #E5A04F; --error: #ED5853; --error-bg: #342026;
+  --user-bg: #202744; --user-fg: #96B9EA;
+  --tool: #B38BD9; --compact: #E5A04F;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #FAFBFD; --surface: #F0F2F8; --panel: #E5E8F2;
+    --fg: #1E2433; --fg2: #4B5265; --fg3: #6B7186;
+    --border: #D8DCE8; --border2: #C4CADD;
+    --primary: #2F5D8F; --accent: #7A5E0C; --success: #2E7D4C;
+    --warning: #9A5B00; --error: #C33C38; --error-bg: #F8E3E2;
+    --user-bg: #DCE6F5; --user-fg: #1F4E86;
+    --tool: #7446A8; --compact: #9A5B00;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; height: 100%; }
+body {
+  background: var(--bg); color: var(--fg);
+  font: 13px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans SC", sans-serif;
+  display: flex; flex-direction: column;
+}
+button, select, input { font: inherit; color: inherit; }
+header {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px;
+  padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--surface);
+}
+header h1 { font-size: 14px; margin: 0; font-weight: 600; white-space: nowrap; }
+header h1 .logo { color: var(--accent); }
+#session-select {
+  background: var(--panel); border: 1px solid var(--border2); border-radius: 6px;
+  padding: 3px 6px; max-width: 360px;
+}
+.stats { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip {
+  background: var(--panel); border-radius: 999px; padding: 1px 9px;
+  color: var(--fg2); font-size: 12px; white-space: nowrap;
+}
+.chip b { color: var(--fg); font-weight: 600; }
+.chip.err b { color: var(--error); }
+.live { display: none; align-items: center; gap: 5px; color: var(--success); font-size: 12px; }
+.live.on { display: inline-flex; }
+.live::before {
+  content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--success);
+  animation: pulse 1.6s infinite;
+}
+@keyframes pulse { 50% { opacity: .3; } }
+#banner {
+  display: none; padding: 6px 16px; background: var(--user-bg); color: var(--user-fg);
+  border-bottom: 1px solid var(--border); cursor: pointer;
+}
+#banner.on { display: block; }
+main { flex: 1; display: grid; grid-template-columns: 280px minmax(0, 1fr) minmax(0, 0.9fr); min-height: 0; }
+section { min-height: 0; overflow: auto; border-right: 1px solid var(--border); }
+section:last-child { border-right: 0; }
+.pane-head {
+  position: sticky; top: 0; z-index: 2; background: var(--bg);
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px; color: var(--fg2); font-size: 12px;
+}
+.pane-head input[type=search] {
+  flex: 1; min-width: 0; background: var(--surface); border: 1px solid var(--border2);
+  border-radius: 6px; padding: 3px 8px;
+}
+.pane-head label { display: inline-flex; gap: 4px; align-items: center; white-space: nowrap; }
+.turn {
+  padding: 8px 12px; border-bottom: 1px solid var(--border); cursor: pointer;
+}
+.turn:hover { background: var(--surface); }
+.turn.sel { background: var(--panel); box-shadow: inset 3px 0 var(--primary); }
+.turn .q {
+  overflow: hidden; text-overflow: ellipsis; display: -webkit-box;
+  -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-all;
+}
+.turn .q.none { color: var(--fg3); font-style: italic; }
+.turn .meta { display: flex; flex-wrap: wrap; gap: 0 8px; white-space: nowrap; color: var(--fg3); font-size: 11.5px; margin-top: 2px; }
+.dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; vertical-align: 1px; }
+.s-completed, .s-ok { background: var(--success); }
+.s-running { background: var(--primary); }
+.s-error, .s-unfinished { background: var(--error); }
+.s-interrupted { background: var(--warning); }
+.empty { padding: 24px; color: var(--fg3); text-align: center; }
+.row {
+  display: grid; grid-template-columns: minmax(150px, 38%) 1fr; align-items: center;
+  min-height: 26px; padding: 0 12px; cursor: pointer; border-bottom: 1px solid transparent;
+}
+.row:hover { background: var(--surface); }
+.row.sel { background: var(--panel); }
+.row .label { display: flex; align-items: center; gap: 6px; overflow: hidden; white-space: nowrap; }
+.row .label .name { overflow: hidden; text-overflow: ellipsis; }
+.row .label .sub { color: var(--fg3); font-size: 11.5px; }
+.row.indent .label { padding-left: 18px; }
+.tag {
+  font-size: 10.5px; font-weight: 600; letter-spacing: .02em; border-radius: 4px;
+  padding: 0 5px; flex: none; color: var(--bg);
+}
+.tag.generation { background: var(--primary); }
+.tag.tool { background: var(--tool); }
+.tag.compaction { background: var(--compact); }
+.tag.event { background: var(--fg3); }
+.tag.error { background: var(--error); }
+.track { position: relative; height: 14px; }
+.bar { position: absolute; top: 2px; height: 10px; border-radius: 3px; min-width: 2px; }
+.bar.generation { background: var(--primary); }
+.bar.tool { background: var(--tool); }
+.bar.compaction { background: var(--compact); }
+.bar.st-error, .bar.st-unfinished { background: var(--error); }
+.bar.st-interrupted { background: var(--warning); }
+.bar.st-running { opacity: .55; background-image: repeating-linear-gradient(45deg, transparent 0 4px, rgba(255,255,255,.25) 4px 8px); }
+.bar .ttft { position: absolute; top: 0; bottom: 0; left: 0; background: rgba(255,255,255,.28); border-radius: 3px 0 0 3px; }
+.diamond { position: absolute; top: 3px; width: 8px; height: 8px; transform: rotate(45deg); background: var(--fg3); margin-left: -4px; }
+.diamond.error { background: var(--error); }
+.bar-label { position: absolute; top: -1px; font-size: 11px; color: var(--fg2); white-space: nowrap; padding: 0 4px; }
+.bar-label.inside { transform: translateX(-100%); color: var(--fg); background: var(--bg); border-radius: 4px; opacity: .9; }
+.turn .meta .errs { color: var(--error); }
+.axis { display: grid; grid-template-columns: minmax(150px, 38%) 1fr; padding: 4px 12px; color: var(--fg3); font-size: 11px; }
+.axis .ticks { display: flex; justify-content: space-between; }
+.input-box {
+  margin: 10px 12px; padding: 8px 10px; border-radius: 8px;
+  background: var(--user-bg); color: var(--user-fg); white-space: pre-wrap; word-break: break-word;
+  max-height: 160px; overflow: auto;
+}
+#detail .body { padding: 12px; }
+#detail h2 { font-size: 14px; margin: 0 0 8px; display: flex; align-items: center; gap: 8px; }
+.kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; margin: 0 0 12px; font-size: 12.5px; }
+.kv dt { color: var(--fg3); }
+.kv dd { margin: 0; word-break: break-all; }
+details { margin: 0 0 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); }
+details > summary { cursor: pointer; padding: 6px 10px; color: var(--fg2); font-size: 12px; user-select: none; }
+details[open] > summary { border-bottom: 1px solid var(--border); }
+pre {
+  margin: 0; padding: 8px 10px; font: 12px/1.45 var(--mono);
+  white-space: pre-wrap; word-break: break-word; max-height: 480px; overflow: auto;
+}
+.msg { border-top: 1px solid var(--border); }
+.msg:first-child { border-top: 0; }
+.msg .role { padding: 4px 10px 0; font-size: 11px; font-weight: 600; color: var(--fg3); text-transform: uppercase; }
+.msg.user .role { color: var(--user-fg); }
+.msg.assistant .role { color: var(--primary); }
+.msg.tool .role { color: var(--tool); }
+.err-box { background: var(--error-bg); color: var(--error); border-radius: 8px; padding: 8px 10px; margin: 0 0 10px; white-space: pre-wrap; }
+.muted { color: var(--fg3); }
+@media (max-width: 900px) {
+  main { grid-template-columns: 1fr; grid-auto-rows: minmax(240px, auto); overflow: auto; }
+  section { border-right: 0; border-bottom: 1px solid var(--border); }
+}
+</style>
+</head>
+<body>
+<header>
+  <h1><span class="logo">◆</span> Limbo Trace</h1>
+  <select id="session-select" aria-label="会话"></select>
+  <span class="live" id="live">实时</span>
+  <div class="stats" id="stats"></div>
+</header>
+<div id="banner"></div>
+<main>
+  <section id="turns">
+    <div class="pane-head">
+      <input type="search" id="search" placeholder="搜索输入 / 工具 / 输出">
+      <label><input type="checkbox" id="only-errors">只看出错</label>
+    </div>
+    <div id="turn-list"></div>
+  </section>
+  <section id="timeline">
+    <div class="pane-head" id="timeline-head">选择左侧的轮次</div>
+    <div id="timeline-body"></div>
+  </section>
+  <section id="detail">
+    <div class="pane-head">详情</div>
+    <div class="body" id="detail-body"><div class="empty">点击中间的调用查看详情</div></div>
+  </section>
+</main>
+<script>
+"use strict";
+// Every string from the trace is untrusted: build DOM with textContent only.
+function h(tag, attrs, ...children) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === null || v === undefined || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k.startsWith("on")) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v === true ? "" : v);
+  }
+  for (const c of children.flat()) {
+    if (c === null || c === undefined || c === false) continue;
+    el.append(c instanceof Node ? c : document.createTextNode(String(c)));
+  }
+  return el;
+}
+const $ = (id) => document.getElementById(id);
+// replaceChildren() would render null as the text "null": drop empties.
+function put(el, ...children) {
+  el.replaceChildren(...children.flat().filter((c) => c !== null && c !== undefined && c !== false));
+}
+
+const state = {
+  sessionId: null, current: null, tree: null, turn: null, span: null,
+  cursor: null, timer: null, search: "", onlyErrors: false, followLatest: true,
+};
+
+async function api(path) {
+  const res = await fetch(path, { credentials: "same-origin" });
+  if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || res.status);
+  return res.json();
+}
+
+// -- formatting --------------------------------------------------------------
+function fmtDur(s) {
+  if (s === null || s === undefined) return "—";
+  if (s < 1) return Math.round(s * 1000) + "ms";
+  if (s < 60) return s.toFixed(s < 10 ? 2 : 1) + "s";
+  return Math.floor(s / 60) + "m" + Math.round(s % 60) + "s";
+}
+function fmtNum(n) {
+  if (!n) return "0";
+  if (n >= 1e6) return (n / 1e6).toFixed(2) + "M";
+  if (n >= 1e4) return (n / 1e3).toFixed(1) + "k";
+  return n.toLocaleString();
+}
+function fmtTime(ts) {
+  if (!ts) return "";
+  const d = new Date(ts);
+  return d.toLocaleTimeString([], { hour12: false });
+}
+function ms(ts) { return ts ? new Date(ts).getTime() : null; }
+function pretty(v) {
+  if (typeof v === "string") return v;
+  return JSON.stringify(v, null, 2);
+}
+const STATUS_TEXT = {
+  completed: "完成", ok: "成功", running: "进行中", error: "出错",
+  interrupted: "已中断", unfinished: "未结束",
+};
+
+// -- header ------------------------------------------------------------------
+function renderStats() {
+  const t = state.tree.totals, tok = t.tokens || {};
+  const hit = tok.input ? Math.round(100 * (tok.cached || 0) / tok.input) : null;
+  const s = state.tree.session || {};
+  const model = (s.resolved && s.resolved.model) || (s.config && s.config.model);
+  const chip = (label, value, cls) => h("span", { class: "chip " + (cls || "") }, label + " ", h("b", {}, value));
+  put($("stats"),
+    model ? chip("模型", model) : null,
+    chip("轮次", state.tree.turns.length),
+    chip("LLM 调用", t.generations),
+    chip("输入", fmtNum(tok.input)),
+    chip("输出", fmtNum(tok.output)),
+    hit !== null ? chip("缓存命中", hit + "%") : null,
+    chip("LLM 耗时", fmtDur(t.llm_seconds)),
+    chip("工具耗时", fmtDur(t.tool_seconds)),
+    chip("错误", t.errors, t.errors ? "err" : ""),
+  );
+  $("live").classList.toggle("on", !!state.tree.live);
+}
+
+async function loadSessions() {
+  const { sessions } = await api("/api/sessions");
+  const sel = $("session-select");
+  put(sel, ...sessions.map((s) => h("option", { value: s.id, selected: s.id === state.sessionId },
+    (s.current ? "● " : "") + (s.title || "(未命名)") + " · " + s.id.slice(0, 15))));
+  if (!sessions.some((s) => s.id === state.sessionId) && state.sessionId) {
+    sel.prepend(h("option", { value: state.sessionId, selected: true }, state.sessionId));
+  }
+}
+
+// -- turns -------------------------------------------------------------------
+function turnMatches(turn) {
+  if (state.onlyErrors && !turn.totals.errors && !["error", "interrupted", "unfinished"].includes(turn.status)) return false;
+  const q = state.search.trim().toLowerCase();
+  if (!q) return true;
+  const hay = [turn.input || ""];
+  for (const sp of turn.spans) hay.push(sp.name || "", sp.type || "", sp.output_preview || "", sp.arguments_preview || "", sp.error || "");
+  return hay.join("\n").toLowerCase().includes(q);
+}
+
+function renderTurns() {
+  const list = $("turn-list");
+  const turns = state.tree.turns.filter(turnMatches);
+  if (!turns.length) {
+    put(list, h("div", { class: "empty" }, state.tree.turns.length ? "没有匹配的轮次" : "这个会话还没有 trace 记录"));
+    return;
+  }
+  put(list, ...turns.slice().reverse().map((t) => {
+    const tok = t.totals.tokens || {};
+    return h("div", { class: "turn" + (state.turn === t.index ? " sel" : ""), onclick: () => selectTurn(t.index) },
+      h("div", { class: "q" + (t.input ? "" : " none") }, h("span", { class: "dot s-" + t.status, title: STATUS_TEXT[t.status] || t.status }), t.input || "(无用户输入：压缩等)"),
+      h("div", { class: "meta" },
+        h("span", {}, "#" + t.index),
+        h("span", {}, fmtTime(t.start)),
+        h("span", {}, fmtDur(t.duration)),
+        h("span", {}, t.totals.generations + " LLM · " + t.totals.tools + " 工具"),
+        tok.total ? h("span", {}, fmtNum(tok.total) + " tok") : null,
+        t.totals.errors ? h("span", { class: "errs" }, t.totals.errors + " 错误") : null,
+      ));
+  }));
+}
+
+function selectTurn(index, keepSpan) {
+  state.turn = index;
+  state.followLatest = index === state.tree.turns.length;
+  if (!keepSpan) state.span = null;
+  renderTurns();
+  renderTimeline();
+  if (!keepSpan) {
+    const turn = currentTurn();
+    if (turn && turn.input_offset !== null) showRecordDetail("用户输入", turn.input_offset);
+    else put($("detail-body"), h("div", { class: "empty" }, "点击中间的调用查看详情"));
+  }
+}
+function currentTurn() { return state.tree && state.tree.turns.find((t) => t.index === state.turn); }
+
+// -- timeline (waterfall) ----------------------------------------------------
+function renderTimeline() {
+  const turn = currentTurn();
+  const body = $("timeline-body");
+  if (!turn) { $("timeline-head").textContent = "选择左侧的轮次"; put(body); return; }
+  const t0 = ms(turn.start);
+  let t1 = ms(turn.end);
+  for (const sp of turn.spans) t1 = Math.max(t1 || 0, ms(sp.end) || 0, ms(sp.ts) || 0, ms(sp.start) || 0);
+  if (!turn.end && turn.status === "running") t1 = Math.max(t1 || 0, Date.now());
+  const span = Math.max(1, (t1 || t0) - t0);
+  const pct = (t) => Math.min(100, Math.max(0, ((t - t0) / span) * 100));
+
+  put($("timeline-head"),
+    h("span", { class: "dot s-" + turn.status }), "第 " + turn.index + " 轮 · " + (STATUS_TEXT[turn.status] || turn.status) + " · " + fmtDur(turn.duration ?? span / 1000));
+  const rows = [];
+  if (turn.input) rows.push(h("div", { class: "input-box" }, turn.input));
+  rows.push(h("div", { class: "axis" }, h("span", {}, ""), h("div", { class: "ticks" },
+    ...[0, 0.25, 0.5, 0.75, 1].map((f) => h("span", {}, fmtDur((span / 1000) * f))))));
+
+  for (const sp of turn.spans) {
+    const isEvent = sp.kind === "event";
+    if (isEvent && sp.type === "session_start") continue;
+    const isError = isEvent && /error|interrupted/.test(sp.type);
+    let tag, name, sub = "";
+    if (sp.kind === "generation") {
+      tag = sp.name === "compaction" ? "SUMMARY" : "LLM"; name = sp.model || "llm";
+      const tok = sp.tokens || {};
+      sub = [tok.input ? fmtNum(tok.input) + "→" + fmtNum(tok.output || 0) : "", (sp.attempts || []).length > 1 ? "重试 " + (sp.attempts.length - 1) : ""].filter(Boolean).join(" · ");
+    } else if (sp.kind === "tool") { tag = "TOOL"; name = sp.name; }
+    else if (sp.kind === "compaction") { tag = "COMPACT"; name = "上下文压缩"; }
+    else { tag = "EVENT"; name = sp.type; }
+    let track;
+    if (isEvent) {
+      track = h("div", { class: "track" }, h("div", { class: "diamond" + (isError ? " error" : ""), style: "left:" + pct(ms(sp.ts)) + "%" }));
+    } else {
+      const s = ms(sp.start) ?? t0, e = ms(sp.end) ?? (sp.status === "running" ? t1 : s);
+      const left = pct(s), width = Math.max(0.3, pct(e) - left);
+      const bar = h("div", { class: "bar " + sp.kind + " st-" + sp.status, style: `left:${left}%;width:${width}%` });
+      if (sp.ttft && sp.duration) bar.append(h("div", { class: "ttft", style: "width:" + Math.min(100, (sp.ttft / sp.duration) * 100) + "%", title: "TTFT " + fmtDur(sp.ttft) }));
+      const end = left + width, inside = end > 85;
+      const label = h("span", { class: "bar-label" + (inside ? " inside" : ""), style: "left:" + end + "%" }, fmtDur(sp.duration ?? (e - s) / 1000));
+      track = h("div", { class: "track" }, bar, label);
+    }
+    const tagClass = isError || sp.status === "error" ? "error" : (sp.kind === "generation" && sp.name !== "compaction" ? "generation" : sp.kind === "generation" ? "compaction" : sp.kind);
+    rows.push(h("div", {
+      class: "row" + (sp.kind === "tool" ? " indent" : "") + (state.span === sp.id + (sp.offset || "") ? " sel" : ""),
+      onclick: () => selectSpan(sp),
+    },
+      h("div", { class: "label" }, h("span", { class: "tag " + tagClass }, tag), h("span", { class: "name", title: name }, name), sub ? h("span", { class: "sub" }, sub) : null),
+      track));
+  }
+  if (!turn.spans.length) rows.push(h("div", { class: "empty" }, "等待模型响应…"));
+  put(body, ...rows);
+}
+
+// -- detail ------------------------------------------------------------------
+function kv(pairs) {
+  return h("dl", { class: "kv" }, ...pairs.filter(([, v]) => v !== undefined && v !== null && v !== "").flatMap(([k, v]) => [h("dt", {}, k), h("dd", {}, String(v))]));
+}
+function block(title, content, open) {
+  return h("details", { open: open || null }, h("summary", {}, title), content instanceof Node ? content : h("pre", {}, pretty(content)));
+}
+function messageText(m) {
+  if (typeof m.content === "string") return m.content;
+  if (Array.isArray(m.content)) return m.content.map((p) => p.text ?? pretty(p)).join("\n");
+  return m.content == null ? "" : pretty(m.content);
+}
+function messagesView(messages) {
+  return h("div", {}, ...messages.map((m) => {
+    const role = m.role || m.type || "?";
+    const parts = [];
+    const text = messageText(m);
+    if (text) parts.push(text);
+    if (m.reasoning_content) parts.push("[reasoning]\n" + m.reasoning_content);
+    if (m.tool_calls) parts.push(m.tool_calls.map((tc) => "→ " + (tc.function ? tc.function.name + "(" + tc.function.arguments + ")" : pretty(tc))).join("\n"));
+    if (!parts.length) parts.push(pretty(m));
+    return h("div", { class: "msg " + role }, h("div", { class: "role" }, role + (m.tool_call_id ? " · " + m.tool_call_id : "")), h("pre", {}, parts.join("\n\n")));
+  }));
+}
+
+function detailLoading(title) {
+  put($("detail-body"), h("h2", {}, title), h("div", { class: "muted" }, "加载中…"));
+}
+async function record(offset, diff) {
+  return api(`/api/sessions/${encodeURIComponent(state.sessionId)}/records/${offset}` + (diff ? "?diff=1" : ""));
+}
+
+async function showRecordDetail(title, offset) {
+  detailLoading(title);
+  const { record: r } = await record(offset);
+  const content = r.content ?? r.text;
+  put($("detail-body"), h("h2", {}, title), kv([["时间", r.ts], ["类型", r.type]]),
+    content !== undefined ? block("内容", content, true) : null, block("原始记录", r, content === undefined));
+}
+
+async function selectSpan(sp) {
+  state.span = sp.id + (sp.offset || "");
+  renderTimeline();
+  const out = $("detail-body");
+  try {
+    if (sp.kind === "generation") {
+      detailLoading("LLM 调用");
+      const lastAttempt = sp.attempts && sp.attempts.length ? sp.attempts[sp.attempts.length - 1] : null;
+      const [req, res] = await Promise.all([
+        lastAttempt !== null ? record(lastAttempt, true) : null,
+        sp.response_offset !== null && sp.response_offset !== undefined ? record(sp.response_offset) : null,
+      ]);
+      const r = res && res.record, tok = sp.tokens || {};
+      const body = req && req.record.body || {};
+      const diff = req && req.diff;
+      const nodes = [
+        h("h2", {}, h("span", { class: "tag " + (sp.name === "compaction" ? "compaction" : "generation") }, sp.name === "compaction" ? "SUMMARY" : "LLM"), sp.model || body.model || ""),
+        kv([["状态", STATUS_TEXT[sp.status] || sp.status], ["开始", sp.start], ["耗时", fmtDur(sp.duration)], ["首 token", fmtDur(sp.ttft)],
+          ["finish_reason", sp.finish_reason], ["输入 tokens", tok.input && fmtNum(tok.input)], ["缓存命中", tok.cached && fmtNum(tok.cached)],
+          ["输出 tokens", tok.output && fmtNum(tok.output)], ["请求次数", (sp.attempts || []).length], ["迭代", sp.iteration]]),
+      ];
+      if (r && (r.content || r.reasoning || (r.tool_calls || []).length)) {
+        if (r.reasoning) nodes.push(block("思考 reasoning", r.reasoning, false));
+        if (r.content) nodes.push(block("输出", r.content, true));
+        if ((r.tool_calls || []).length) nodes.push(block("工具调用 " + r.tool_calls.length, r.tool_calls.map((c) => c.name + " " + pretty(c.arguments ?? "")).join("\n\n"), true));
+      } else if (r && r.content_chars) {
+        nodes.push(h("div", { class: "muted" }, "（旧版 trace 未记录输出正文，" + r.content_chars + " 字符）"));
+      }
+      if (diff) nodes.push(block(`本次新增消息 ${diff.messages.length}（共 ${diff.total}，前 ${diff.prefix} 条与上次请求相同）`, messagesView(diff.messages), true));
+      const msgs = body.messages || body.input;
+      if (Array.isArray(msgs)) nodes.push(block("完整 messages " + msgs.length, messagesView(msgs), false));
+      if (body.system) nodes.push(block("system", body.system, false));
+      if (body.tools) nodes.push(block("tools " + body.tools.length, body.tools, false));
+      if (r && r.usage) nodes.push(block("usage", r.usage, false));
+      if (req) nodes.push(block("原始请求 JSON", req.record, false));
+      if (r) nodes.push(block("原始响应 JSON", r, false));
+      put(out, ...nodes);
+    } else if (sp.kind === "tool") {
+      detailLoading("工具 " + sp.name);
+      const [call, res] = await Promise.all([
+        sp.call_offset !== null && sp.call_offset !== undefined ? record(sp.call_offset) : null,
+        sp.result_offset !== null && sp.result_offset !== undefined ? record(sp.result_offset) : null,
+      ]);
+      const c = call && call.record, r = res && res.record;
+      put(out,
+        h("h2", {}, h("span", { class: "tag " + (sp.status === "error" ? "error" : "tool") }, "TOOL"), sp.name),
+        kv([["状态", STATUS_TEXT[sp.status] || sp.status], ["开始", sp.start], ["耗时", fmtDur(sp.duration)], ["call id", sp.call_id], ["迭代", sp.iteration]]),
+        r && r.error ? h("div", { class: "err-box" }, r.error) : null,
+        c ? block("参数", c.arguments, true) : null,
+        r && r.output ? block("输出", r.output, true) : null,
+        r && r.traceback ? block("traceback", r.traceback, false) : null,
+        r ? block("原始记录", r, false) : null,
+      );
+    } else {
+      const offset = sp.offset;
+      detailLoading(sp.type || sp.name);
+      const { record: r } = await record(offset);
+      put(out, h("h2", {}, h("span", { class: "tag " + (/error/.test(r.type) ? "error" : sp.kind === "compaction" ? "compaction" : "event") }, (sp.kind || "event").toUpperCase()), r.type),
+        r.error || r.message ? h("div", { class: "err-box" }, r.error || r.message) : null,
+        block("记录", r, true), r.traceback ? block("traceback", r.traceback, false) : null);
+    }
+  } catch (e) {
+    put(out, h("div", { class: "err-box" }, "加载失败：" + e.message));
+  }
+}
+
+// -- loading & live polling --------------------------------------------------
+async function loadTree() {
+  const cursor = state.cursor === null ? "" : "?cursor=" + state.cursor;
+  const tree = await api(`/api/sessions/${encodeURIComponent(state.sessionId)}/tree${cursor}`);
+  if (tree.unchanged) return false;
+  const first = state.tree === null;
+  // A finished turn saves the session (title appears): refresh the picker.
+  if (!first && state.tree.turns.length !== tree.turns.length) loadSessions();
+  state.tree = tree;
+  state.cursor = tree.record_count;
+  renderStats();
+  const n = tree.turns.length;
+  if (first || state.turn === null || (state.followLatest && state.turn !== n)) {
+    selectTurn(n || null);
+  } else {
+    renderTurns();
+    renderTimeline();
+  }
+  return true;
+}
+
+async function poll() {
+  try {
+    const { current } = await api("/api/state");
+    if (current !== state.current) {
+      const previous = state.current;
+      state.current = current;
+      if (previous !== null) {
+        loadSessions();
+        if (current !== state.sessionId) {
+          const banner = $("banner");
+          banner.textContent = "limbo 当前会话已切换，点击打开新会话";
+          banner.classList.add("on");
+          banner.onclick = () => { banner.classList.remove("on"); openSession(current); };
+        }
+      }
+    }
+    if (state.sessionId === state.current || (state.tree && state.tree.live)) await loadTree();
+  } catch (e) { /* server gone (limbo exited) — keep the last view */ }
+  state.timer = setTimeout(poll, 1000);
+}
+
+async function openSession(id) {
+  state.sessionId = id; state.tree = null; state.cursor = null; state.turn = null; state.span = null; state.followLatest = true;
+  history.replaceState(null, "", "#" + id);
+  $("banner").classList.remove("on");
+  try {
+    await loadTree();
+  } catch (e) {
+    put($("turn-list"), h("div", { class: "empty" }, "加载失败：" + e.message));
+  }
+  loadSessions();
+}
+
+$("session-select").addEventListener("change", (e) => openSession(e.target.value));
+$("search").addEventListener("input", (e) => { state.search = e.target.value; renderTurns(); });
+$("only-errors").addEventListener("change", (e) => { state.onlyErrors = e.target.checked; renderTurns(); });
+
+(async function init() {
+  // Drop the token from the address bar (the cookie carries it now).
+  const hash = location.hash.slice(1);
+  history.replaceState(null, "", "/" + (hash ? "#" + hash : ""));
+  try {
+    const { current } = await api("/api/state");
+    state.current = current;
+    await openSession(hash || current);
+  } catch (e) {
+    put($("turn-list"), h("div", { class: "empty" }, "无法连接 limbo：" + e.message));
+  }
+  state.timer = setTimeout(poll, 1000);
+})();
+</script>
+</body>
+</html>
