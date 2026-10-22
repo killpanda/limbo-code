@@ -23,6 +23,7 @@ from limbo.compaction import (
     CompactionConfig,
     build_summary_prompt,
     find_split_point,
+    is_summary_message,
     make_summary_message,
     should_compact,
 )
@@ -48,9 +49,11 @@ from limbo.sessions import (
     SessionMeta,
     append_session_messages,
     append_session_records,
+    compaction_record,
     derive_title,
     load_session_full,
     meta_patch_record,
+    rewrite_meta_line,
     save_session,
     tool_intent_record,
 )
@@ -230,7 +233,12 @@ class Agent:
         # whose repair() inserted placeholder tool messages).
         self._session_saved_count = 0
         self._session_saved_meta: str | None = None
+        # The title on the file's meta line (listing reads only that line).
+        self._session_saved_title: str | None = None
         self._session_full_rewrite_needed = False
+        # Compaction records not yet appended (non-destructive compaction:
+        # the record goes into the journal, the summarized messages stay).
+        self._pending_compactions: list[CompactionRecord] = []
         # Serializes session-file writes: checkpoints run in a worker thread
         # while meta patches (goal changes) are written from the loop.
         self._session_io_lock = threading.Lock()
@@ -262,15 +270,20 @@ class Agent:
             )
             self.messages.extend(recovery.messages)
             self._pending_reruns = recovery.rerun
+            self._session_saved_meta = self._meta_snapshot()
             # From here on every call is journaled, so a later crash can be
-            # recovered precisely even if this session predates intents.
+            # recovered precisely even if this session predates intents
+            # (the flag reaches the file as a meta patch on the next save).
             self._meta.tool_intents = True
-            # recover_history may have inserted placeholder tool messages, and
-            # load_session re-applied compaction: the in-memory history no
-            # longer matches the file byte-for-byte, so the first save after
-            # resume is a full rewrite (then the append path takes over).
             self._session_saved_count = len(self.messages)
-            self._session_full_rewrite_needed = True
+            self._session_saved_title = self._meta.title
+            # Only a repaired history (placeholders inserted) must be
+            # rewritten; otherwise the journal stays as it is and the next
+            # save appends. The in-memory system message is regenerated and
+            # the summary is rebuilt on load, so neither is ever appended.
+            self._session_full_rewrite_needed = len(recovery.messages) != len(
+                history
+            ) - (1 if history and history[0].role == "system" else 0)
             # Restore the presentation mode: recover_history dropped the
             # loaded system message, so rebuild the fresh one in code mode
             # when the session was saved with it on.
@@ -1380,11 +1393,10 @@ class Agent:
 
         system_msg = self.messages[0]
         kept = self.messages[split:]
+        # Kept messages not yet on disk (e.g. this turn's user input): the
+        # append path must still write them after the compaction.
+        unsaved = min(len(self.messages) - self._session_saved_count, len(kept))
         self.messages = [system_msg, make_summary_message(summary), *kept]
-        # History changed shape (old messages dropped): the append-only
-        # fast path would leave the summarized-away messages on disk, so the
-        # next save must fully rewrite (shrinking the file).
-        self._session_full_rewrite_needed = True
         after = estimate_tokens(self.messages)
         record = CompactionRecord(
             id=secrets.token_hex(8),
@@ -1396,6 +1408,17 @@ class Agent:
             trigger=trigger,
         )
         self._compactions.append(record)
+        if is_summary_message(kept[0]):
+            # The boundary is an earlier summary, which lives only in memory
+            # on the append path: the record could not be resolved on load,
+            # so this one compaction falls back to a full rewrite.
+            self._session_full_rewrite_needed = True
+        else:
+            # Non-destructive compaction (pi-durable): append the record;
+            # the summarized messages stay in the journal and loading picks
+            # the active range from the record's boundary.
+            self._pending_compactions.append(record)
+            self._session_saved_count = len(self.messages) - max(unsaved, 0)
         self._previous_summary = summary.strip()
         # Usage figures predate the rewrite; fall back to full estimation
         # until the next response reports real prompt tokens.
@@ -1460,11 +1483,7 @@ class Agent:
         )
 
     def _write_session_locked(self, meta_snapshot: str) -> None:
-        if (
-            self._session_full_rewrite_needed
-            or meta_snapshot != self._session_saved_meta
-            or not self._session_file.exists()
-        ):
+        if self._session_full_rewrite_needed or not self._session_file.exists():
             save_session(
                 self._session_file,
                 self._meta,
@@ -1473,25 +1492,41 @@ class Agent:
             )
             self._session_saved_count = len(self.messages)
             self._session_saved_meta = meta_snapshot
+            self._session_saved_title = self._meta.title
             self._session_full_rewrite_needed = False
-        else:
+            self._pending_compactions.clear()
+            return
+        try:
+            if self._meta.title != self._session_saved_title:
+                # Listing reads only the meta line: rewrite it in place
+                # (every other record is kept).
+                rewrite_meta_line(self._session_file, self._meta)
+                self._session_saved_title = self._meta.title
+                self._session_saved_meta = meta_snapshot
+            elif meta_snapshot != self._session_saved_meta:
+                append_session_records(
+                    self._session_file, [meta_patch_record(self._meta)]
+                )
+                self._session_saved_meta = meta_snapshot
+            records = [compaction_record(c) for c in self._pending_compactions]
             new_messages = self.messages[self._session_saved_count :]
+            if records:
+                append_session_records(self._session_file, records)
+                self._pending_compactions.clear()
             if new_messages:
-                try:
-                    append_session_messages(self._session_file, new_messages)
-                except OSError:
-                    # Partial or failed append: some of the new messages may
-                    # already be on disk, and re-appending next time would
-                    # duplicate them. Force a full rewrite on the next save,
-                    # which rebuilds the file and drops the duplicates.
-                    self._session_full_rewrite_needed = True
-                    raise
+                append_session_messages(self._session_file, new_messages)
                 self._session_saved_count = len(self.messages)
-            # Keep the in-memory timestamp fresh even though the meta line
-            # is not rewritten (export headers read it).
-            self._meta.updated_at = datetime.now(timezone.utc).isoformat(
-                timespec="seconds"
-            )
+        except OSError:
+            # Partial or failed append: some records may already be on disk,
+            # and re-appending next time would duplicate them. Force a full
+            # rewrite on the next save, which rebuilds the file from memory.
+            self._session_full_rewrite_needed = True
+            raise
+        # Keep the in-memory timestamp fresh even though the meta line
+        # is not rewritten (export headers read it).
+        self._meta.updated_at = datetime.now(timezone.utc).isoformat(
+            timespec="seconds"
+        )
 
     async def _save_session(self) -> None:
         # Trace and session are separate files written independently; the

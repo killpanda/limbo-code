@@ -584,11 +584,11 @@ async def test_agent_append_failure_forces_full_rewrite(workdir, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_agent_goal_mutation_forces_full_rewrite(workdir):
+async def test_agent_goal_mutation_is_persisted_as_meta_patch(workdir, monkeypatch):
     # TurnPump._save_state mutates SessionMeta.goal in memory, relying on
-    # the per-turn save to persist it. Under incremental saves the meta
-    # line is only rewritten when the meta snapshot changes — the goal
-    # must trigger that (regression: goal used to vanish after resume).
+    # the next save to persist it. The meta snapshot comparison must catch
+    # it (regression: goal used to vanish after resume) — and persist it
+    # as an appended meta_patch, not a rewrite of the whole file.
     from limbo.goal import STATUS_ACTIVE, GoalState
     from limbo.sessions import load_session
 
@@ -601,6 +601,8 @@ async def test_agent_goal_mutation_forces_full_rewrite(workdir):
         session_dir=workdir / "sessions",
     )
     await _collect(agent.run("hi"))  # first save: full rewrite
+    replaced: list[tuple[Path, Path]] = []
+    monkeypatch.setattr(os, "replace", lambda s, d: replaced.append((s, d)))
 
     # Mutate meta like TurnPump._save_state does, then save again.
     agent.session_meta.goal = GoalState(
@@ -608,11 +610,61 @@ async def test_agent_goal_mutation_forces_full_rewrite(workdir):
     )
     agent._save_session_sync()
 
-    # Reload from disk: the goal must be present (meta line rewritten).
+    assert replaced == []
+    last = json.loads(agent.session_path.read_text().splitlines()[-1])
+    assert last["type"] == "meta_patch"
+    # Reload from disk: the goal must be present (patch merged).
     meta, _, _ = load_session(agent.session_path)
     assert meta.goal is not None
     assert meta.goal.text == "g"
     assert meta.goal.max_rounds == 5
+
+
+@pytest.mark.asyncio
+async def test_agent_code_mode_toggle_appends_patch(workdir, monkeypatch):
+    from limbo.sessions import load_session
+
+    agent = Agent(
+        config=Config(),
+        llm_client=FakeLLMClient([[TextChunk(text="a")], [TextChunk(text="b")]]),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    await _collect(agent.run("hi"))
+    replaced: list[tuple[Path, Path]] = []
+    monkeypatch.setattr(os, "replace", lambda s, d: replaced.append((s, d)))
+
+    agent.set_code_mode(True)
+    await _collect(agent.run("again"))
+
+    assert replaced == []
+    meta, _, _ = load_session(agent.session_path)
+    assert meta.code_mode is True
+
+
+@pytest.mark.asyncio
+async def test_agent_title_change_rewrites_only_the_meta_line(workdir):
+    from limbo.sessions import list_sessions, load_session_full
+
+    agent = Agent(
+        config=Config(),
+        llm_client=FakeLLMClient([[TextChunk(text="a")], [TextChunk(text="b")]]),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    await _collect(agent.run("first question"))
+    path = agent.session_path
+    body_before = path.read_text().splitlines()[1:]
+
+    agent.session_meta.title = "renamed"
+    await _collect(agent.run("second"))
+
+    lines = path.read_text().splitlines()
+    assert json.loads(lines[0])["title"] == "renamed"
+    # Every record after the meta line survived the rewrite verbatim.
+    assert lines[1 : 1 + len(body_before)] == body_before
+    assert [m.title for m in list_sessions(workdir / "sessions")] == ["renamed"]
+    assert load_session_full(path).meta.title == "renamed"
 
 
 @pytest.mark.asyncio
@@ -1789,6 +1841,92 @@ async def test_context_overflow_without_compactable_history_surfaces_error(workd
     assert compacted and not compacted[0].compacted
     assert [e for e in events if isinstance(e, ErrorEvent)]
     assert all(tools for _, tools in client.calls)
+
+
+@pytest.mark.asyncio
+async def test_compaction_is_non_destructive_on_disk(workdir, monkeypatch):
+    from limbo.compaction import is_summary_message
+    from limbo.sessions import load_session
+
+    cfg = _compact_cfg()
+    fake_llm = FakeLLMClient(
+        [
+            [TextChunk(text="ok"), CompletionMeta(usage={"prompt_tokens": 100})],
+            [TextChunk(text="SUMMARY"), CompletionMeta()],
+            [TextChunk(text="after"), CompletionMeta(usage={"prompt_tokens": 100})],
+        ]
+    )
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    agent.messages.append(Message(role="user", content="ANCIENT " + "a" * 3000))
+    agent.messages.append(Message(role="assistant", content="b" * 3000))
+    await _collect(agent.run("hi"))  # first save: full rewrite
+    replaced: list[tuple[Path, Path]] = []
+    monkeypatch.setattr(os, "replace", lambda s, d: replaced.append((s, d)))
+
+    await _collect(agent.compact(trigger="manual"))
+    await _collect(agent.run("next"))
+
+    # No rewrite: the summarized messages are still in the journal...
+    assert replaced == []
+    raw = agent.session_path.read_text()
+    assert "ANCIENT" in raw
+    assert '"type": "compaction"' in raw
+    # ...and loading yields the same active range the agent holds.
+    _, loaded, compactions = load_session(agent.session_path)
+    assert len(compactions) == 1
+    assert is_summary_message(loaded[1])
+    assert not any("ANCIENT" in (m.content or "") for m in loaded)
+    assert [m.content for m in loaded[2:]] == [m.content for m in agent.messages[2:]]
+
+
+@pytest.mark.asyncio
+async def test_two_appended_compactions_then_resume(workdir):
+    from limbo.compaction import is_summary_message
+
+    cfg = _compact_cfg()
+    fake_llm = FakeLLMClient(
+        [
+            [TextChunk(text="ok1")],
+            [TextChunk(text="FIRST SUMMARY")],
+            [TextChunk(text="c" * 3000)],
+            [TextChunk(text="SECOND SUMMARY")],
+        ]
+    )
+    session_dir = workdir / "sessions"
+    agent = Agent(
+        config=cfg, llm_client=fake_llm, workdir=workdir, session_dir=session_dir
+    )
+    agent.messages.append(Message(role="user", content="u" * 3000))
+    agent.messages.append(Message(role="assistant", content="v" * 3000))
+    await _collect(agent.run("w" * 3000))
+    await _collect(agent.compact(trigger="manual"))
+    await _collect(agent.run("x" * 3000))
+    await _collect(agent.compact(trigger="manual"))
+    await agent._save_session()
+    expected = [m.content for m in agent.messages[2:]]
+    # Both compactions were appended to the journal, not rewritten into it.
+    raw = agent.session_path.read_text()
+    assert raw.count('"type": "compaction"') == 2
+    assert "u" * 3000 in raw
+
+    resumed = Agent(
+        config=cfg,
+        llm_client=FakeLLMClient([]),
+        workdir=workdir,
+        session_dir=session_dir,
+        resume=agent.session_path,
+    )
+
+    assert is_summary_message(resumed.messages[1])
+    assert "SECOND SUMMARY" in (resumed.messages[1].content or "")
+    assert [m.content for m in resumed.messages[2:]] == expected
+    # A clean resume keeps the journal: no rewrite is scheduled.
+    assert resumed._session_full_rewrite_needed is False
 
 
 @pytest.mark.asyncio
