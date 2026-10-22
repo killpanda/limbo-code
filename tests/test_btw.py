@@ -88,3 +88,19 @@ async def test_btw_query_propagates_client_errors():
 
     with pytest.raises(RuntimeError, match="boom"):
         [c async for c in btw_query(FailingClient(), sample_history(), "q")]
+
+
+@pytest.mark.asyncio
+async def test_btw_query_reports_usage():
+    client = FakeLLMClient(
+        [TextChunk(text="a"), CompletionMeta(usage={"total_tokens": 42})]
+    )
+    seen = []
+    chunks = [
+        c
+        async for c in btw_query(
+            client, sample_history(), "q", on_usage=seen.append
+        )
+    ]
+    assert chunks == ["a"]
+    assert seen == [{"total_tokens": 42}]

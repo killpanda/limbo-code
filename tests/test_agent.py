@@ -18,6 +18,7 @@ from limbo.agent import (
     TextDelta,
     ToolCallRequest,
     ToolResultEvent,
+    UsageUpdate,
 )
 from limbo.attachments import ATTACHMENT_INLINE_MAX_BYTES
 from limbo.compaction import SUMMARY_TAG
@@ -3084,3 +3085,82 @@ async def test_persist_meta_appends_patch_without_rewrite(workdir, monkeypatch):
     assert sum(json.loads(line).get("type") == "meta_patch" for line in lines) == 1
     meta, _, _ = load_session(agent.session_path)
     assert meta.goal is not None and meta.goal.text == "g"
+
+
+# -- usage ledger (T13) ---------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_usage_ledger_accumulates_and_survives_resume(workdir):
+    from limbo.llm.catalog import resolve_model
+
+    first = {
+        "prompt_tokens": 80,
+        "total_tokens": 100,
+        "prompt_tokens_details": {"cached_tokens": 50},
+    }
+    second = {"prompt_tokens": 150, "total_tokens": 200}
+    agent = Agent(
+        config=Config(),
+        llm_client=FakeLLMClient(
+            [
+                [TextChunk(text="a"), CompletionMeta(usage=first)],
+                [TextChunk(text="b"), CompletionMeta(usage=second)],
+            ]
+        ),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    events = await _collect(agent.run("one"))
+    assert [e.total_tokens for e in events if isinstance(e, UsageUpdate)] == [100]
+    await _collect(agent.run("two"))
+    assert agent.session_total_tokens == 300
+    agent.record_usage(None)  # nothing reported: nothing counted
+    assert agent.session_total_tokens == 300
+
+    model = agent.config.llm.model
+    key = f"{resolve_model(model).provider.id}/{model}"
+    entry = agent.usage_ledger[key]
+    assert (entry.requests, entry.prompt_tokens, entry.cached_tokens) == (2, 230, 50)
+
+    resumed = _resume(agent)
+    assert resumed.session_total_tokens == 300
+    assert resumed.usage_ledger[key].requests == 2
+
+
+@pytest.mark.asyncio
+async def test_compaction_summary_call_is_counted(workdir):
+    agent = Agent(
+        config=_compact_cfg(),
+        llm_client=FakeLLMClient(
+            [
+                [TextChunk(text="SUMMARY"), CompletionMeta(usage={"total_tokens": 70})],
+            ]
+        ),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    _seed_history(agent)
+    agent.messages.append(Message(role="user", content="c" * 3000))
+    agent.messages.append(Message(role="assistant", content="d" * 3000))
+    events = await _collect(agent.compact(trigger="manual"))
+    assert agent.session_total_tokens == 70
+    assert isinstance(events[-1], UsageUpdate)
+    assert events[-1].total_tokens == 70
+
+
+def test_agent_sets_the_prompt_cache_key_on_capable_clients(workdir):
+    class CacheAwareClient(FakeLLMClient):
+        prompt_cache_key = None
+
+    client = CacheAwareClient([])
+    agent = Agent(
+        config=Config(),
+        llm_client=client,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    assert client.prompt_cache_key == agent.session_id
+    swapped = CacheAwareClient([])
+    agent.update_llm(swapped)
+    assert swapped.prompt_cache_key == agent.session_id

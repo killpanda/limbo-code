@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+from typing import Any
+
 from textual.app import ComposeResult
 from textual.binding import Binding
 from textual.containers import Vertical, VerticalScroll
@@ -38,6 +41,7 @@ class BtwScreen(ModalScreen[None]):
         llm_client: LLMClient,
         history: list[Message],
         trace: TraceLogger | None = None,
+        on_usage: Callable[[dict[str, Any] | None], Any] | None = None,
         *args,
         **kwargs,
     ):
@@ -46,6 +50,7 @@ class BtwScreen(ModalScreen[None]):
         self._llm_client = llm_client
         self._history = history
         self._trace = trace
+        self._on_usage = on_usage
 
     def compose(self) -> ComposeResult:
         with Vertical(id="btw-container"):
@@ -77,6 +82,7 @@ class BtwScreen(ModalScreen[None]):
                 self._history,
                 self._question,
                 on_request=_trace_request,
+                on_usage=self._on_usage,
             ):
                 answered += chunk
                 # Awaited per chunk, same rationale as ChatWidget: unawaited

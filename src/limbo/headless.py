@@ -507,7 +507,8 @@ class HeadlessFrontend:
         self._pending_proposals: list[str] = []
         self._eof = False
         self._quit = False
-        self._last_tokens = 0
+        # Restored from the session's usage ledger on resume.
+        self._last_tokens = agent.session_total_tokens
         self._tracing_viewer = TracingViewerCommand(lambda: self._agent)
 
     # -- main loop ------------------------------------------------------------
@@ -782,6 +783,7 @@ class HeadlessFrontend:
         self._agent.close()  # release the old session's trace file handle
         self._agent = self._agent_factory(self._llm_client)
         self._pump = self._pump_factory(self._agent)
+        self._last_tokens = 0
         self._report_session()
         self._line("已开始新会话")
 

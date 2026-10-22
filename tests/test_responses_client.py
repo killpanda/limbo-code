@@ -104,6 +104,18 @@ async def test_request_headers_and_body(client):
     assert body["parallel_tool_calls"] is True
     # Reasoning models reject an explicit temperature.
     assert "temperature" not in body
+    # No session bound: no cache key.
+    assert "prompt_cache_key" not in body
+
+
+@pytest.mark.asyncio
+@respx.mock
+async def test_prompt_cache_key_is_sent_when_set(client):
+    route = respx.post(RESPONSES_URL).mock(return_value=_text_stream())
+    client.prompt_cache_key = "20261022-abc"
+    await _collect(client.chat([Message(role="user", content="hi")], tools=[]))
+    body = json.loads(route.calls.last.request.content)
+    assert body["prompt_cache_key"] == "20261022-abc"
 
 
 @pytest.mark.asyncio

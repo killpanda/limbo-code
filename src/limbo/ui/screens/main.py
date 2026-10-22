@@ -6,6 +6,7 @@ import asyncio
 import re
 import secrets
 from pathlib import Path
+from typing import Any
 
 from textual import events
 from textual.app import ComposeResult
@@ -292,7 +293,12 @@ class MainScreen(Screen[None]):
     def _sync_usage(self, total_tokens: int | None = None) -> None:
         sidebar = self.query_one("#sidebar", Sidebar)
         statusbar = self.query_one("#statusbar", StatusBar)
-        total = sidebar._tokens if total_tokens is None else total_tokens
+        # The session's usage ledger is the source of truth (it survives
+        # resume); an event's figure is the same number, just fresher.
+        total = (
+            self.agent.session_total_tokens if total_tokens is None else total_tokens
+        )
+        statusbar.set_tokens(total)
         sidebar.set_usage(total, self.agent.context_tokens(), self.agent.context_window)
         statusbar.set_context(sidebar.context_percent)
         statusbar.set_changes(sidebar.file_totals)
@@ -976,8 +982,14 @@ class MainScreen(Screen[None]):
                 llm_client=self.llm_client,
                 history=list(self.agent.messages),
                 trace=self.agent.trace,
+                on_usage=self._record_side_usage,
             )
         )
+
+    def _record_side_usage(self, usage: dict[str, Any] | None) -> None:
+        """Count a /btw call in the session's usage ledger."""
+        self.agent.record_usage(usage)
+        self._sync_usage()
 
     def _open_game2048(self) -> None:
         """Open the 2048 modal. The agent turn (if any) keeps running."""

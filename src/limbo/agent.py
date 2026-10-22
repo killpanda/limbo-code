@@ -33,7 +33,12 @@ from limbo.history import recover as recover_history
 from limbo.llm.catalog import resolve_base_url, resolve_model
 from limbo.llm.client import LLMClient, RequestHook
 from limbo.llm.retry import friendly_message, is_context_overflow
-from limbo.llm.usage import PromptSizeEstimator, estimate_tokens, normalize_usage
+from limbo.llm.usage import (
+    PromptSizeEstimator,
+    UsageTotals,
+    estimate_tokens,
+    normalize_usage,
+)
 from limbo.models import (
     Attachment,
     CompletionMeta,
@@ -48,6 +53,7 @@ from limbo.sessions import (
     CompactionRecord,
     QueuedMessageRecord,
     SessionMeta,
+    UsageEntry,
     append_session_messages,
     append_session_records,
     compaction_record,
@@ -214,7 +220,6 @@ class Agent:
         self._iteration_count = 0
         self._last_finish_reason: str | None = None
         self._consecutive_length_stops = 0
-        self._session_total_tokens = 0
         self._init_system_message()
 
         # Auto-compaction state (LIM-14). The estimator holds the real
@@ -363,6 +368,41 @@ class Agent:
             },
             resolved=_resolved_llm_trace_fields(config),
         )
+        self._apply_prompt_cache_key()
+
+    def _apply_prompt_cache_key(self) -> None:
+        """Route this session's requests to one provider cache (Responses)."""
+        if hasattr(self.llm_client, "prompt_cache_key"):
+            self.llm_client.prompt_cache_key = self._meta.id
+
+    # -- usage ledger ----------------------------------------------------------
+
+    @property
+    def session_total_tokens(self) -> int:
+        """Cumulative tokens across every model this session has used."""
+        return sum(entry.total_tokens for entry in self._meta.usage.values())
+
+    @property
+    def usage_ledger(self) -> dict[str, UsageEntry]:
+        return dict(self._meta.usage)
+
+    def record_usage(self, usage: dict[str, Any] | None) -> UsageTotals:
+        """Add one completion's usage to the ledger (``provider/model``).
+
+        Persisted with the next save as a ``meta_patch``. Public so side
+        calls made outside the loop (``/btw``) are counted too.
+        """
+        totals = normalize_usage(usage)
+        if not usage:
+            return totals
+        model = self.config.llm.model
+        key = f"{resolve_model(model).provider.id}/{model}"
+        entry = self._meta.usage.setdefault(key, UsageEntry())
+        entry.requests += 1
+        entry.prompt_tokens += totals.prompt_tokens or 0
+        entry.cached_tokens += totals.cached_tokens or 0
+        entry.total_tokens += totals.total_tokens or 0
+        return totals
 
     def close(self) -> None:
         """Release owned resources (the trace log file handle).
@@ -386,6 +426,7 @@ class Agent:
         self._context_window = spec.context_window
         self._vision = spec.vision
         self._compaction_config = self._build_compaction_config(self.config)
+        self._apply_prompt_cache_key()
         self.trace.log(
             "model_switch",
             turn=self._turn_count,
@@ -1334,11 +1375,10 @@ class Agent:
             return
 
         usage = meta.usage if meta else None
-        totals = normalize_usage(usage)
+        totals = self.record_usage(usage)
         self._last_finish_reason = meta.finish_reason if meta else None
         if totals.total_tokens:
-            self._session_total_tokens += totals.total_tokens
-            yield UsageUpdate(total_tokens=self._session_total_tokens)
+            yield UsageUpdate(total_tokens=self.session_total_tokens)
         self.trace.log(
             "llm_response",
             turn=self._turn_count,
@@ -1412,6 +1452,7 @@ class Agent:
             # RFC LIM-53: the summary call was interrupted; compact()
             # reports it as an interruption, not a summary failure.
             raise _StreamInterrupted
+        self.record_usage(meta.usage if meta else None)
         self.trace.log(
             "llm_response",
             turn=self._turn_count,
@@ -1571,6 +1612,9 @@ class Agent:
             summary_chars=len(summary),
             warning=warning,
         )
+        # The summary call is billed too: refresh the counter.
+        if self.session_total_tokens:
+            yield UsageUpdate(total_tokens=self.session_total_tokens)
 
     def _save_session_sync(self) -> None:
         """Persist the session: incremental append by default, full rewrite

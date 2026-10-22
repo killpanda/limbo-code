@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from limbo.compaction import is_summary_message, make_summary_message
 from limbo.goal import GoalState
@@ -54,6 +54,15 @@ class AmbiguousSessionError(Exception):
         )
 
 
+class UsageEntry(BaseModel):
+    """Accumulated usage for one ``provider/model`` in a session."""
+
+    requests: int = 0
+    prompt_tokens: int = 0
+    cached_tokens: int = 0
+    total_tokens: int = 0
+
+
 class SessionMeta(BaseModel):
     """Metadata describing a session (stored as the first JSONL line)."""
 
@@ -68,6 +77,10 @@ class SessionMeta(BaseModel):
     # Code Mode presentation (deepseek-harness parity): whether the
     # model-facing catalog was collapsed to `run_code`; restored on resume.
     code_mode: bool = False
+    # Usage ledger keyed by "provider/model": every billed call (turns,
+    # compaction summaries, /btw) adds to it; persisted via meta_patch so
+    # the token counter survives resume.
+    usage: dict[str, UsageEntry] = Field(default_factory=dict)
     # Whether tool calls are journaled as ``tool_intent`` records before
     # they run. Legacy sessions lack it, so a dangling call there cannot be
     # told apart as "never started" vs "interrupted mid-run".
