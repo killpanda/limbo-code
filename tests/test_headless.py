@@ -99,12 +99,13 @@ def make_frontend(workdir: Path, responses, reporter=None, json_mode=False):
     reporter = reporter or RecordingReporter()
     chunks: list[str] = []
 
-    def make_agent(client):
+    def make_agent(client, resume=None):
         return Agent(
             config=config,
             llm_client=client,
             workdir=workdir,
             session_dir=workdir / "sessions",
+            resume=resume,
         )
 
     frontend = HeadlessFrontend(
@@ -223,6 +224,24 @@ async def test_json_mode_prints_only_json_events(workdir):
     assert "hello.txt" in result["result"]["output"]
     assert {"type": "idle", "total_tokens": 9} in records
     assert any(r["type"] == "info" for r in records)  # status lines are JSON too
+
+
+@pytest.mark.asyncio
+async def test_fork_switches_to_a_child_session(workdir):
+    frontend, chunks, reporter = make_frontend(workdir, [[TextChunk(text="a1")]])
+    parent = frontend._agent.session_id
+
+    async def inputs():
+        yield Submit("first")
+        await wait_until(lambda: "── limbo idle" in output_of(chunks))
+        yield Submit("/fork")
+        yield Eof()
+
+    assert await frontend.run(inputs()) == 0
+    assert f"已从会话 {parent} 分叉" in output_of(chunks)
+    child = frontend._agent
+    assert child.session_meta.parent_session == parent
+    assert [m.content for m in child.messages[1:]] == ["first", "a1"]
 
 
 @pytest.mark.asyncio
