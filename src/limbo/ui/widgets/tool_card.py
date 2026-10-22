@@ -211,13 +211,14 @@ class ToolCard(Vertical):
         Returns a Pygments ``Style`` subclass; rich accepts it at runtime
         though its type hints only declare ``str | SyntaxTheme``.
         """
-        from limbo.ui.syntax import LimboDarkStyle, LimboLightStyle
+        from limbo.ui.syntax import style_for_theme
+        from limbo.ui.theme import LIMBO_DUSK
 
         try:
-            dark = self.app.current_theme.dark
+            theme = self.app.current_theme
         except Exception:  # noqa: BLE001 - no app/theme context (tests)
-            dark = True
-        return LimboDarkStyle if dark else LimboLightStyle
+            theme = LIMBO_DUSK
+        return style_for_theme(theme)
 
     def _lexer_for_body(self) -> str | None:
         """Pick a syntax-highlighting lexer based on the tool and its target."""

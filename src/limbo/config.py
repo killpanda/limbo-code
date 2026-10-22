@@ -158,8 +158,10 @@ class KittyKeyboardMode(str, Enum):
 
 
 class UIConfig(BaseModel):
-    # Theme name: built-in "limbo-dark" (default) / "limbo-light", or any
-    # Textual built-in theme (e.g. "textual-dark", "dracula", "nord").
+    # Theme name. Unset / "auto" follows the Omarchy system theme when it is
+    # installed and uses "limbo-dusk" otherwise; "omarchy" always follows it.
+    # Also accepts "limbo-dusk" / "limbo-dark" / "limbo-light" or any Textual
+    # built-in theme (e.g. "textual-dark", "dracula", "nord").
     theme: str | None = None
     # Show the startup ASCII-art banner on fresh sessions.
     show_banner: bool = True

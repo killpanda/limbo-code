@@ -17,6 +17,7 @@ from pygments.token import (
     String,
     Text,
 )
+from textual.theme import Theme
 
 # 色值直接取自 theme.py 的变量定义（单一事实来源，防止两处漂移）。
 from limbo.ui.theme import LIMBO_DARK, LIMBO_LIGHT
@@ -82,3 +83,69 @@ class LimboLightStyle(Style):
         Generic.Deleted: f"{_L['diff-removed']} bg:{_L['diff-removed-bg']}",
         Generic.Error: "#A93230",
     }
+
+
+_STYLE_CACHE: dict[tuple[str, ...], type[Style]] = {}
+
+
+def style_for_theme(theme: Theme) -> type[Style]:
+    """按当前主题的 token 现生成 Pygments 样式（limbo-dusk、Omarchy 等）。
+
+    limbo-dark / limbo-light 保留手调的专用样式；其余主题从语义 token 派生，
+    同一组颜色只生成一次。
+    """
+    if theme.name == LIMBO_DARK.name:
+        return LimboDarkStyle
+    if theme.name == LIMBO_LIGHT.name:
+        return LimboLightStyle
+    v = theme.variables
+    fg = str(theme.foreground)
+    primary = str(theme.primary)
+    accent = str(theme.accent or theme.primary)
+    tertiary = v.get("text-tertiary", fg)
+    secondary = v.get("text-secondary", fg)
+    success = str(theme.success or fg)
+    warning = str(theme.warning or fg)
+    error = str(theme.error or fg)
+    key = (
+        theme.name, fg, primary, accent, tertiary, secondary, success, warning, error,
+        v.get("diff-added", success), v.get("diff-added-bg", ""),
+        v.get("diff-removed", error), v.get("diff-removed-bg", ""),
+        str(theme.panel or theme.background),
+    )
+    cached = _STYLE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    added_bg = f" bg:{key[10]}" if key[10] else ""
+    removed_bg = f" bg:{key[12]}" if key[12] else ""
+    style = type(
+        "LimboThemeStyle",
+        (Style,),
+        {
+            "name": theme.name,
+            "background_color": key[13],
+            "default_style": "",
+            "styles": {
+                Text: fg,
+                Comment: f"italic {tertiary}",
+                Keyword: primary,
+                Keyword.Type: primary,
+                Name.Function: accent,
+                Name.Class: primary,
+                Name.Builtin: primary,
+                Name.Variable: fg,
+                Name.Decorator: accent,
+                String: success,
+                Number: warning,
+                Operator: fg,
+                Punctuation: secondary,
+                Generic.Heading: f"bold {accent}",
+                Generic.Subheading: f"bold {primary}",
+                Generic.Inserted: f"{key[9]}{added_bg}",
+                Generic.Deleted: f"{key[11]}{removed_bg}",
+                Generic.Error: error,
+            },
+        },
+    )
+    _STYLE_CACHE[key] = style
+    return style
