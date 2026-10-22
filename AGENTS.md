@@ -79,6 +79,8 @@ Providers/models live in `llm/catalog.py`; unknown models get generic OpenAI-com
 [tools]      # bash_enabled = true, parallel = true
 [compaction] # enabled, reserve_tokens = 16384, keep_recent_tokens = 20000
 [goal]       # max_rounds = 10, verify_timeout_ms = 600000
+[queue]      # after_failed_run = "continue" | "keep" | "withdraw" (queued
+             # messages after an LLM-error turn; keep/withdraw end the task)
 [ui]         # theme, show_banner
 [providers.<id>]  # base_url / api_key / api_key_env / headers
 ```

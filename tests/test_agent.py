@@ -250,6 +250,31 @@ async def test_agent_error_event_on_llm_failure(workdir):
 
 
 @pytest.mark.asyncio
+async def test_last_run_failed_tracks_llm_errors(workdir):
+    class FailsOnceClient:
+        def __init__(self):
+            self.calls = 0
+
+        async def chat(self, messages, tools, on_request=None):
+            self.calls += 1
+            if self.calls == 1:
+                raise LLMHttpError(400, "bad request")
+            yield TextChunk(text="ok")
+
+    agent = Agent(
+        config=Config(),
+        llm_client=FailsOnceClient(),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    await _collect(agent.run("first"))
+    assert agent.last_run_failed
+
+    await _collect(agent.run("second"))
+    assert not agent.last_run_failed
+
+
+@pytest.mark.asyncio
 async def test_agent_iteration_count_resets_per_turn(workdir):
     cfg = Config()
     cfg.llm.max_iterations = 1
