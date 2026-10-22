@@ -11,6 +11,7 @@ from limbo.code_mode import CODE_ONLY_INSTRUCTION
 from limbo.config import Config
 from limbo.models import CompletionMeta, TextChunk, ToolCallEvent
 from limbo.sessions import load_session
+from limbo.trace import read_trace
 
 
 class FakeLLMClient:
@@ -107,6 +108,18 @@ async def test_code_mode_executes_run_code_turn(tmp_path):
     tool_msgs = [m for m in agent.messages if m.role == "tool"]
     assert len(tool_msgs) == 1
     assert "read: code mode e2e" in (tool_msgs[0].content or "")
+    # The sub-call is traced under its run_code parent (never in history).
+    agent.trace.flush()
+    subs = [
+        r for r in read_trace(agent.trace.path)
+        if r.get("parent_call_id") == "call-1"
+    ]
+    assert [(r["type"], r["name"]) for r in subs] == [
+        ("tool_call", "read"),
+        ("tool_result", "read"),
+    ]
+    assert subs[1]["success"] is True
+    assert subs[0]["id"] == subs[1]["id"]
 
 
 def test_code_mode_persisted_and_restored_on_resume(tmp_path):

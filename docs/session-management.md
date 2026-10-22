@@ -1,6 +1,6 @@
 # Session 管理设计
 
-> 状态：已实现 P0/P1（store、恢复、CLI、斜杠命令、选择器、导出）。P2 中 fork / prune 尚未实现。
+> 状态：已实现 P0/P1（store、恢复、CLI、斜杠命令、选择器、导出）和 P2 的 `/fork`、`/handoff`。prune 尚未实现。
 
 ## 背景
 
@@ -18,7 +18,7 @@
 | P1 | 自动标题（首条用户消息截断） | ✅ |
 | P1 | `/export` 导出 Markdown / JSONL 全量日志 | ✅ |
 | P1 | `/new` 开始新会话 | ✅ |
-| P2 | `/fork` 会话分叉 | ⬜ 未实现 |
+| P2 | `/fork` 会话分叉、`/handoff` 交接 | ✅ |
 | P2 | prune 清理旧会话 | ⬜ 未实现 |
 
 ## 存储格式
@@ -86,7 +86,19 @@ Esc 关闭），不发往 LLM，走命令路由：
 | `/new` | 清空当前对话，开始新会话（新文件） |
 | `/export [path]` | 导出会话日志：默认 JSONL 全量日志（`~/.limbo/exports/<id>.jsonl`，含完整 LLM 请求体、token 用量、工具执行、报错）；路径以 `.md` 结尾时导出 Markdown |
 | `/tracing-viewer [id\|off]` | 在浏览器查看 trace（见下文「Tracing 网页查看器」）；忙时可用 |
+| `/fork [n]` | 把当前会话分叉成新会话并切过去；`n` = 只保留前 n 轮用户对话（省略则全部保留）。原会话文件不变 |
+| `/handoff <说明>` | 开一个干净上下文的新会话，以这段说明作为第一条消息发出；提示里带原会话文件路径，模型需要细节时可以自己读 |
 | `/help` | 显示命令列表 |
+
+### 分叉与交接
+
+- 子会话是**自包含的拷贝**：`/fork` 把活跃历史（含压缩摘要和对应的
+  compaction 记录）截到分叉点写进新文件，加载时不需要读父会话；父会话
+  之后的追加也不会影响子会话。
+- meta 记录血缘：`parent_session` 为父会话 id，`fork_at` 为复制的最后一条
+  父消息 id（`/handoff` 为空）。会话选择器在子会话后面显示 `⑂ <父会话 id>`。
+- 子会话不继承 goal、usage 账本和排队消息；Code Mode 等模式会继承。
+- headless 同样支持 `/fork [n]` 和 `/handoff <说明>`。
 
 切换会话时聊天区重绘：user / assistant 文本原样渲染，历史 tool 消息
 以 info 行省略提示（不重建工具卡片）。

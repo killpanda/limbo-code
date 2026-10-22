@@ -15,10 +15,11 @@ the way through the history, and only the final user message is uncached.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
+from typing import Any
 
 from limbo.llm.client import LLMClient, RequestHook
-from limbo.models import Message, TextChunk
+from limbo.models import CompletionMeta, Message, TextChunk
 
 # Delivered inside the trailing user message (see the module docstring for
 # the prefix-cache rationale): constrains the answer to a direct one-shot
@@ -58,15 +59,18 @@ async def btw_query(
     history: list[Message],
     question: str,
     on_request: RequestHook | None = None,
+    on_usage: Callable[[dict[str, Any] | None], Any] | None = None,
 ) -> AsyncIterator[str]:
     """Stream the side-question answer as text chunks (one call, no tools).
 
-    Thinking chunks and completion metadata are intentionally dropped:
-    thinking is noise for a quick overlay answer, and side questions do not
-    count toward the session's token totals. Client exceptions propagate —
-    the UI layer maps them to a friendly message.
+    Thinking chunks are intentionally dropped (noise for a quick overlay
+    answer). The completion's usage is handed to ``on_usage`` so the side
+    call is counted in the session's usage ledger. Client exceptions
+    propagate — the UI layer maps them to a friendly message.
     """
     messages = build_btw_messages(history, question)
     async for event in llm_client.chat(messages, tools=[], on_request=on_request):
         if isinstance(event, TextChunk):
             yield event.text
+        elif isinstance(event, CompletionMeta) and on_usage is not None:
+            on_usage(event.usage)

@@ -101,6 +101,12 @@ def main() -> int:
         "(line-oriented REPL for Herdr/script control; see "
         "design/rfc-headless-cli.md)",
     )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="With --headless (implied): print every event as one JSON object "
+        "per line, so scripts can drive Limbo without parsing the screen",
+    )
     args = parser.parse_args()
 
     config = load_config()
@@ -147,7 +153,7 @@ def main() -> int:
         if meta.workdir and Path(meta.workdir).is_dir():
             workdir = Path(meta.workdir)
 
-    if args.headless:
+    if args.headless or args.json:
         from limbo.headless import (
             run_headless,  # noqa: PLC0415 - deferred: keeps the TUI path's import cost off headless startup
         )
@@ -157,6 +163,7 @@ def main() -> int:
             config=config,
             session_dir=args.session_dir,
             resume=resume,
+            json_mode=args.json,
         )
 
     from limbo.ui.app import LimboApp  # noqa: I001, PLC0415 - deferred so the kitty keyboard workaround runs first

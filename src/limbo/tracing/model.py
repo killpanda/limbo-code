@@ -254,6 +254,8 @@ class _Builder:
             "call_offset": offset,
             "result_offset": None,
             "arguments_preview": summary.get("arguments_preview"),
+            # Code Mode sub-call: nested under its run_code call.
+            "parent_call_id": summary.get("parent_call_id"),
         }
         self._tools[summary.get("id")] = span
         turn["spans"].append(span)
@@ -280,7 +282,11 @@ class _Builder:
             output_preview=summary.get("output_preview"),
             error=summary.get("error"),
         )
+        # Sub-call time is already inside its run_code parent's duration.
+        sub_call = summary.get("parent_call_id") is not None
         for totals in (self.totals, turn["totals"]):
+            if sub_call:
+                break
             totals["tools"] += 1
             if isinstance(duration, (int, float)):
                 totals["tool_seconds"] += duration

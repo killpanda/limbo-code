@@ -18,6 +18,7 @@ from limbo.agent import (
     TextDelta,
     ToolCallRequest,
     ToolResultEvent,
+    UsageUpdate,
 )
 from limbo.attachments import ATTACHMENT_INLINE_MAX_BYTES
 from limbo.compaction import SUMMARY_TAG
@@ -55,6 +56,8 @@ class FakeLLMClient:
                 }
             )
         for event in self.responses.pop(0):
+            if isinstance(event, BaseException):
+                raise event  # a stream that breaks mid-response
             yield event
 
 
@@ -354,7 +357,7 @@ async def test_agent_tool_crash_becomes_error_result_and_loop_continues(workdir)
         session_dir=workdir / "sessions",
     )
 
-    async def crashing_execute(name, arguments):
+    async def crashing_execute(name, arguments, **_):
         raise RuntimeError("tool exploded")
 
     agent.registry.execute = crashing_execute
@@ -390,7 +393,7 @@ async def test_agent_tool_crash_does_not_cancel_siblings(workdir):
 
     original_execute = agent.registry.execute
 
-    async def execute_with_crash(name, arguments):
+    async def execute_with_crash(name, arguments, **_):
         if name == "read":
             raise RuntimeError("tool exploded")
         return await original_execute(name, arguments)
@@ -439,7 +442,7 @@ async def test_agent_max_iterations_cancels_tool_calls(workdir):
     executed = []
     original_execute = agent.registry.execute
 
-    async def tracking_execute(name, arguments):
+    async def tracking_execute(name, arguments, **_):
         executed.append((name, arguments))
         return await original_execute(name, arguments)
 
@@ -1356,7 +1359,7 @@ async def test_agent_trace_records_tool_crash(workdir):
         session_dir=workdir / "sessions",
     )
 
-    async def crashing_execute(name, arguments):
+    async def crashing_execute(name, arguments, **_):
         raise RuntimeError("tool exploded")
 
     agent.registry.execute = crashing_execute
@@ -1413,7 +1416,7 @@ async def test_agent_parallel_tool_calls_run_concurrently(workdir):
         session_dir=workdir / "sessions",
     )
 
-    async def slow_execute(name, arguments):
+    async def slow_execute(name, arguments, **_):
         await asyncio.sleep(0.3)
         return ToolResult(success=True, output=f"ok:{name}")
 
@@ -1448,7 +1451,7 @@ async def test_agent_parallel_events_completion_order_history_source_order(workd
         session_dir=workdir / "sessions",
     )
 
-    async def variably_slow_execute(name, arguments):
+    async def variably_slow_execute(name, arguments, **_):
         if arguments["path"] == "slow.txt":
             await asyncio.sleep(0.3)
         return ToolResult(success=True, output=f"ok:{arguments['path']}")
@@ -1482,7 +1485,7 @@ async def test_agent_parallel_disabled_falls_back_to_sequential(workdir):
         session_dir=workdir / "sessions",
     )
 
-    async def variably_slow_execute(name, arguments):
+    async def variably_slow_execute(name, arguments, **_):
         if arguments["path"] == "slow.txt":
             await asyncio.sleep(0.2)
         return ToolResult(success=True, output="ok")
@@ -1523,7 +1526,7 @@ async def test_agent_length_stop_fails_whole_batch_without_executing(
     executed = []
     original_execute = agent.registry.execute
 
-    async def spy_execute(name, arguments):
+    async def spy_execute(name, arguments, **_):
         executed.append(name)
         return await original_execute(name, arguments)
 
@@ -1614,7 +1617,7 @@ async def test_agent_length_stop_loop_aborts_after_threshold(workdir):
 
     executed = []
 
-    async def spy_execute(name, arguments):
+    async def spy_execute(name, arguments, **_):
         executed.append(name)
         return ToolResult(success=True, output="ok")
 
@@ -3084,3 +3087,164 @@ async def test_persist_meta_appends_patch_without_rewrite(workdir, monkeypatch):
     assert sum(json.loads(line).get("type") == "meta_patch" for line in lines) == 1
     meta, _, _ = load_session(agent.session_path)
     assert meta.goal is not None and meta.goal.text == "g"
+
+
+# -- usage ledger (T13) ---------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_usage_ledger_accumulates_and_survives_resume(workdir):
+    from limbo.llm.catalog import resolve_model
+
+    first = {
+        "prompt_tokens": 80,
+        "total_tokens": 100,
+        "prompt_tokens_details": {"cached_tokens": 50},
+    }
+    second = {"prompt_tokens": 150, "total_tokens": 200}
+    agent = Agent(
+        config=Config(),
+        llm_client=FakeLLMClient(
+            [
+                [TextChunk(text="a"), CompletionMeta(usage=first)],
+                [TextChunk(text="b"), CompletionMeta(usage=second)],
+            ]
+        ),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    events = await _collect(agent.run("one"))
+    assert [e.total_tokens for e in events if isinstance(e, UsageUpdate)] == [100]
+    await _collect(agent.run("two"))
+    assert agent.session_total_tokens == 300
+    agent.record_usage(None)  # nothing reported: nothing counted
+    assert agent.session_total_tokens == 300
+
+    model = agent.config.llm.model
+    key = f"{resolve_model(model).provider.id}/{model}"
+    entry = agent.usage_ledger[key]
+    assert (entry.requests, entry.prompt_tokens, entry.cached_tokens) == (2, 230, 50)
+
+    resumed = _resume(agent)
+    assert resumed.session_total_tokens == 300
+    assert resumed.usage_ledger[key].requests == 2
+
+
+@pytest.mark.asyncio
+async def test_compaction_summary_call_is_counted(workdir):
+    agent = Agent(
+        config=_compact_cfg(),
+        llm_client=FakeLLMClient(
+            [
+                [TextChunk(text="SUMMARY"), CompletionMeta(usage={"total_tokens": 70})],
+            ]
+        ),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    _seed_history(agent)
+    agent.messages.append(Message(role="user", content="c" * 3000))
+    agent.messages.append(Message(role="assistant", content="d" * 3000))
+    events = await _collect(agent.compact(trigger="manual"))
+    assert agent.session_total_tokens == 70
+    assert isinstance(events[-1], UsageUpdate)
+    assert events[-1].total_tokens == 70
+
+
+def test_agent_sets_the_prompt_cache_key_on_capable_clients(workdir):
+    class CacheAwareClient(FakeLLMClient):
+        prompt_cache_key = None
+
+    client = CacheAwareClient([])
+    agent = Agent(
+        config=Config(),
+        llm_client=client,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    assert client.prompt_cache_key == agent.session_id
+    swapped = CacheAwareClient([])
+    agent.update_llm(swapped)
+    assert swapped.prompt_cache_key == agent.session_id
+
+
+# -- mid-stream retry (T15) -----------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_retries", [1, 0])
+async def test_stream_broken_mid_response_is_resent(workdir, max_retries):
+    import httpx
+
+    from limbo.agent import RetryEvent
+
+    cfg = Config()
+    cfg.llm.max_retries = max_retries
+    cfg.llm.retry_base_delay = 0
+    fake = FakeLLMClient(
+        [
+            [TextChunk(text="half an ans"), httpx.ReadError("connection reset")],
+            [TextChunk(text="the full answer")],
+        ]
+    )
+    agent = Agent(
+        config=cfg, llm_client=fake, workdir=workdir, session_dir=workdir / "sessions"
+    )
+    events = await _collect(agent.run("q"))
+
+    retries = [e for e in events if isinstance(e, RetryEvent)]
+    if max_retries:
+        assert [r.attempt for r in retries] == [1]
+        assert len(fake.calls) == 2
+        # Only the retried response is kept.
+        assert agent.messages[-1].content == "the full answer"
+        assert not any("half an ans" in (m.content or "") for m in agent.messages)
+    else:
+        assert retries == []
+        assert any(isinstance(e, ErrorEvent) for e in events)
+
+
+# -- /fork and /handoff (T16) ---------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_fork_and_handoff_leave_the_parent_untouched(workdir):
+    agent = Agent(
+        config=Config(),
+        llm_client=FakeLLMClient(
+            [[TextChunk(text="a1")], [TextChunk(text="a2")], [TextChunk(text="c1")]]
+        ),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    await _collect(agent.run("first"))
+    await _collect(agent.run("second"))
+    parent_raw = agent.session_path.read_text()
+
+    # Keep only the first turn; the child loads on its own.
+    child = _resume_at(agent, agent.fork(keep_turns=1))
+    assert [m.content for m in child.messages[1:]] == ["first", "a1"]
+    meta = child.session_meta
+    assert meta.parent_session == agent.session_id
+    assert meta.fork_at == child.messages[-1].id
+    assert meta.title.endswith("(fork)")
+    # Work in the child never reaches the parent.
+    child.llm_client = agent.llm_client
+    await _collect(child.run("child turn"))
+    assert agent.session_path.read_text() == parent_raw
+
+    handed = _resume_at(agent, agent.handoff("continue the refactor"))
+    assert len(handed.messages) == 1  # system only: a clean context
+    assert handed.session_meta.parent_session == agent.session_id
+    assert handed.session_meta.fork_at is None
+    assert str(agent.session_path) in agent.handoff_prompt("x")
+
+
+def _resume_at(agent: Agent, path: Path) -> Agent:
+    return Agent(
+        config=Config(),
+        llm_client=FakeLLMClient([]),
+        workdir=agent.workdir,
+        session_dir=path.parent,
+        resume=path,
+    )

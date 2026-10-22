@@ -64,6 +64,8 @@ class OpenAIResponsesClient:
         self.config = config
         self.spec: ModelSpec = resolve_model(config.llm.model)
         self._client: httpx.AsyncClient | None = None
+        # Set by the agent to its session id (prompt-cache routing).
+        self.prompt_cache_key: str | None = None
 
     @property
     def client(self) -> httpx.AsyncClient:
@@ -115,6 +117,10 @@ class OpenAIResponsesClient:
         }
         if instructions:
             body["instructions"] = instructions
+        if self.prompt_cache_key:
+            # One cache bucket per session (pi parity): requests of the same
+            # conversation land on the same prefix cache.
+            body["prompt_cache_key"] = self.prompt_cache_key
         body.update(self._reasoning_params())
         if self.spec.reasoning:
             # Ask for replayable reasoning items (needed for function-call

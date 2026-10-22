@@ -25,19 +25,23 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import dataclasses
 import json
 import os
+import re
 import sys
 import unicodedata
 from collections.abc import AsyncIterator, Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from limbo.agent import (
     Agent,
     CompactionEvent,
     ErrorEvent,
     InterruptEvent,
+    RetryEvent,
     SteerEvent,
     TextDelta,
     ThinkingDelta,
@@ -150,10 +154,24 @@ class SlashQueue:
 
 
 @dataclass(frozen=True)
+class SlashFork:
+    """``/fork [n]``: branch into a new session (keep the first n turns)."""
+
+    arg: str
+
+
+@dataclass(frozen=True)
 class SlashPlan:
     """``/plan [on|off]``: read-only plan mode."""
 
     arg: str
+
+
+@dataclass(frozen=True)
+class SlashHandoff:
+    """``/handoff <note>``: a linked new session that starts from the note."""
+
+    note: str
 
 
 @dataclass(frozen=True)
@@ -183,6 +201,8 @@ Submission = (
     | SlashModel
     | SlashNew
     | SlashQueue
+    | SlashFork
+    | SlashHandoff
     | SlashPlan
     | SlashHelp
     | SlashQuit
@@ -213,6 +233,10 @@ def parse_submission(text: str) -> Submission:
         return SlashNew()
     if name == "queue":
         return SlashQueue(arg)
+    if name == "fork":
+        return SlashFork(arg)
+    if name == "handoff":
+        return SlashHandoff(arg)
     if name == "plan":
         return SlashPlan(arg)
     if name == "help":
@@ -460,6 +484,8 @@ HELP_TEXT = """可用命令：
   /model [id]    查看/切换模型
   /new           开始新会话
   /queue <文本>  当前任务做完后再处理这条消息（空闲时直接发送）
+  /fork [n]      分叉出新会话继续（n = 只保留前 n 轮），原会话不变
+  /handoff <说明> 带交接说明开新会话（干净上下文，关联原会话）
   /plan [on|off] 计划模式：只读探索并给出方案，写类工具被拦下
   /tracing-viewer [id|off]  在浏览器查看 trace（打印本地链接）
   /quit          退出
@@ -497,8 +523,11 @@ class HeadlessFrontend:
         pump_factory: Callable[[Agent], TurnPump],
         echo_input: bool = False,
         max_tool_lines: int = 60,
+        json_mode: bool = False,
     ) -> None:
         self._config = config
+        # --json: every output line is one JSON object (events + info).
+        self._json = json_mode
         self._agent = agent
         self._pump = pump
         self._llm_client = llm_client
@@ -519,7 +548,8 @@ class HeadlessFrontend:
         self._pending_proposals: list[str] = []
         self._eof = False
         self._quit = False
-        self._last_tokens = 0
+        # Restored from the session's usage ledger on resume.
+        self._last_tokens = agent.session_total_tokens
         self._tracing_viewer = TracingViewerCommand(lambda: self._agent)
 
     # -- main loop ------------------------------------------------------------
@@ -528,11 +558,22 @@ class HeadlessFrontend:
         forwarder = asyncio.create_task(self._forward(inputs))
         self._report_session()
         self._report("idle")
-        self._line(
-            f"limbo headless · model {self._config.llm.model} · "
-            f"workdir {self._agent.workdir}"
-        )
-        self._line("输入消息回车发送；/help 查看命令；Esc/Ctrl+C 中断当前任务")
+        if self._json:
+            self._emit(
+                {
+                    "type": "ready",
+                    "model": self._config.llm.model,
+                    "workdir": str(self._agent.workdir),
+                    "session_id": self._agent.session_id,
+                    "total_tokens": self._last_tokens,
+                }
+            )
+        else:
+            self._line(
+                f"limbo headless · model {self._config.llm.model} · "
+                f"workdir {self._agent.workdir}"
+            )
+            self._line("输入消息回车发送；/help 查看命令；Esc/Ctrl+C 中断当前任务")
         try:
             while not self._quit:
                 event = await self._queue.get()
@@ -606,6 +647,10 @@ class HeadlessFrontend:
             await self._cmd_model(command.arg)
         elif isinstance(command, SlashNew):
             self._cmd_new()
+        elif isinstance(command, SlashFork):
+            self._cmd_fork(command.arg)
+        elif isinstance(command, SlashHandoff):
+            self._cmd_handoff(command.note)
         elif isinstance(command, SlashPlan):
             self._cmd_plan(command.arg)
         elif isinstance(command, SlashHelp):
@@ -673,7 +718,10 @@ class HeadlessFrontend:
         except Exception as e:  # noqa: BLE001 - mirror the TUI: surface it
             self._line(f"✗ 内部错误：{e}")
         finally:
-            self._line(f"── limbo idle · 累计 tokens {self._last_tokens} ──")
+            if self._json:
+                self._emit({"type": "idle", "total_tokens": self._last_tokens})
+            else:
+                self._line(f"── limbo idle · 累计 tokens {self._last_tokens} ──")
             self._report("idle")
 
     def _turn_finished(self, task: asyncio.Task[None]) -> None:
@@ -809,15 +857,59 @@ class HeadlessFrontend:
         self._agent.close()  # release the old session's trace file handle
         self._agent = self._agent_factory(self._llm_client)
         self._pump = self._pump_factory(self._agent)
+        self._last_tokens = 0
         self._report_session()
         self._line("已开始新会话")
+
+    def _cmd_fork(self, arg: str) -> None:
+        if arg and not arg.isdigit():
+            self._line("用法：/fork [n]（n = 保留前 n 轮对话，省略则全部保留）")
+            return
+        parent = self._agent.session_id
+        self._switch_to(self._agent.fork(int(arg) if arg else None))
+        self._line(f"已从会话 {parent} 分叉，新会话 {self._agent.session_id}")
+
+    def _cmd_handoff(self, note: str) -> None:
+        if not note:
+            self._line("用法：/handoff <交接说明>")
+            return
+        prompt = self._agent.handoff_prompt(note)
+        parent = self._agent.session_id
+        self._switch_to(self._agent.handoff(note))
+        self._line(f"已交接：新会话 {self._agent.session_id}，关联原会话 {parent}")
+        self._start(self._pump.run(prompt))
+
+    def _switch_to(self, path: Path) -> None:
+        old = self._agent
+        old.close()
+        self._agent = Agent(
+            config=self._config,
+            llm_client=self._llm_client,
+            workdir=old.workdir,
+            session_dir=old.session_path.parent,
+            resume=path,
+        )
+        self._pump = self._pump_factory(self._agent)
+        self._last_tokens = self._agent.session_total_tokens
+        self._report_session()
 
     # -- rendering ------------------------------------------------------------
 
     def _line(self, text: str = "") -> None:
-        self._out(text + "\n")
+        if self._json:
+            self._emit({"type": "info", "text": text})
+        else:
+            self._out(text + "\n")
+
+    def _emit(self, record: dict[str, Any]) -> None:
+        self._out(json.dumps(record, ensure_ascii=False, default=_json_default) + "\n")
 
     def _render(self, event: PumpEvent) -> None:
+        if self._json:
+            if isinstance(event, UsageUpdate):
+                self._last_tokens = event.total_tokens
+            self._emit(event_to_json(event))
+            return
         if isinstance(event, TextDelta):
             self._out(event.text)
         elif isinstance(event, ThinkingDelta):
@@ -865,6 +957,11 @@ class HeadlessFrontend:
                 self._line(event.warning)
         elif isinstance(event, UsageUpdate):
             self._last_tokens = event.total_tokens
+        elif isinstance(event, RetryEvent):
+            self._line(
+                f"\n⟳ 连接中断，重试（{event.attempt}/{event.max_attempts}）："
+                f"{event.reason}；以上半段回复作废"
+            )
         elif isinstance(event, SteerEvent):
             self._line(f"➤ 插话已注入：{_first_line(event.text)}")
         elif isinstance(event, InterruptEvent):
@@ -915,6 +1012,30 @@ class HeadlessFrontend:
         )
 
 
+# -- --json event stream ------------------------------------------------------------
+
+
+def _snake(name: str) -> str:
+    return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
+
+
+def event_to_json(event: PumpEvent) -> dict[str, Any]:
+    """One agent/goal event as a JSON-ready dict: ``type`` + its fields."""
+    record: dict[str, Any] = {"type": _snake(type(event).__name__)}
+    if dataclasses.is_dataclass(event):
+        for field in dataclasses.fields(event):
+            record[field.name] = getattr(event, field.name)
+    return record
+
+
+def _json_default(value: Any) -> Any:
+    if hasattr(value, "model_dump"):
+        return value.model_dump(mode="json")
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return dataclasses.asdict(value)
+    return str(value)
+
+
 # -- entry point ------------------------------------------------------------------
 
 
@@ -924,10 +1045,11 @@ def run_headless(
     config: Config,
     session_dir: Path | None,
     resume: Path | None,
+    json_mode: bool = False,
 ) -> int:
     """Synchronous entry for ``limbo --headless`` (called from app.main)."""
     try:
-        return asyncio.run(_run(workdir, config, session_dir, resume))
+        return asyncio.run(_run(workdir, config, session_dir, resume, json_mode))
     except KeyboardInterrupt:
         return 130
 
@@ -937,6 +1059,7 @@ async def _run(
     config: Config,
     session_dir: Path | None,
     resume: Path | None,
+    json_mode: bool = False,
 ) -> int:
     workdir = workdir.resolve()
     reporters = create_reporters()
@@ -972,7 +1095,8 @@ async def _run(
         sys.stdout.write(text)
         sys.stdout.flush()
 
-    use_tty = os.name != "nt" and sys.stdin.isatty()
+    # --json is for scripts: plain line reads, no raw-mode echo.
+    use_tty = not json_mode and os.name != "nt" and sys.stdin.isatty()
     inputs = (
         read_tty(sys.stdin.fileno(), out) if use_tty else read_pipe(sys.stdin)
     )
@@ -985,7 +1109,8 @@ async def _run(
         out=out,
         agent_factory=make_agent,
         pump_factory=make_pump,
-        echo_input=not use_tty,
+        echo_input=not use_tty and not json_mode,
+        json_mode=json_mode,
     )
     if use_tty:
         with _terminal_mode(sys.stdin.fileno()):

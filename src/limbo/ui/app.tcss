@@ -164,6 +164,10 @@ ChatWidget {
     color: $text-tertiary;
     text-style: strike;
 }
+.voided {
+    color: $text-tertiary;
+    text-style: strike;
+}
 .queued-message.cancelled .queued-hint {
     color: $text-tertiary;
 }

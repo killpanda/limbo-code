@@ -32,8 +32,20 @@ from limbo.history import ToolHistory
 from limbo.history import recover as recover_history
 from limbo.llm.catalog import resolve_base_url, resolve_model
 from limbo.llm.client import LLMClient, RequestHook
-from limbo.llm.retry import friendly_message, is_context_overflow
-from limbo.llm.usage import PromptSizeEstimator, estimate_tokens, normalize_usage
+from limbo.llm.retry import (
+    RetryPolicy,
+    compute_delay,
+    friendly_message,
+    is_context_overflow,
+    is_retryable,
+    retry_after,
+)
+from limbo.llm.usage import (
+    PromptSizeEstimator,
+    UsageTotals,
+    estimate_tokens,
+    normalize_usage,
+)
 from limbo.models import (
     Attachment,
     CompletionMeta,
@@ -48,6 +60,7 @@ from limbo.sessions import (
     CompactionRecord,
     QueuedMessageRecord,
     SessionMeta,
+    UsageEntry,
     append_session_messages,
     append_session_records,
     compaction_record,
@@ -153,6 +166,20 @@ class InterruptEvent:
     phase: str  # "llm_stream" | "tool_batch" | "compact"
 
 
+@dataclass(frozen=True)
+class RetryEvent:
+    """The stream broke mid-response and the same request is being resent.
+
+    Everything streamed since the request started (text, thinking, tool
+    call cards) is void: the retry re-streams the whole response.
+    """
+
+    attempt: int
+    max_attempts: int
+    reason: str
+    delay: float
+
+
 AgentEvent = (
     TextDelta
     | ThinkingDelta
@@ -163,6 +190,7 @@ AgentEvent = (
     | UsageUpdate
     | SteerEvent
     | InterruptEvent
+    | RetryEvent
 )
 
 
@@ -214,7 +242,6 @@ class Agent:
         self._iteration_count = 0
         self._last_finish_reason: str | None = None
         self._consecutive_length_stops = 0
-        self._session_total_tokens = 0
         self._init_system_message()
 
         # Auto-compaction state (LIM-14). The estimator holds the real
@@ -321,13 +348,7 @@ class Agent:
                 None,
             )
         else:
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
-            # Random suffix avoids collisions when sessions are created in
-            # quick succession within the same process (e.g. `/new`).
-            self._session_file = (
-                self._session_dir
-                / f"{timestamp}-{os.getpid()}-{secrets.token_hex(2)}.jsonl"
-            )
+            self._session_file = self._new_session_file()
             self._meta = SessionMeta(
                 id=self._session_file.stem,
                 workdir=str(workdir.resolve()),
@@ -364,6 +385,129 @@ class Agent:
             },
             resolved=_resolved_llm_trace_fields(config),
         )
+        self._apply_prompt_cache_key()
+        self.registry.trace_log = self._trace_sub_call
+
+    def _trace_sub_call(self, event: str, **fields: Any) -> None:
+        self.trace.log(
+            event,
+            turn=self._turn_count,
+            iteration=self._iteration_count,
+            kind="sub_call",
+            **fields,
+        )
+
+    def _new_session_file(self) -> Path:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+        # Random suffix avoids collisions when sessions are created in
+        # quick succession within the same process (e.g. `/new`).
+        return (
+            self._session_dir
+            / f"{timestamp}-{os.getpid()}-{secrets.token_hex(2)}.jsonl"
+        )
+
+    # -- lineage: /fork and /handoff -------------------------------------------
+
+    def user_turns(self) -> list[Message]:
+        """The user messages that start a turn (fork points), oldest first."""
+        return [
+            m for m in self.messages[1:]
+            if m.role == "user" and not is_summary_message(m)
+        ]
+
+    def fork(self, keep_turns: int | None = None) -> Path:
+        """Branch this session into a new file; this one is left untouched.
+
+        The child holds a copy of the active history up to the start of
+        user turn ``keep_turns + 1`` (all of it when None), so it loads on
+        its own; ``parent_session``/``fork_at`` record where it came from.
+        Returns the child's path (resume it to continue there).
+        """
+        self._save_session_sync()
+        turns = self.user_turns()
+        cut = len(self.messages)
+        if keep_turns is not None and keep_turns < len(turns):
+            cut = self.messages.index(turns[keep_turns])
+        messages = self.messages[:cut]
+        kept_ids = {m.id for m in messages}
+        compactions = [
+            c for c in self._compactions[-1:] if c.first_kept_entry_id in kept_ids
+        ]
+        title = self.session_meta.title or derive_title(messages)
+        child = self._child_meta(title=f"{title} (fork)" if title else "")
+        child.fork_at = messages[-1].id if len(messages) > 1 else None
+        path = self._session_dir / f"{child.id}.jsonl"
+        save_session(path, child, messages, compactions)
+        self.trace.log("fork", child=child.id, kept_turns=keep_turns, messages=cut)
+        return path
+
+    def handoff(self, note: str) -> Path:
+        """Start a linked child session with an empty context.
+
+        The caller sends ``handoff_prompt(note)`` as the child's first
+        message; the parent stays as it is (its file path is in the prompt
+        so the model can read back details on demand).
+        """
+        self._save_session_sync()
+        child = self._child_meta(title=derive_title([Message(role="user", content=note)]))
+        path = self._session_dir / f"{child.id}.jsonl"
+        save_session(path, child, [])
+        self.trace.log("handoff", child=child.id)
+        return path
+
+    def handoff_prompt(self, note: str) -> str:
+        return (
+            f"{note.strip()}\n\n"
+            f"(Handoff from session {self._meta.id}; its full history is in "
+            f"{self._session_file} — read it only if you need details.)"
+        )
+
+    def _child_meta(self, title: str) -> SessionMeta:
+        path = self._new_session_file()
+        meta = self._meta.model_copy(deep=True)
+        meta.id = path.stem
+        meta.title = title
+        meta.created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        meta.parent_session = self._meta.id
+        meta.fork_at = None
+        meta.goal = None
+        meta.usage = {}
+        meta.path = None
+        return meta
+
+    def _apply_prompt_cache_key(self) -> None:
+        """Route this session's requests to one provider cache (Responses)."""
+        if hasattr(self.llm_client, "prompt_cache_key"):
+            self.llm_client.prompt_cache_key = self._meta.id
+
+    # -- usage ledger ----------------------------------------------------------
+
+    @property
+    def session_total_tokens(self) -> int:
+        """Cumulative tokens across every model this session has used."""
+        return sum(entry.total_tokens for entry in self._meta.usage.values())
+
+    @property
+    def usage_ledger(self) -> dict[str, UsageEntry]:
+        return dict(self._meta.usage)
+
+    def record_usage(self, usage: dict[str, Any] | None) -> UsageTotals:
+        """Add one completion's usage to the ledger (``provider/model``).
+
+        Persisted with the next save as a ``meta_patch``. Public so side
+        calls made outside the loop (``/btw``) are counted too.
+        """
+        totals = normalize_usage(usage)
+        if not usage:
+            return totals
+        model = self.config.llm.model
+        key = f"{resolve_model(model).provider.id}/{model}"
+        entry = self._meta.usage.setdefault(key, UsageEntry())
+        entry.requests += 1
+        entry.prompt_tokens += totals.prompt_tokens or 0
+        entry.cached_tokens += totals.cached_tokens or 0
+        entry.total_tokens += totals.total_tokens or 0
+        return totals
 
     def close(self) -> None:
         """Release owned resources (the trace log file handle).
@@ -387,6 +531,7 @@ class Agent:
         self._context_window = spec.context_window
         self._vision = spec.vision
         self._compaction_config = self._build_compaction_config(self.config)
+        self._apply_prompt_cache_key()
         self.trace.log(
             "model_switch",
             turn=self._turn_count,
@@ -800,7 +945,7 @@ class Agent:
         started_at = utc_now_iso()
         start = time.monotonic()
         try:
-            result = await self.registry.execute(name, arguments)
+            result = await self.registry.execute(name, arguments, call_id=call_id)
         except Exception as e:  # noqa: BLE001
             self.trace.log(
                 "tool_result",
@@ -1303,33 +1448,80 @@ class Agent:
                 body=body,
             )
 
-        async for event in self._stream_events(
-            self.messages, tool_definitions, _trace_request
-        ):
-            if isinstance(event, TextChunk):
-                assistant_content += event.text
-                yield TextDelta(text=event.text)
-            elif isinstance(event, ThinkingChunk):
-                assistant_reasoning += event.text
-                if event.signature is not None:
-                    assistant_signature = event.signature
-                yield ThinkingDelta(text=event.text)
-            elif isinstance(event, ToolCallEvent):
-                tool_calls.append(
-                    {
-                        "id": event.id,
-                        "type": "function",
-                        "function": {
-                            "name": event.name,
-                            "arguments": event.arguments,
-                        },
-                    }
+        # Mid-stream retry (pi parity): the client retries failures before
+        # the first event; a retryable failure AFTER output started is
+        # retried here by resending the same request, discarding the
+        # partial response (the frontend voids what it showed).
+        policy = RetryPolicy.from_config(self.config.llm)
+        mid_stream_retries = 0
+        while True:
+            assistant_content = ""
+            assistant_reasoning = ""
+            assistant_signature = None
+            tool_calls = []
+            meta = None
+            streamed = False
+            try:
+                async for event in self._stream_events(
+                    self.messages, tool_definitions, _trace_request
+                ):
+                    streamed = True
+                    if isinstance(event, TextChunk):
+                        assistant_content += event.text
+                        yield TextDelta(text=event.text)
+                    elif isinstance(event, ThinkingChunk):
+                        assistant_reasoning += event.text
+                        if event.signature is not None:
+                            assistant_signature = event.signature
+                        yield ThinkingDelta(text=event.text)
+                    elif isinstance(event, ToolCallEvent):
+                        tool_calls.append(
+                            {
+                                "id": event.id,
+                                "type": "function",
+                                "function": {
+                                    "name": event.name,
+                                    "arguments": event.arguments,
+                                },
+                            }
+                        )
+                        yield ToolCallRequest(
+                            id=event.id, name=event.name, arguments=event.arguments
+                        )
+                    elif isinstance(event, CompletionMeta):
+                        meta = event
+                break
+            except Exception as e:
+                if (
+                    not streamed
+                    or self._interrupt_requested
+                    or mid_stream_retries >= policy.max_retries
+                    or not is_retryable(e)
+                ):
+                    raise
+                delay = compute_delay(mid_stream_retries, policy, retry_after(e))
+                mid_stream_retries += 1
+                self.trace.log(
+                    "llm_stream_retry",
+                    turn=self._turn_count,
+                    iteration=self._iteration_count,
+                    attempt=mid_stream_retries,
+                    error=str(e),
+                    exception_type=type(e).__name__,
+                    discarded_chars=len(assistant_content),
+                    discarded_tool_calls=len(tool_calls),
                 )
-                yield ToolCallRequest(
-                    id=event.id, name=event.name, arguments=event.arguments
+                yield RetryEvent(
+                    attempt=mid_stream_retries,
+                    max_attempts=policy.max_retries,
+                    reason=friendly_message(e) or f"{type(e).__name__}: {e}",
+                    delay=delay,
                 )
-            elif isinstance(event, CompletionMeta):
-                meta = event
+                # Sliced so ESC during the backoff is not held up; the next
+                # attempt then sees the flag and ends as an interrupt.
+                deadline = time.monotonic() + delay
+                while not self._interrupt_requested and time.monotonic() < deadline:
+                    await asyncio.sleep(min(0.1, deadline - time.monotonic()))
 
         if self._stream_cut:
             # RFC LIM-53: the stream was cut mid-response. The partial
@@ -1355,11 +1547,10 @@ class Agent:
             return
 
         usage = meta.usage if meta else None
-        totals = normalize_usage(usage)
+        totals = self.record_usage(usage)
         self._last_finish_reason = meta.finish_reason if meta else None
         if totals.total_tokens:
-            self._session_total_tokens += totals.total_tokens
-            yield UsageUpdate(total_tokens=self._session_total_tokens)
+            yield UsageUpdate(total_tokens=self.session_total_tokens)
         self.trace.log(
             "llm_response",
             turn=self._turn_count,
@@ -1433,6 +1624,7 @@ class Agent:
             # RFC LIM-53: the summary call was interrupted; compact()
             # reports it as an interruption, not a summary failure.
             raise _StreamInterrupted
+        self.record_usage(meta.usage if meta else None)
         self.trace.log(
             "llm_response",
             turn=self._turn_count,
@@ -1592,6 +1784,9 @@ class Agent:
             summary_chars=len(summary),
             warning=warning,
         )
+        # The summary call is billed too: refresh the counter.
+        if self.session_total_tokens:
+            yield UsageUpdate(total_tokens=self.session_total_tokens)
 
     def _save_session_sync(self) -> None:
         """Persist the session: incremental append by default, full rewrite

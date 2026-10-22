@@ -618,3 +618,22 @@ async def test_thinking_mount_race_with_steer_message():
             isinstance(m, QueuedMessage) and m.item_id == "q1"
             for m in widget.messages
         )
+
+
+@pytest.mark.asyncio
+async def test_void_partial_response_detaches_the_broken_block():
+    class TestApp(App[None]):
+        def compose(self):
+            yield ChatWidget(id="chat")
+
+    app = TestApp()
+    async with app.run_test():
+        widget = app.query_one(ChatWidget)
+        await widget.append_assistant_text("half")
+        broken = widget.messages[-1]
+        widget.void_partial_response("⟳ retrying")
+        await widget.append_assistant_text("full")
+        assert broken.has_class("voided")
+        assert widget.messages[-1] is not broken
+        assert not widget.messages[-1].has_class("voided")
+        assert "⟳ retrying" in widget.transcript_text()

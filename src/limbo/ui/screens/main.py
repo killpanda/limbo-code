@@ -6,6 +6,7 @@ import asyncio
 import re
 import secrets
 from pathlib import Path
+from typing import Any
 
 from textual import events
 from textual.app import ComposeResult
@@ -19,6 +20,7 @@ from limbo.agent import (
     CompactionEvent,
     ErrorEvent,
     InterruptEvent,
+    RetryEvent,
     SteerEvent,
     TextDelta,
     ThinkingDelta,
@@ -293,7 +295,12 @@ class MainScreen(Screen[None]):
     def _sync_usage(self, total_tokens: int | None = None) -> None:
         sidebar = self.query_one("#sidebar", Sidebar)
         statusbar = self.query_one("#statusbar", StatusBar)
-        total = sidebar._tokens if total_tokens is None else total_tokens
+        # The session's usage ledger is the source of truth (it survives
+        # resume); an event's figure is the same number, just fresher.
+        total = (
+            self.agent.session_total_tokens if total_tokens is None else total_tokens
+        )
+        statusbar.set_tokens(total)
         sidebar.set_usage(total, self.agent.context_tokens(), self.agent.context_window)
         statusbar.set_context(sidebar.context_percent)
         statusbar.set_changes(sidebar.file_totals)
@@ -525,6 +532,22 @@ class MainScreen(Screen[None]):
         )
         self._commands.register(
             SlashCommand("/new", "开始新会话", handler=lambda arg: self._start_new_session())
+        )
+        self._commands.register(
+            SlashCommand(
+                "/fork",
+                "从当前会话分叉出新会话继续（原会话不变）；n = 只保留前 n 轮 [n]",
+                takes_args=True,
+                handler=lambda arg: self._fork(arg),
+            )
+        )
+        self._commands.register(
+            SlashCommand(
+                "/handoff",
+                "带一段交接说明开新会话（干净上下文，关联原会话）<说明>",
+                takes_args=True,
+                handler=lambda arg: self._handoff(arg),
+            )
         )
         self._commands.register(
             SlashCommand(
@@ -881,6 +904,32 @@ class MainScreen(Screen[None]):
             return
         self.app.push_screen(SessionPicker(sessions), self._on_session_picked)
 
+    def _fork(self, arg: str) -> None:
+        chat = self.query_one("#chat", ChatWidget)
+        arg = arg.strip()
+        keep: int | None = None
+        if arg:
+            if not arg.isdigit():
+                chat.add_info("用法：/fork [n]（n = 保留前 n 轮对话，省略则全部保留）")
+                return
+            keep = int(arg)
+        parent = self.agent.session_id
+        self._on_session_picked(self.agent.fork(keep))
+        kept = "全部对话" if keep is None else f"前 {keep} 轮对话"
+        chat.add_info(f"已从会话 {parent} 分叉（保留{kept}），原会话不变")
+
+    def _handoff(self, note: str) -> None:
+        chat = self.query_one("#chat", ChatWidget)
+        if not note.strip():
+            chat.add_info("用法：/handoff <交接说明>（新会话从这段说明开始）")
+            return
+        prompt = self.agent.handoff_prompt(note)
+        parent = self.agent.session_id
+        self._on_session_picked(self.agent.handoff(note))
+        chat.add_info(f"已交接：新会话关联原会话 {parent}")
+        chat.add_user_message(note)
+        self.run_worker(self._handle_turn(prompt))
+
     def _on_session_picked(self, path: Path | None) -> None:
         if path is None:
             return
@@ -1008,8 +1057,14 @@ class MainScreen(Screen[None]):
                 llm_client=self.llm_client,
                 history=list(self.agent.messages),
                 trace=self.agent.trace,
+                on_usage=self._record_side_usage,
             )
         )
+
+    def _record_side_usage(self, usage: dict[str, Any] | None) -> None:
+        """Count a /btw call in the session's usage ledger."""
+        self.agent.record_usage(usage)
+        self._sync_usage()
 
     def _open_game2048(self) -> None:
         """Open the 2048 modal. The agent turn (if any) keeps running."""
@@ -1321,6 +1376,12 @@ class MainScreen(Screen[None]):
         elif isinstance(event, UsageUpdate):
             statusbar.set_tokens(event.total_tokens)
             self._sync_usage(event.total_tokens)
+        elif isinstance(event, RetryEvent):
+            chat.void_partial_response(
+                f"⟳ 连接中断，{event.delay:.0f} 秒后重试"
+                f"（{event.attempt}/{event.max_attempts}）：{event.reason}"
+                "；上面的半段回复作废"
+            )
         elif isinstance(event, SteerEvent):
             chat.mark_steer_delivered(event.id)
             self._update_queue_status()
