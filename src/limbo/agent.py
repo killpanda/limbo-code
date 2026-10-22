@@ -52,7 +52,7 @@ from limbo.sessions import (
 )
 from limbo.steer import SteerItem, SteerQueue
 from limbo.tools.registry import ToolRegistry
-from limbo.trace import TraceLogger, trace_path_for
+from limbo.trace import TRACE_SCHEMA, TraceLogger, trace_path_for, utc_now_iso
 
 # Consecutive length-stop rejections tolerated before the turn is aborted.
 # A truncated response whose tool calls were refused is almost always the
@@ -273,8 +273,10 @@ class Agent:
         self.trace = TraceLogger(trace_path_for(self._session_file))
         self._turn_count = 0
         self._turn_start: float | None = None
+        self._turn_started_at: str | None = None
         self.trace.log(
             "session_start",
+            trace_schema=TRACE_SCHEMA,
             session_id=self._meta.id,
             workdir=str(workdir.resolve()),
             resumed=resume is not None,
@@ -558,6 +560,7 @@ class Agent:
         self.trace.log(
             "turn_end",
             turn=self._turn_count,
+            started_at=self._turn_started_at,
             duration=time.monotonic() - self._turn_start,
             iterations=self._iteration_count,
             status=status,
@@ -578,6 +581,7 @@ class Agent:
         self._turn_interrupted = False
         self._turn_count += 1
         self._turn_start = time.monotonic()
+        self._turn_started_at = utc_now_iso()
 
         # Fallback drain (RFC LIM-20): leftovers from a previous turn (error
         # exit, max-iterations cancellation, or the exit-window race) are
@@ -634,6 +638,7 @@ class Agent:
             name=name,
             arguments=arguments,
         )
+        started_at = utc_now_iso()
         start = time.monotonic()
         try:
             result = await self.registry.execute(name, arguments)
@@ -648,6 +653,7 @@ class Agent:
                 error=f"Tool error: {e}",
                 exception_type=type(e).__name__,
                 traceback=traceback.format_exc(),
+                started_at=started_at,
                 duration=time.monotonic() - start,
             )
             raise
@@ -660,6 +666,7 @@ class Agent:
             success=result.success,
             output=result.output,
             error=result.error,
+            started_at=started_at,
             duration=time.monotonic() - start,
         )
         return result
@@ -1049,12 +1056,18 @@ class Agent:
         assistant_signature: str | None = None
         tool_calls: list[dict[str, Any]] = []
         meta: CompletionMeta | None = None
+        started_at = utc_now_iso()
+        attempts = 0
 
         def _trace_request(body: dict[str, Any]) -> None:
+            # Called once per HTTP attempt: retries share the iteration.
+            nonlocal attempts
+            attempts += 1
             self.trace.log(
                 "llm_request",
                 turn=self._turn_count,
                 iteration=self._iteration_count,
+                attempt=attempts,
                 body=body,
             )
 
@@ -1100,7 +1113,10 @@ class Agent:
                     Message(role="assistant", content=assistant_content)
                 )
             event = self._mark_interrupted(
-                "llm_stream", content_chars=len(assistant_content)
+                "llm_stream",
+                content_chars=len(assistant_content),
+                content=assistant_content,
+                reasoning=assistant_reasoning,
             )
             if event is not None:
                 yield event
@@ -1116,6 +1132,7 @@ class Agent:
             "llm_response",
             turn=self._turn_count,
             iteration=self._iteration_count,
+            started_at=started_at,
             duration=meta.duration if meta else None,
             ttft=meta.ttft if meta else None,
             finish_reason=meta.finish_reason if meta else None,
@@ -1123,8 +1140,14 @@ class Agent:
             cached_tokens=totals.cached_tokens,
             content_chars=len(assistant_content),
             reasoning_chars=len(assistant_reasoning),
+            content=assistant_content,
+            reasoning=assistant_reasoning,
             tool_calls=[
-                {"id": tc["id"], "name": tc["function"]["name"]}
+                {
+                    "id": tc["id"],
+                    "name": tc["function"]["name"],
+                    "arguments": tc["function"]["arguments"],
+                }
                 for tc in tool_calls
             ],
         )
@@ -1152,12 +1175,18 @@ class Agent:
     async def _generate_summary(self, prompt: list[Message]) -> str:
         """One-shot summarization call on the current client (no tools)."""
 
+        started_at = utc_now_iso()
+        attempts = 0
+
         def _trace_request(body: dict[str, Any]) -> None:
+            nonlocal attempts
+            attempts += 1
             self.trace.log(
                 "llm_request",
                 turn=self._turn_count,
                 iteration=self._iteration_count,
                 kind="compaction",
+                attempt=attempts,
                 body=body,
             )
 
@@ -1177,10 +1206,12 @@ class Agent:
             turn=self._turn_count,
             iteration=self._iteration_count,
             kind="compaction",
+            started_at=started_at,
             duration=meta.duration if meta else None,
             finish_reason=meta.finish_reason if meta else None,
             usage=meta.usage if meta else None,
             content_chars=len(text),
+            content=text,
         )
         return text
 
@@ -1226,6 +1257,7 @@ class Agent:
             self._meta.title = derive_title(self.messages)
         to_summarize = self.messages[1:split]
         prompt = build_summary_prompt(to_summarize, self._previous_summary)
+        compaction_started_at = utc_now_iso()
         start = time.monotonic()
         summary = ""
         error: str | None = None
@@ -1301,6 +1333,7 @@ class Agent:
             tokens_after_estimate=after,
             split_index=split,
             summary_chars=len(summary),
+            started_at=compaction_started_at,
             duration=time.monotonic() - start,
         )
         yield CompactionEvent(
