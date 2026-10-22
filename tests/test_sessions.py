@@ -135,12 +135,19 @@ def test_load_skips_blank_and_malformed_lines(tmp_path: Path):
 
 
 def _write_session_file(path: Path, meta: SessionMeta) -> None:
-    """Write a meta-only session file, preserving the given timestamps."""
+    """Write a meta-only session file, preserving the given timestamps.
+
+    Listing sorts by file mtime, so the mtime is pinned to ``updated_at``:
+    files written back to back can share an mtime tick on coarse clocks.
+    """
     meta_line = json.dumps(
         {"type": "meta", **meta.model_dump(exclude={"path"})},
         ensure_ascii=False,
     )
     path.write_text(meta_line + "\n")
+    if meta.updated_at:
+        mtime = datetime.fromisoformat(meta.updated_at).timestamp()
+        os.utime(path, (mtime, mtime))
 
 
 def test_list_sessions_sorted_by_updated_at_desc(tmp_path: Path):
