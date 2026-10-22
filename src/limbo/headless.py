@@ -519,7 +519,8 @@ class HeadlessFrontend:
         llm_client: LLMClient,
         reporters: IntegrationReporter,
         out: Callable[[str], None],
-        agent_factory: Callable[[LLMClient], Agent],
+        # (client, resume path or None) -> Agent
+        agent_factory: Callable[[LLMClient, Path | None], Agent],
         pump_factory: Callable[[Agent], TurnPump],
         echo_input: bool = False,
         max_tool_lines: int = 60,
@@ -855,7 +856,7 @@ class HeadlessFrontend:
 
     def _cmd_new(self) -> None:
         self._agent.close()  # release the old session's trace file handle
-        self._agent = self._agent_factory(self._llm_client)
+        self._agent = self._agent_factory(self._llm_client, None)
         self._pump = self._pump_factory(self._agent)
         self._last_tokens = 0
         self._report_session()
@@ -880,15 +881,10 @@ class HeadlessFrontend:
         self._start(self._pump.run(prompt))
 
     def _switch_to(self, path: Path) -> None:
-        old = self._agent
-        old.close()
-        self._agent = Agent(
-            config=self._config,
-            llm_client=self._llm_client,
-            workdir=old.workdir,
-            session_dir=old.session_path.parent,
-            resume=path,
-        )
+        # Build the new agent first: if loading fails, the current one stays.
+        agent = self._agent_factory(self._llm_client, path)
+        self._agent.close()
+        self._agent = agent
         self._pump = self._pump_factory(self._agent)
         self._last_tokens = self._agent.session_total_tokens
         self._report_session()
@@ -1066,12 +1062,13 @@ async def _run(
     install_exit_hooks(reporters)
     llm_client = create_llm_client(config)
 
-    def make_agent(client: LLMClient) -> Agent:
+    def make_agent(client: LLMClient, resume: Path | None = None) -> Agent:
         return Agent(
             config=config,
             llm_client=client,
             workdir=workdir,
             session_dir=session_dir,
+            resume=resume,
         )
 
     def make_pump(agent: Agent) -> TurnPump:
