@@ -187,8 +187,13 @@ def save_session(
         ensure_ascii=False,
     )
     tmp_file = path.with_suffix(".tmp")
-    file_existed = path.exists()
     with tmp_file.open("w", encoding="utf-8") as f:
+        # The temp file is created with the umask, so on the default 0o022
+        # it would be 0o644. Tighten it before the replace: the previous
+        # chmod only ran on first creation, and every later full rewrite
+        # (compaction, resume repair) silently widened the session — which
+        # holds prompts, code and tool output — to world-readable.
+        os.fchmod(f.fileno(), 0o600)
         f.write(meta_line + "\n")
         for record in compactions:
             f.write(
@@ -201,8 +206,6 @@ def save_session(
         for msg in messages:
             f.write(msg.model_dump_json() + "\n")
     os.replace(tmp_file, path)
-    if not file_existed:
-        path.chmod(0o600)
 
 
 def append_session_messages(path: Path, messages: list[Message]) -> None:
@@ -293,6 +296,7 @@ def rewrite_meta_line(path: Path, meta: SessionMeta) -> None:
     with path.open("r", encoding="utf-8") as src, tmp_file.open(
         "w", encoding="utf-8"
     ) as dst:
+        os.fchmod(dst.fileno(), 0o600)
         dst.write(meta_line + "\n")
         for line in src:
             stripped = line.strip()
@@ -308,7 +312,6 @@ def rewrite_meta_line(path: Path, meta: SessionMeta) -> None:
             ):
                 continue
             dst.write(stripped + "\n")
-    tmp_file.chmod(0o600)
     os.replace(tmp_file, path)
 
 
