@@ -28,7 +28,7 @@ from limbo.compaction import (
 )
 from limbo.config import Config
 from limbo.history import ToolHistory
-from limbo.history import repair as repair_history
+from limbo.history import recover as recover_history
 from limbo.llm.catalog import resolve_base_url, resolve_model
 from limbo.llm.client import LLMClient, RequestHook
 from limbo.llm.retry import friendly_message
@@ -49,9 +49,10 @@ from limbo.sessions import (
     append_session_messages,
     append_session_records,
     derive_title,
-    load_session,
+    load_session_full,
     meta_patch_record,
     save_session,
+    tool_intent_record,
 )
 from limbo.steer import SteerItem, SteerQueue
 from limbo.tools.registry import ToolRegistry
@@ -238,17 +239,38 @@ class Agent:
         self._auto_compact_noop_notified = False
 
         self._session_dir = session_dir or Path.home() / ".limbo" / "sessions"
+        # Read-only tool calls interrupted by a crash, re-run at the start
+        # of the next turn (their placeholder result is then replaced).
+        self._pending_reruns: list[dict[str, Any]] = []
         if resume is not None:
-            self._meta, history, self._compactions = load_session(resume)
+            loaded = load_session_full(resume)
+            self._meta, history, self._compactions = (
+                loaded.meta,
+                loaded.messages,
+                loaded.compactions,
+            )
             self._session_file = resume
-            self.messages.extend(repair_history(history))
-            # repair_history may have inserted placeholder tool messages, and
+            recovery = recover_history(
+                history,
+                started=(
+                    {i.call_id for i in loaded.intents}
+                    if self._meta.tool_intents
+                    else None
+                ),
+                is_safe=lambda name: self.registry.replay_policy(name) == "safe",
+            )
+            self.messages.extend(recovery.messages)
+            self._pending_reruns = recovery.rerun
+            # From here on every call is journaled, so a later crash can be
+            # recovered precisely even if this session predates intents.
+            self._meta.tool_intents = True
+            # recover_history may have inserted placeholder tool messages, and
             # load_session re-applied compaction: the in-memory history no
             # longer matches the file byte-for-byte, so the first save after
             # resume is a full rewrite (then the append path takes over).
             self._session_saved_count = len(self.messages)
             self._session_full_rewrite_needed = True
-            # Restore the presentation mode: repair_history dropped the
+            # Restore the presentation mode: recover_history dropped the
             # loaded system message, so rebuild the fresh one in code mode
             # when the session was saved with it on.
             if self._meta.code_mode:
@@ -272,6 +294,7 @@ class Agent:
                 workdir=str(workdir.resolve()),
                 model=config.llm.model,
                 created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                tool_intents=True,
             )
 
         # Trace log: full-fidelity JSONL record of the run, kept separate from
@@ -592,6 +615,8 @@ class Agent:
         # injected BEFORE this turn's input so submission order is preserved.
         for item in self.drain_steer():
             yield self._inject_steer(item, followup=True)
+        async for event in self._rerun_interrupted():
+            yield event
 
         content, images = self._build_user_content(user_input, attachments or [])
         self.messages.append(
@@ -634,6 +659,7 @@ class Agent:
         arguments: dict[str, Any],
     ) -> ToolResult:
         """Execute a tool with full trace logging. Re-raises on crash."""
+        await self._commit_intent(call_id, name)
         self.trace.log(
             "tool_call",
             turn=self._turn_count,
@@ -671,6 +697,55 @@ class Agent:
             duration=time.monotonic() - start,
         )
         return result
+
+    async def _commit_intent(self, call_id: str, name: str) -> None:
+        """Journal a tool call before it runs (pi-durable's effect sandwich).
+
+        On resume, a dangling call with a committed intent may have
+        partially run, one without never started. Best effort: a failed
+        write is reported like a failed checkpoint and the tool still runs.
+        """
+        record = tool_intent_record(
+            call_id, name, self.registry.replay_policy(name)
+        )
+
+        def _sync() -> None:
+            with self._session_io_lock:
+                append_session_records(self._session_file, [record])
+
+        try:
+            await asyncio.to_thread(_sync)
+        except Exception as e:  # noqa: BLE001
+            self._report_save_error("intent", e)
+
+    async def _rerun_interrupted(self) -> AsyncIterator[AgentEvent]:
+        """Re-run read-only calls a crash interrupted (resume only).
+
+        Their placeholder results were inserted by recover_history; the
+        real result replaces the placeholder in place, so history order is
+        unchanged. Unsafe calls are never re-run — the model was told they
+        may have partially run and decides itself.
+        """
+        reruns, self._pending_reruns = self._pending_reruns, []
+        if not reruns:
+            return
+        self.trace.log(
+            "tool_recovery",
+            turn=self._turn_count,
+            rerun_tool_call_ids=[tc["id"] for tc in reruns],
+        )
+        for tc in reruns:
+            name = tc["function"]["name"]
+            arguments = tc["function"]["arguments"]
+            yield ToolCallRequest(id=tc["id"], name=name, arguments=arguments)
+            result = await self._execute_tool_safe(tc["id"], name, arguments)
+            yield ToolResultEvent(
+                id=tc["id"], name=name, result=result, arguments=arguments
+            )
+            content, attachments = self._gate_tool_attachments(result)
+            self._history.record_result(tc["id"], content, attachments)
+        # Results replaced messages that may already be on disk.
+        self._session_full_rewrite_needed = True
 
     async def _conversation_loop(self) -> AsyncIterator[AgentEvent]:
         while self._iteration_count < self.config.llm.max_iterations:
@@ -1421,16 +1496,20 @@ class Agent:
         try:
             await asyncio.to_thread(self._save_session_sync)
         except Exception as e:  # noqa: BLE001
-            self.trace.log(
-                "session_save_error",
-                turn=self._turn_count,
-                iteration=self._iteration_count,
-                phase="checkpoint",
-                error=str(e),
-            )
-            if not self._checkpoint_failed_this_turn:
-                self._checkpoint_failed_this_turn = True
-                warnings.warn(f"Failed to save session: {e}", stacklevel=2)
+            self._report_save_error("checkpoint", e)
+
+    def _report_save_error(self, phase: str, error: Exception) -> None:
+        """Trace a mid-turn persistence failure; warn at most once per turn."""
+        self.trace.log(
+            "session_save_error",
+            turn=self._turn_count,
+            iteration=self._iteration_count,
+            phase=phase,
+            error=str(error),
+        )
+        if not self._checkpoint_failed_this_turn:
+            self._checkpoint_failed_this_turn = True
+            warnings.warn(f"Failed to save session: {error}", stacklevel=3)
 
     def persist_meta(self) -> None:
         """Persist a meta change now, as an appended ``meta_patch`` line.

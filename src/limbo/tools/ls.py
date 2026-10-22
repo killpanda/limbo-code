@@ -12,6 +12,7 @@ MAX_ENTRIES = 500
 
 class LsTool(BaseTool):
     name = "ls"
+    replay = "safe"
     description = (
         "List directory contents. Includes dotfiles. Returns up to "
         f"{MAX_ENTRIES} entries by default (raise `limit` for more; a "

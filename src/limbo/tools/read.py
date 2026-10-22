@@ -48,6 +48,7 @@ def detect_image_mime(path: Path) -> str | None:
 
 class ReadTool(BaseTool):
     name = "read"
+    replay = "safe"
     description = (
         "Read the contents of a file. Supports text files and images "
         "(jpg, png, gif, webp, bmp). Images are sent as attachments. "

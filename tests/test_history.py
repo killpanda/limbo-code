@@ -2,7 +2,14 @@
 
 from __future__ import annotations
 
-from limbo.history import ToolHistory, repair
+from limbo.history import (
+    INTERRUPTED_CONTENT,
+    NOT_STARTED_CONTENT,
+    PARTIAL_CONTENT,
+    ToolHistory,
+    recover,
+    repair,
+)
 from limbo.models import Message
 
 
@@ -92,3 +99,67 @@ def test_record_result_replaces_attachments():
 
     assert history.messages[0].content == "new"
     assert history.messages[0].attachments == [attachment]
+
+
+def _call(call_id: str, name: str) -> dict:
+    return {
+        "id": call_id,
+        "type": "function",
+        "function": {"name": name, "arguments": {}},
+    }
+
+
+def test_recover_classifies_dangling_calls_by_intent_and_policy():
+    messages = [
+        Message(role="user", content="go"),
+        Message(
+            role="assistant",
+            content=None,
+            tool_calls=[
+                _call("r1", "read"),
+                _call("b1", "bash"),
+                _call("w1", "write"),
+            ],
+        ),
+    ]
+
+    recovery = recover(
+        messages, started={"r1", "b1"}, is_safe=lambda name: name == "read"
+    )
+
+    contents = {
+        m.tool_call_id: m.content for m in recovery.messages if m.role == "tool"
+    }
+    assert contents == {
+        # Safe: queued for re-run; the placeholder stands until it runs.
+        "r1": INTERRUPTED_CONTENT,
+        # Intent committed, side effects possible.
+        "b1": PARTIAL_CONTENT,
+        # No intent: the tool never started.
+        "w1": NOT_STARTED_CONTENT,
+    }
+    assert [tc["id"] for tc in recovery.rerun] == ["r1"]
+
+
+def test_recover_without_intent_info_keeps_legacy_placeholder():
+    messages = [Message(role="user", content="go"), assistant_with_calls("c1")]
+
+    recovery = recover(messages, started=None)
+
+    assert recovery.messages[-1].content == INTERRUPTED_CONTENT
+    assert recovery.rerun == []
+
+
+def test_recover_reruns_nothing_that_already_has_a_result():
+    messages = [
+        assistant_with_calls("c1", "c2"),
+        Message(role="tool", content="done", tool_call_id="c1"),
+    ]
+
+    recovery = recover(messages, started=set(), is_safe=lambda _name: True)
+
+    assert [tc["id"] for tc in recovery.rerun] == ["c2"]
+    assert [m.tool_call_id for m in recovery.messages if m.role == "tool"] == [
+        "c1",
+        "c2",
+    ]

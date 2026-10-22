@@ -18,6 +18,7 @@ MAX_MATCHES = 100
 
 class GrepTool(BaseTool):
     name = "grep"
+    replay = "safe"
     description = (
         "Search file contents for a pattern. Requires ripgrep (rg) on PATH. "
         "Respects .gitignore, glob filters, and context lines."
