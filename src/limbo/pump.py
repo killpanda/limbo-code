@@ -139,8 +139,14 @@ class TurnPump:
         return self._agent.session_meta.goal
 
     def _save_state(self, state: GoalState) -> None:
-        # Persisted via the session meta on the agent's next per-turn save.
+        # Persisted at once as a meta patch, so a crash between rounds
+        # (e.g. mid-verify) keeps the goal's progress.
         self._agent.session_meta.goal = state
+        try:
+            self._agent.persist_meta()
+        except OSError as e:
+            # The turn-end save retries (meta drift forces a full rewrite).
+            self._agent.trace.log("session_save_error", phase="meta", error=str(e))
 
     def set_goal(self, text: str, verify_command: str = "") -> GoalState:
         state = GoalState(

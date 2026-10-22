@@ -756,6 +756,124 @@ async def test_agent_resume_repairs_dangling_tool_calls(workdir):
 
 
 @pytest.mark.asyncio
+async def test_agent_resume_reruns_safe_calls_and_flags_unsafe_ones(workdir):
+    from limbo.history import NOT_STARTED_CONTENT, PARTIAL_CONTENT
+    from limbo.sessions import (
+        SessionMeta,
+        append_session_records,
+        load_session_full,
+        save_session,
+        tool_intent_record,
+    )
+
+    (workdir / "notes.txt").write_text("hello from disk\n")
+    session_dir = workdir / "sessions"
+    session_dir.mkdir()
+    path = session_dir / "crashed.jsonl"
+
+    def call(call_id: str, name: str, arguments: dict) -> dict:
+        return {
+            "id": call_id,
+            "type": "function",
+            "function": {"name": name, "arguments": arguments},
+        }
+
+    save_session(
+        path,
+        SessionMeta(id="crashed", tool_intents=True),
+        [
+            Message(role="user", content="look and change"),
+            Message(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    call("r1", "read", {"path": "notes.txt"}),
+                    call("b1", "bash", {"command": "make deploy"}),
+                    call("w1", "write", {"path": "x.txt", "content": "x"}),
+                ],
+            ),
+        ],
+    )
+    # The process died after read and bash started, before write did.
+    append_session_records(
+        path,
+        [tool_intent_record("r1", "read", "safe"), tool_intent_record("b1", "bash", "unsafe")],
+    )
+
+    agent = Agent(
+        config=Config(),
+        llm_client=FakeLLMClient([[TextChunk(text="ok")]]),
+        workdir=workdir,
+        session_dir=session_dir,
+        resume=path,
+    )
+    events = await _collect(agent.run("continue"))
+
+    reruns = [e for e in events if isinstance(e, ToolResultEvent)]
+    assert [e.id for e in reruns] == ["r1"]
+    sent = agent.llm_client.calls[0][0]
+    contents = {m.tool_call_id: m.content for m in sent if m.role == "tool"}
+    assert "hello from disk" in (contents["r1"] or "")
+    assert contents["b1"] == PARTIAL_CONTENT
+    assert contents["w1"] == NOT_STARTED_CONTENT
+    # The unsafe calls never ran again.
+    assert not (workdir / "x.txt").exists()
+    # The re-run result is what the session file now holds.
+    on_disk = load_session_full(path)
+    disk_contents = {
+        m.tool_call_id: m.content for m in on_disk.messages if m.role == "tool"
+    }
+    assert "hello from disk" in (disk_contents["r1"] or "")
+    trace = read_agent_trace(agent)
+    assert any(
+        r["type"] == "tool_recovery" and r["rerun_tool_call_ids"] == ["r1"]
+        for r in trace
+    )
+
+
+@pytest.mark.asyncio
+async def test_agent_resume_of_legacy_session_marks_it_journaled(workdir):
+    from limbo.history import INTERRUPTED_CONTENT
+    from limbo.sessions import SessionMeta, load_session_full, save_session
+
+    session_dir = workdir / "sessions"
+    session_dir.mkdir()
+    path = session_dir / "legacy.jsonl"
+    save_session(
+        path,
+        SessionMeta(id="legacy"),
+        [
+            Message(role="user", content="go"),
+            Message(
+                role="assistant",
+                content=None,
+                tool_calls=[
+                    {
+                        "id": "b1",
+                        "type": "function",
+                        "function": {"name": "bash", "arguments": {"command": "ls"}},
+                    }
+                ],
+            ),
+        ],
+    )
+
+    agent = Agent(
+        config=Config(),
+        llm_client=FakeLLMClient([[TextChunk(text="ok")]]),
+        workdir=workdir,
+        session_dir=session_dir,
+        resume=path,
+    )
+    await _collect(agent.run("continue"))
+
+    sent = agent.llm_client.calls[0][0]
+    # No intent journal: the fate of the call is unknown.
+    assert [m.content for m in sent if m.role == "tool"] == [INTERRUPTED_CONTENT]
+    assert load_session_full(path).meta.tool_intents is True
+
+
+@pytest.mark.asyncio
 async def test_agent_stores_reasoning_on_assistant_message(workdir):
     from limbo.agent import ThinkingDelta
     from limbo.models import ThinkingChunk
@@ -829,6 +947,7 @@ async def test_agent_trace_records_full_turn(workdir):
     start = records[0]
     assert start["config"]["model"] == "deepseek-v4-pro"
     assert start["resumed"] is False
+    assert start["trace_schema"] == 2
     # The API key must never appear in the trace.
     assert "api_key" not in json.dumps(records)
 
@@ -836,6 +955,7 @@ async def test_agent_trace_records_full_turn(workdir):
 
     request = records[2]
     assert request["turn"] == 1 and request["iteration"] == 1
+    assert request["attempt"] == 1
     assert request["body"]["model"] == "fake-model"
     assert request["body"]["messages"][0]["role"] == "system"
     assert request["body"]["tools"]  # full tool definitions included
@@ -844,17 +964,24 @@ async def test_agent_trace_records_full_turn(workdir):
     assert response["usage"] == usage
     assert response["cached_tokens"] == 80
     assert response["finish_reason"] == "tool_calls"
-    assert response["tool_calls"] == [{"id": "c1", "name": "read"}]
+    assert response["tool_calls"] == [
+        {"id": "c1", "name": "read", "arguments": {"path": "main.py"}}
+    ]
+    assert response["content"] == ""
+    assert response["started_at"] <= response["ts"]
+    assert records[7]["content"] == "done"
 
     tool_call, tool_result = records[4], records[5]
     assert tool_call["name"] == "read"
     assert tool_call["arguments"] == {"path": "main.py"}
     assert tool_result["success"] is True
     assert tool_result["duration"] >= 0
+    assert tool_result["started_at"] <= tool_result["ts"]
     assert "x = 1" in tool_result["output"]
 
     turn_end = records[-1]
     assert turn_end["status"] == "completed"
+    assert turn_end["started_at"] <= records[1]["ts"]
     assert turn_end["iterations"] == 2
 
 
@@ -1587,6 +1714,90 @@ async def test_auto_compaction_summary_failure_keeps_history_and_guards_turn(
     # The guard resets on the next user turn (and fails again here).
     await _collect(agent.run("again"))
     assert client.summary_attempts == 2
+
+
+class _OverflowingClient:
+    """Rejects the main request with a context-overflow error ``overflows``
+    times; summary requests (no tools) succeed."""
+
+    def __init__(self, overflows: int):
+        self.calls = []
+        self.overflows = overflows
+
+    async def chat(self, messages, tools, on_request=None):
+        self.calls.append((messages, tools))
+        if not tools:
+            yield TextChunk(text="SUMMARY")
+            yield CompletionMeta()
+            return
+        if self.overflows:
+            self.overflows -= 1
+            raise LLMHttpError(400, "Error code: 400 - prompt is too long: 250000 tokens")
+        yield TextChunk(text="final")
+        yield CompletionMeta(usage={"prompt_tokens": 100})
+
+
+@pytest.mark.asyncio
+async def test_context_overflow_compacts_and_retries_once(workdir):
+    client = _OverflowingClient(overflows=1)
+    agent = Agent(
+        config=_compact_cfg(),
+        llm_client=client,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    _seed_history(agent)
+
+    events = await _collect(agent.run("x" * 2000))
+
+    compacted = [e for e in events if isinstance(e, CompactionEvent)]
+    assert [(e.compacted, e.trigger) for e in compacted] == [(True, "overflow")]
+    assert not [e for e in events if isinstance(e, ErrorEvent)]
+    assert "final" in "".join(e.text for e in events if isinstance(e, TextDelta))
+    # Rejected request, summary, then the resend with the compacted history.
+    assert [bool(tools) for _, tools in client.calls] == [True, False, True]
+    assert client.calls[2][0][1].content.startswith(f"<{SUMMARY_TAG}>")
+    trace = read_agent_trace(agent)
+    assert any(
+        r["type"] == "llm_error" and r["context_overflow"] for r in trace
+    )
+
+
+@pytest.mark.asyncio
+async def test_context_overflow_twice_in_a_turn_surfaces_error(workdir):
+    client = _OverflowingClient(overflows=2)
+    agent = Agent(
+        config=_compact_cfg(),
+        llm_client=client,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    _seed_history(agent)
+
+    events = await _collect(agent.run("x" * 2000))
+
+    errors = [e for e in events if isinstance(e, ErrorEvent)]
+    assert len(errors) == 1 and "上下文超出" in errors[0].message
+    # Exactly one compaction attempt, then the second overflow surfaced.
+    assert sum(1 for _, tools in client.calls if not tools) == 1
+
+
+@pytest.mark.asyncio
+async def test_context_overflow_without_compactable_history_surfaces_error(workdir):
+    client = _OverflowingClient(overflows=1)
+    agent = Agent(
+        config=_compact_cfg(),
+        llm_client=client,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    events = await _collect(agent.run("hi"))
+
+    compacted = [e for e in events if isinstance(e, CompactionEvent)]
+    assert compacted and not compacted[0].compacted
+    assert [e for e in events if isinstance(e, ErrorEvent)]
+    assert all(tools for _, tools in client.calls)
 
 
 @pytest.mark.asyncio
@@ -2395,3 +2606,154 @@ def test_agent_close_is_idempotent(workdir):
     )
     agent.close()
     agent.close()  # second close at teardown must not raise
+
+
+# --- durable progress: mid-turn checkpoints ------------------------------
+
+
+class _ProcessKilled(BaseException):
+    """Stands in for kill -9: escapes every ``except Exception``."""
+
+
+@pytest.mark.asyncio
+async def test_checkpoints_persist_progress_before_a_crash(workdir):
+    # The process dies during the second LLM request of a turn. The turn-end
+    # save never runs (kill -9 skips finally-blocks); the checkpoints alone
+    # must have put the user input, the tool-calling response, and its
+    # result on disk.
+    (workdir / "main.py").write_text("x = 1\n")
+
+    class CrashingLLM(FakeLLMClient):
+        async def chat(self, messages, tools, on_request=None):
+            if self.calls:
+                raise _ProcessKilled
+            async for event in super().chat(messages, tools, on_request):
+                yield event
+
+    fake_llm = CrashingLLM(
+        [[ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"})]]
+    )
+    agent = Agent(
+        config=Config(),
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    async def skip_turn_end_save():
+        pass
+
+    agent._save_session = skip_turn_end_save
+    with pytest.raises(_ProcessKilled):
+        await _collect(agent.run("read main.py"))
+
+    from limbo.sessions import load_session
+
+    _, messages, _ = load_session(agent.session_path)
+    roles = [m.role for m in messages]
+    assert roles == ["system", "user", "assistant", "tool"]
+    assert messages[1].content == "read main.py"
+    assert messages[2].tool_calls[0]["id"] == "c1"
+    assert messages[3].tool_call_id == "c1"
+    assert "x = 1" in (messages[3].content or "")
+
+
+@pytest.mark.asyncio
+async def test_tool_calls_are_on_disk_before_tools_run(workdir):
+    seen_on_disk: list[list[str]] = []
+    seen_intents: list[tuple[str, str]] = []
+
+    class SpyTool:
+        name = "spy"
+        description = "records what the session file holds"
+        parameters = {"type": "object", "properties": {}}
+
+        def execute(self, arguments):
+            from limbo.sessions import load_session_full
+
+            loaded = load_session_full(agent.session_path)
+            seen_on_disk.append([m.role for m in loaded.messages])
+            seen_intents.extend((i.call_id, i.replay) for i in loaded.intents)
+            return ToolResult(success=True, output="ok")
+
+        def cancel(self):
+            pass
+
+    fake_llm = FakeLLMClient(
+        [
+            [ToolCallEvent(id="c1", name="spy", arguments={})],
+            [TextChunk(text="done")],
+        ]
+    )
+    agent = Agent(
+        config=Config(),
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    agent.registry._tools["spy"] = SpyTool()
+
+    await _collect(agent.run("go"))
+
+    assert seen_on_disk == [["system", "user", "assistant"]]
+    # The intent is committed before the effect (unknown policy: unsafe).
+    assert seen_intents == [("c1", "unsafe")]
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_failure_warns_once_and_turn_completes(workdir):
+    fake_llm = FakeLLMClient(
+        [
+            [ToolCallEvent(id="c1", name="ls", arguments={})],
+            [TextChunk(text="done")],
+        ]
+    )
+    agent = Agent(
+        config=Config(),
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    agent._save_session_sync = lambda: (_ for _ in ()).throw(OSError("disk full"))
+
+    with pytest.warns(UserWarning, match="Failed to save session") as record:
+        events = await _collect(agent.run("hi"))
+
+    assert any(isinstance(e, TextDelta) and e.text == "done" for e in events)
+    # One warning from the checkpoints (deduplicated per turn) plus the
+    # turn-end save's own warning.
+    assert len([w for w in record if "Failed to save session" in str(w.message)]) == 2
+    errors = [
+        r for r in read_agent_trace(agent)
+        if r["type"] == "session_save_error" and r.get("phase") == "checkpoint"
+    ]
+    assert len(errors) >= 3
+
+
+@pytest.mark.asyncio
+async def test_persist_meta_appends_patch_without_rewrite(workdir, monkeypatch):
+    from limbo.goal import STATUS_ACTIVE, GoalState
+    from limbo.sessions import load_session
+
+    agent = Agent(
+        config=Config(),
+        llm_client=FakeLLMClient([[TextChunk(text="hello")]]),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    agent.persist_meta()  # no file yet: a no-op, the first save writes meta
+    assert not agent.session_path.exists()
+    await _collect(agent.run("hi"))
+
+    replaced: list[object] = []
+    monkeypatch.setattr(os, "replace", lambda s, d: replaced.append((s, d)))
+    agent.session_meta.goal = GoalState(status=STATUS_ACTIVE, text="g", max_rounds=4)
+    agent.persist_meta()
+    agent.persist_meta()  # unchanged: nothing more is written
+    agent._save_session_sync()  # meta already on disk: append path
+
+    assert replaced == []
+    lines = agent.session_path.read_text(encoding="utf-8").splitlines()
+    assert sum(json.loads(line).get("type") == "meta_patch" for line in lines) == 1
+    meta, _, _ = load_session(agent.session_path)
+    assert meta.goal is not None and meta.goal.text == "g"

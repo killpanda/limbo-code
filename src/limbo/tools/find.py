@@ -16,6 +16,7 @@ MAX_RESULTS = 1000
 
 class FindTool(BaseTool):
     name = "find"
+    replay = "safe"
     description = (
         "Find files by glob pattern. Respects the root .gitignore only. "
         "The built-in matcher is minimal and does not support nested .gitignore "

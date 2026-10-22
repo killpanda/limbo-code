@@ -14,7 +14,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from limbo.models import ToolResult
 
@@ -24,6 +24,9 @@ MAX_OUTPUT_BYTES = 512 * 1024
 # with pi's DEFAULT_MAX_LINES / DEFAULT_MAX_BYTES.
 DEFAULT_MAX_LINES = 2000
 DEFAULT_MAX_BYTES = 50 * 1024  # 50 KB
+
+
+ReplayPolicy = Literal["safe", "unsafe"]
 
 
 class ToolError(Exception):
@@ -40,6 +43,11 @@ class BaseTool(ABC):
     name: str
     description: str
     parameters: dict[str, Any]
+    # Crash-recovery policy (pi-durable's tool replay): a call interrupted
+    # by a crash is re-run on resume only when it is "safe" — read-only, so
+    # running it twice changes nothing. Everything else defaults to
+    # "unsafe": the model is told it may have partially run instead.
+    replay: ReplayPolicy = "unsafe"
 
     def __init__(self, workdir: Path):
         self.workdir = workdir.resolve()

@@ -19,7 +19,8 @@ proposals should name modules with these terms.
 ## Conversation
 
 - **Turn** — one user input through the agent loop until a tool-call-free
-  response (or max_iterations). Turns are the save/trace unit.
+  response (or max_iterations). Turns are the trace unit; the session
+  file is checkpointed at every consistency point inside a turn.
 - **Turn pump** — the non-UI module that runs turns back-to-back
   (`pump.py`, `TurnPump`): pulls events out of the lazy `Agent.run()`
   stream, owns the single-flight busy flag (turns and `/compact`

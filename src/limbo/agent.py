@@ -7,6 +7,7 @@ import json
 import os
 import platform
 import secrets
+import threading
 import time
 import traceback
 import warnings
@@ -27,10 +28,10 @@ from limbo.compaction import (
 )
 from limbo.config import Config
 from limbo.history import ToolHistory
-from limbo.history import repair as repair_history
+from limbo.history import recover as recover_history
 from limbo.llm.catalog import resolve_base_url, resolve_model
 from limbo.llm.client import LLMClient, RequestHook
-from limbo.llm.retry import friendly_message
+from limbo.llm.retry import friendly_message, is_context_overflow
 from limbo.llm.usage import PromptSizeEstimator, estimate_tokens, normalize_usage
 from limbo.models import (
     Attachment,
@@ -46,13 +47,16 @@ from limbo.sessions import (
     CompactionRecord,
     SessionMeta,
     append_session_messages,
+    append_session_records,
     derive_title,
-    load_session,
+    load_session_full,
+    meta_patch_record,
     save_session,
+    tool_intent_record,
 )
 from limbo.steer import SteerItem, SteerQueue
 from limbo.tools.registry import ToolRegistry
-from limbo.trace import TraceLogger, trace_path_for
+from limbo.trace import TRACE_SCHEMA, TraceLogger, trace_path_for, utc_now_iso
 
 # Consecutive length-stop rejections tolerated before the turn is aborted.
 # A truncated response whose tool calls were refused is almost always the
@@ -107,7 +111,7 @@ class CompactionEvent:
     """Outcome of one compaction attempt (auto at loop top, or /compact)."""
 
     compacted: bool
-    trigger: str  # "auto" | "manual"
+    trigger: str  # "auto" | "manual" | "overflow"
     before_tokens: int = 0
     after_estimate: int | None = None
     summary_chars: int = 0
@@ -227,21 +231,47 @@ class Agent:
         self._session_saved_count = 0
         self._session_saved_meta: str | None = None
         self._session_full_rewrite_needed = False
+        # Serializes session-file writes: checkpoints run in a worker thread
+        # while meta patches (goal changes) are written from the loop.
+        self._session_io_lock = threading.Lock()
+        self._checkpoint_failed_this_turn = False
+        self._overflow_recovered_this_turn = False
         self._auto_compaction_failed_this_turn = False
         self._auto_compact_noop_notified = False
 
         self._session_dir = session_dir or Path.home() / ".limbo" / "sessions"
+        # Read-only tool calls interrupted by a crash, re-run at the start
+        # of the next turn (their placeholder result is then replaced).
+        self._pending_reruns: list[dict[str, Any]] = []
         if resume is not None:
-            self._meta, history, self._compactions = load_session(resume)
+            loaded = load_session_full(resume)
+            self._meta, history, self._compactions = (
+                loaded.meta,
+                loaded.messages,
+                loaded.compactions,
+            )
             self._session_file = resume
-            self.messages.extend(repair_history(history))
-            # repair_history may have inserted placeholder tool messages, and
+            recovery = recover_history(
+                history,
+                started=(
+                    {i.call_id for i in loaded.intents}
+                    if self._meta.tool_intents
+                    else None
+                ),
+                is_safe=lambda name: self.registry.replay_policy(name) == "safe",
+            )
+            self.messages.extend(recovery.messages)
+            self._pending_reruns = recovery.rerun
+            # From here on every call is journaled, so a later crash can be
+            # recovered precisely even if this session predates intents.
+            self._meta.tool_intents = True
+            # recover_history may have inserted placeholder tool messages, and
             # load_session re-applied compaction: the in-memory history no
             # longer matches the file byte-for-byte, so the first save after
             # resume is a full rewrite (then the append path takes over).
             self._session_saved_count = len(self.messages)
             self._session_full_rewrite_needed = True
-            # Restore the presentation mode: repair_history dropped the
+            # Restore the presentation mode: recover_history dropped the
             # loaded system message, so rebuild the fresh one in code mode
             # when the session was saved with it on.
             if self._meta.code_mode:
@@ -265,6 +295,7 @@ class Agent:
                 workdir=str(workdir.resolve()),
                 model=config.llm.model,
                 created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                tool_intents=True,
             )
 
         # Trace log: full-fidelity JSONL record of the run, kept separate from
@@ -273,8 +304,10 @@ class Agent:
         self.trace = TraceLogger(trace_path_for(self._session_file))
         self._turn_count = 0
         self._turn_start: float | None = None
+        self._turn_started_at: str | None = None
         self.trace.log(
             "session_start",
+            trace_schema=TRACE_SCHEMA,
             session_id=self._meta.id,
             workdir=str(workdir.resolve()),
             resumed=resume is not None,
@@ -567,6 +600,7 @@ class Agent:
         self.trace.log(
             "turn_end",
             turn=self._turn_count,
+            started_at=self._turn_started_at,
             duration=time.monotonic() - self._turn_start,
             iterations=self._iteration_count,
             status=status,
@@ -581,18 +615,23 @@ class Agent:
         self._consecutive_length_stops = 0
         self._auto_compaction_failed_this_turn = False
         self._auto_compact_noop_notified = False
+        self._checkpoint_failed_this_turn = False
+        self._overflow_recovered_this_turn = False
         # RFC LIM-53: an interrupt requested while idle must not leak into
         # this turn (one of the two reset points; compact() is the other).
         self._interrupt_requested = False
         self._turn_interrupted = False
         self._turn_count += 1
         self._turn_start = time.monotonic()
+        self._turn_started_at = utc_now_iso()
 
         # Fallback drain (RFC LIM-20): leftovers from a previous turn (error
         # exit, max-iterations cancellation, or the exit-window race) are
         # injected BEFORE this turn's input so submission order is preserved.
         for item in self.drain_steer():
             yield self._inject_steer(item, followup=True)
+        async for event in self._rerun_interrupted():
+            yield event
 
         content, images = self._build_user_content(user_input, attachments or [])
         self.messages.append(
@@ -635,6 +674,7 @@ class Agent:
         arguments: dict[str, Any],
     ) -> ToolResult:
         """Execute a tool with full trace logging. Re-raises on crash."""
+        await self._commit_intent(call_id, name)
         self.trace.log(
             "tool_call",
             turn=self._turn_count,
@@ -643,6 +683,7 @@ class Agent:
             name=name,
             arguments=arguments,
         )
+        started_at = utc_now_iso()
         start = time.monotonic()
         try:
             result = await self.registry.execute(name, arguments)
@@ -657,6 +698,7 @@ class Agent:
                 error=f"Tool error: {e}",
                 exception_type=type(e).__name__,
                 traceback=traceback.format_exc(),
+                started_at=started_at,
                 duration=time.monotonic() - start,
             )
             raise
@@ -669,9 +711,59 @@ class Agent:
             success=result.success,
             output=result.output,
             error=result.error,
+            started_at=started_at,
             duration=time.monotonic() - start,
         )
         return result
+
+    async def _commit_intent(self, call_id: str, name: str) -> None:
+        """Journal a tool call before it runs (pi-durable's effect sandwich).
+
+        On resume, a dangling call with a committed intent may have
+        partially run, one without never started. Best effort: a failed
+        write is reported like a failed checkpoint and the tool still runs.
+        """
+        record = tool_intent_record(
+            call_id, name, self.registry.replay_policy(name)
+        )
+
+        def _sync() -> None:
+            with self._session_io_lock:
+                append_session_records(self._session_file, [record])
+
+        try:
+            await asyncio.to_thread(_sync)
+        except Exception as e:  # noqa: BLE001
+            self._report_save_error("intent", e)
+
+    async def _rerun_interrupted(self) -> AsyncIterator[AgentEvent]:
+        """Re-run read-only calls a crash interrupted (resume only).
+
+        Their placeholder results were inserted by recover_history; the
+        real result replaces the placeholder in place, so history order is
+        unchanged. Unsafe calls are never re-run — the model was told they
+        may have partially run and decides itself.
+        """
+        reruns, self._pending_reruns = self._pending_reruns, []
+        if not reruns:
+            return
+        self.trace.log(
+            "tool_recovery",
+            turn=self._turn_count,
+            rerun_tool_call_ids=[tc["id"] for tc in reruns],
+        )
+        for tc in reruns:
+            name = tc["function"]["name"]
+            arguments = tc["function"]["arguments"]
+            yield ToolCallRequest(id=tc["id"], name=name, arguments=arguments)
+            result = await self._execute_tool_safe(tc["id"], name, arguments)
+            yield ToolResultEvent(
+                id=tc["id"], name=name, result=result, arguments=arguments
+            )
+            content, attachments = self._gate_tool_attachments(result)
+            self._history.record_result(tc["id"], content, attachments)
+        # Results replaced messages that may already be on disk.
+        self._session_full_rewrite_needed = True
 
     async def _conversation_loop(self) -> AsyncIterator[AgentEvent]:
         while self._iteration_count < self.config.llm.max_iterations:
@@ -717,6 +809,9 @@ class Agent:
             # is in flight — the same safety argument as loop-top compaction.
             for item in self.drain_steer():
                 yield self._inject_steer(item, followup=False)
+            # Durable progress: the user input, injected steers, and any
+            # compaction above are on disk before the request goes out.
+            await self._checkpoint()
             try:
                 async for event in self._call_llm():
                     yield event
@@ -728,9 +823,28 @@ class Agent:
                     error=str(e),
                     exception_type=type(e).__name__,
                     traceback=traceback.format_exc(),
+                    context_overflow=is_context_overflow(e),
                 )
+                if is_context_overflow(e) and not self._overflow_recovered_this_turn:
+                    # pi-durable's overflow recovery: compact, then resend
+                    # once. A second overflow in the same turn surfaces.
+                    self._overflow_recovered_this_turn = True
+                    compacted = False
+                    async for event in self.compact(trigger="overflow"):
+                        if isinstance(event, CompactionEvent):
+                            compacted = event.compacted
+                        yield event
+                    if compacted and not self._turn_interrupted:
+                        # The rejected request does not use up an iteration.
+                        self._iteration_count -= 1
+                        continue
+                    if self._turn_interrupted:
+                        break
                 yield ErrorEvent(message=friendly_message(e) or f"LLM error: {e}")
                 return
+            # The response (and its tool calls) is on disk before any tool
+            # runs, so a crash mid-batch leaves the calls for repair.
+            await self._checkpoint()
 
             last = self.messages[-1]
             if not last.tool_calls:
@@ -836,6 +950,7 @@ class Agent:
                 yield ToolCallRequest(id=tc["id"], name=name, arguments=arguments)
             async for event in self._execute_tool_calls(last):
                 yield event
+            await self._checkpoint()
             if self._turn_interrupted:
                 # RFC LIM-53: batch results (real or placeholder) are all
                 # recorded; end the turn instead of starting another call.
@@ -1058,12 +1173,18 @@ class Agent:
         assistant_signature: str | None = None
         tool_calls: list[dict[str, Any]] = []
         meta: CompletionMeta | None = None
+        started_at = utc_now_iso()
+        attempts = 0
 
         def _trace_request(body: dict[str, Any]) -> None:
+            # Called once per HTTP attempt: retries share the iteration.
+            nonlocal attempts
+            attempts += 1
             self.trace.log(
                 "llm_request",
                 turn=self._turn_count,
                 iteration=self._iteration_count,
+                attempt=attempts,
                 body=body,
             )
 
@@ -1109,7 +1230,10 @@ class Agent:
                     Message(role="assistant", content=assistant_content)
                 )
             event = self._mark_interrupted(
-                "llm_stream", content_chars=len(assistant_content)
+                "llm_stream",
+                content_chars=len(assistant_content),
+                content=assistant_content,
+                reasoning=assistant_reasoning,
             )
             if event is not None:
                 yield event
@@ -1125,6 +1249,7 @@ class Agent:
             "llm_response",
             turn=self._turn_count,
             iteration=self._iteration_count,
+            started_at=started_at,
             duration=meta.duration if meta else None,
             ttft=meta.ttft if meta else None,
             finish_reason=meta.finish_reason if meta else None,
@@ -1132,8 +1257,14 @@ class Agent:
             cached_tokens=totals.cached_tokens,
             content_chars=len(assistant_content),
             reasoning_chars=len(assistant_reasoning),
+            content=assistant_content,
+            reasoning=assistant_reasoning,
             tool_calls=[
-                {"id": tc["id"], "name": tc["function"]["name"]}
+                {
+                    "id": tc["id"],
+                    "name": tc["function"]["name"],
+                    "arguments": tc["function"]["arguments"],
+                }
                 for tc in tool_calls
             ],
         )
@@ -1161,12 +1292,18 @@ class Agent:
     async def _generate_summary(self, prompt: list[Message]) -> str:
         """One-shot summarization call on the current client (no tools)."""
 
+        started_at = utc_now_iso()
+        attempts = 0
+
         def _trace_request(body: dict[str, Any]) -> None:
+            nonlocal attempts
+            attempts += 1
             self.trace.log(
                 "llm_request",
                 turn=self._turn_count,
                 iteration=self._iteration_count,
                 kind="compaction",
+                attempt=attempts,
                 body=body,
             )
 
@@ -1186,18 +1323,22 @@ class Agent:
             turn=self._turn_count,
             iteration=self._iteration_count,
             kind="compaction",
+            started_at=started_at,
             duration=meta.duration if meta else None,
             finish_reason=meta.finish_reason if meta else None,
             usage=meta.usage if meta else None,
             content_chars=len(text),
+            content=text,
         )
         return text
 
     async def compact(self, trigger: str = "auto") -> AsyncIterator[AgentEvent]:
         """Compact history: summarize the old region, keep the recent tail.
 
-        Shared by the loop-top auto trigger (``trigger="auto"``) and the
-        ``/compact`` slash command (``trigger="manual"``). On any failure
+        Shared by the loop-top auto trigger (``trigger="auto"``), the
+        ``/compact`` slash command (``trigger="manual"``), and the recovery
+        from a provider's context-overflow error (``trigger="overflow"``,
+        followed by one resend of the request). On any failure
         the history is left untouched; an auto failure suppresses further
         auto attempts for the rest of the turn (the guard resets in
         :meth:`run`), while ``/compact`` can always be retried by hand.
@@ -1220,6 +1361,8 @@ class Agent:
                     return
                 self._auto_compact_noop_notified = True
                 reason = "最近消息过大或历史太短，无法安全切分保留边界，本次跳过自动压缩"
+            elif trigger == "overflow":
+                reason = "最近消息过大或历史太短，无法安全切分保留边界，无法通过压缩腾出上下文"
             else:
                 reason = "历史太短，无需压缩"
             yield CompactionEvent(
@@ -1235,6 +1378,7 @@ class Agent:
             self._meta.title = derive_title(self.messages)
         to_summarize = self.messages[1:split]
         prompt = build_summary_prompt(to_summarize, self._previous_summary)
+        compaction_started_at = utc_now_iso()
         start = time.monotonic()
         summary = ""
         error: str | None = None
@@ -1310,6 +1454,7 @@ class Agent:
             tokens_after_estimate=after,
             split_index=split,
             summary_chars=len(summary),
+            started_at=compaction_started_at,
             duration=time.monotonic() - start,
         )
         yield CompactionEvent(
@@ -1328,26 +1473,35 @@ class Agent:
         Full rewrite happens when the file does not exist yet (first save),
         when compaction reshaped the history, when a resumed session's
         repaired history must be re-synced, or when the meta record changed
-        (title, code_mode, goal, ...) — the meta line is only written by a
-        full rewrite, so any meta drift forces one. The meta snapshot
-        comparison replaces ad-hoc dirty flags, so future meta fields (e.g.
-        the LIM-40 goal state mutated by TurnPump._save_state) are covered
-        automatically. Otherwise only the messages appended since the last
-        save are written — long sessions no longer rewrite megabytes every
-        turn.
+        (title, code_mode, goal, ...) without having been patched in via
+        :meth:`persist_meta` — the meta line is only written by a full
+        rewrite. The meta snapshot comparison replaces ad-hoc dirty flags,
+        so future meta fields are covered automatically. Otherwise only the
+        messages appended since the last save are written — long sessions
+        no longer rewrite megabytes every turn.
         """
         # Keep the presentation mode in sync before snapshotting the meta.
         self._meta.code_mode = self.code_mode
         if not self._meta.title:
             self._meta.title = derive_title(self.messages)
-        # updated_at is stamped by save_session (full rewrite) and refreshed
-        # in-memory on the append path; exclude it so the comparison below
-        # compares real meta content, not the always-moving timestamp.
-        meta_snapshot = json.dumps(
+        meta_snapshot = self._meta_snapshot()
+        with self._session_io_lock:
+            self._write_session_locked(meta_snapshot)
+
+    def _meta_snapshot(self) -> str:
+        """The meta content compared against what is on disk.
+
+        updated_at is stamped by save_session (full rewrite) and refreshed
+        in-memory on the append path; it is excluded so the comparison
+        sees real meta content, not the always-moving timestamp.
+        """
+        return json.dumps(
             self._meta.model_dump(exclude={"path", "updated_at"}),
             ensure_ascii=False,
             sort_keys=True,
         )
+
+    def _write_session_locked(self, meta_snapshot: str) -> None:
         if (
             self._session_full_rewrite_needed
             or meta_snapshot != self._session_saved_meta
@@ -1391,3 +1545,52 @@ class Agent:
             self._save_session_sync()
 
         await asyncio.to_thread(_sync)
+
+    async def _checkpoint(self) -> None:
+        """Persist history at a mid-turn consistency point.
+
+        Durable progress (pi-durable's "only committed state is visible"):
+        the loop calls this before each LLM request, after each response,
+        and after each tool batch, so a killed process loses at most the
+        in-flight step instead of the whole turn. Cheap in steady state —
+        an append of the new messages only. A failure never breaks the
+        turn: it is traced, warned once per turn, and retried at the next
+        checkpoint (a failed append already forces a full rewrite).
+        """
+        try:
+            await asyncio.to_thread(self._save_session_sync)
+        except Exception as e:  # noqa: BLE001
+            self._report_save_error("checkpoint", e)
+
+    def _report_save_error(self, phase: str, error: Exception) -> None:
+        """Trace a mid-turn persistence failure; warn at most once per turn."""
+        self.trace.log(
+            "session_save_error",
+            turn=self._turn_count,
+            iteration=self._iteration_count,
+            phase=phase,
+            error=str(error),
+        )
+        if not self._checkpoint_failed_this_turn:
+            self._checkpoint_failed_this_turn = True
+            warnings.warn(f"Failed to save session: {error}", stacklevel=3)
+
+    def persist_meta(self) -> None:
+        """Persist a meta change now, as an appended ``meta_patch`` line.
+
+        Used for state that must survive a crash before the next turn-end
+        save (the goal state written by ``TurnPump``). Appending avoids a
+        full rewrite; loading merges patches over the meta line. Before the
+        first save there is no file yet — the first save writes the meta.
+        """
+        if not self._session_file.exists():
+            return
+        self._meta.code_mode = self.code_mode
+        snapshot = self._meta_snapshot()
+        with self._session_io_lock:
+            if snapshot == self._session_saved_meta:
+                return
+            append_session_records(
+                self._session_file, [meta_patch_record(self._meta)]
+            )
+            self._session_saved_meta = snapshot

@@ -30,6 +30,12 @@ from typing import Any
 
 TRACE_SUFFIX = ".trace.jsonl"
 
+# Bumped when records gain fields a reader may rely on. 2 added
+# ``started_at`` on timed records, ``attempt`` on ``llm_request`` and the
+# response text (``content`` / ``reasoning`` / tool-call arguments) on
+# ``llm_response``. Readers fall back to ``ts - duration`` for older files.
+TRACE_SCHEMA = 2
+
 # How long close() waits for the writer thread to drain the queue before
 # giving up and closing the handle anyway (a stuck OS write must not hang
 # session teardown / app exit).
@@ -45,7 +51,8 @@ def trace_path_for(session_file: Path) -> Path:
     return session_file.parent / "traces" / f"{session_file.stem}{TRACE_SUFFIX}"
 
 
-def _utc_now_iso() -> str:
+def utc_now_iso() -> str:
+    """Wall-clock timestamp in the format every trace record uses."""
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds")
 
 
@@ -128,7 +135,7 @@ class TraceLogger:
         """Queue one event record. Never raises, never blocks on disk."""
         if self._closed:
             return
-        record = {"ts": _utc_now_iso(), "type": event_type, **fields}
+        record = {"ts": utc_now_iso(), "type": event_type, **fields}
         self._queue.put(record)
 
     def flush(self) -> None:

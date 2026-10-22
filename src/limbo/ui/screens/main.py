@@ -59,6 +59,7 @@ from limbo.pump import (
 from limbo.sessions import derive_title, export_jsonl, export_markdown, list_sessions
 from limbo.skills import Skill, discover_skills
 from limbo.tools.bash import BashTool
+from limbo.tracing.command import TracingViewerCommand
 from limbo.ui import recent_models
 from limbo.ui.commands import SlashCommand, SlashCommandRegistry
 from limbo.ui.path_input import attachments_from_text, looks_like_path
@@ -132,6 +133,7 @@ class MainScreen(Screen[None]):
         self._awaiting_verify_proposal = False
         self._editing_verify = False
         self._pending_proposals: list[str] = []
+        self._tracing_viewer = TracingViewerCommand(lambda: self.agent)
         self._commands = SlashCommandRegistry()
         self._register_builtin_commands()
         # Private bash executor for user '!' bang commands (RFC
@@ -562,6 +564,15 @@ class MainScreen(Screen[None]):
         )
         self._commands.register(
             SlashCommand(
+                "/tracing-viewer",
+                "在浏览器查看本会话的 LLM / 工具调用 trace（实时）[会话 id|off]",
+                takes_args=True,
+                allow_when_busy=True,
+                handler=lambda arg: self._open_tracing_viewer(arg),
+            )
+        )
+        self._commands.register(
+            SlashCommand(
                 "/2048",
                 "玩一局 2048（不打断当前任务）",
                 allow_when_busy=True,
@@ -895,6 +906,15 @@ class MainScreen(Screen[None]):
         # should freeze the UI.
         self.run_worker(self._export_worker(chat, out), name="export-session")
 
+    def _open_tracing_viewer(self, arg: str) -> None:
+        self.run_worker(self._tracing_viewer_worker(arg), name="tracing-viewer")
+
+    async def _tracing_viewer_worker(self, arg: str) -> None:
+        """Start/reuse the trace viewer off the event loop (binding the
+        socket and launching a browser can block), then report the URL."""
+        message = await asyncio.to_thread(self._tracing_viewer.run, arg)
+        self.query_one("#chat", ChatWidget).add_info(message)
+
     async def _export_worker(self, chat: ChatWidget, out: Path) -> None:
         """Perform the export off the event loop, then report."""
         def _sync() -> None:
@@ -959,6 +979,7 @@ class MainScreen(Screen[None]):
         the agent's trace file handle, and any in-flight bang processes."""
         self._integrations.release()
         self._bang_tool.cancel()
+        self._tracing_viewer.close()
         self.agent.close()
         close = getattr(self.llm_client, "close", None)
         if close is not None:

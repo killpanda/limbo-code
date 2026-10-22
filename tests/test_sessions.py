@@ -135,12 +135,19 @@ def test_load_skips_blank_and_malformed_lines(tmp_path: Path):
 
 
 def _write_session_file(path: Path, meta: SessionMeta) -> None:
-    """Write a meta-only session file, preserving the given timestamps."""
+    """Write a meta-only session file, preserving the given timestamps.
+
+    Listing sorts by file mtime, so the mtime is pinned to ``updated_at``:
+    files written back to back can share an mtime tick on coarse clocks.
+    """
     meta_line = json.dumps(
         {"type": "meta", **meta.model_dump(exclude={"path"})},
         ensure_ascii=False,
     )
     path.write_text(meta_line + "\n")
+    if meta.updated_at:
+        mtime = datetime.fromisoformat(meta.updated_at).timestamp()
+        os.utime(path, (mtime, mtime))
 
 
 def test_list_sessions_sorted_by_updated_at_desc(tmp_path: Path):
@@ -466,3 +473,88 @@ def test_attachments_roundtrip(tmp_path: Path):
     assert restored.attachments[0].kind == "image"
     assert restored.attachments[0].path == "/tmp/limbo-test/shot.png"
     assert [m.model_dump() for m in loaded] == [m.model_dump() for m in messages]
+
+
+# -- durable-session records (tool_intent / meta_patch) -----------------------
+
+
+def test_tool_intent_records_roundtrip(tmp_path: Path):
+    from limbo.sessions import (
+        append_session_records,
+        load_session_full,
+        tool_intent_record,
+    )
+
+    path = tmp_path / "s.jsonl"
+    save_session(path, make_meta(), make_messages())
+    append_session_records(
+        path,
+        [
+            tool_intent_record("c1", "bash", "unsafe"),
+            tool_intent_record("c2", "read", "safe"),
+        ],
+    )
+
+    loaded = load_session_full(path)
+    assert [(i.call_id, i.name, i.replay) for i in loaded.intents] == [
+        ("c1", "bash", "unsafe"),
+        ("c2", "read", "safe"),
+    ]
+    assert loaded.intents[0].created_at
+    # Intents never leak into the message history.
+    assert len(loaded.messages) == len(make_messages())
+
+
+def test_meta_patches_merge_in_file_order(tmp_path: Path):
+    from limbo.goal import STATUS_ACTIVE, GoalState
+    from limbo.sessions import append_session_records, meta_patch_record
+
+    path = tmp_path / "s.jsonl"
+    meta = make_meta()
+    save_session(path, meta, make_messages())
+
+    meta.goal = GoalState(status=STATUS_ACTIVE, text="first", max_rounds=3)
+    append_session_records(path, [meta_patch_record(meta)])
+    meta.goal = GoalState(status=STATUS_ACTIVE, text="second", max_rounds=3)
+    meta.code_mode = True
+    append_session_records(path, [meta_patch_record(meta)])
+
+    loaded_meta, messages, _ = load_session(path)
+    assert loaded_meta.goal is not None
+    assert loaded_meta.goal.text == "second"
+    assert loaded_meta.code_mode is True
+    # The id always comes from the meta line, never from a patch.
+    assert loaded_meta.id == meta.id
+    assert loaded_meta.path == path
+    assert len(messages) == len(make_messages())
+
+
+def test_meta_line_stays_first_for_listing(tmp_path: Path):
+    from limbo.sessions import append_session_records, meta_patch_record
+
+    path = tmp_path / "s.jsonl"
+    meta = make_meta(title="original")
+    save_session(path, meta, make_messages())
+    append_session_records(path, [meta_patch_record(meta)])
+
+    first = json.loads(path.read_text(encoding="utf-8").splitlines()[0])
+    assert first["type"] == "meta"
+    assert [m.title for m in list_sessions(tmp_path)] == ["original"]
+
+
+def test_unknown_record_types_are_skipped(tmp_path: Path):
+    path = tmp_path / "s.jsonl"
+    save_session(path, make_meta(), make_messages())
+    with path.open("a", encoding="utf-8") as f:
+        f.write(json.dumps({"type": "from_the_future", "role": "user"}) + "\n")
+        f.write(json.dumps(["not", "a", "record"]) + "\n")
+
+    _, messages, _ = load_session(path)
+    assert len(messages) == len(make_messages())
+
+
+def test_append_session_records_requires_existing_file(tmp_path: Path):
+    from limbo.sessions import append_session_records
+
+    with pytest.raises(FileNotFoundError):
+        append_session_records(tmp_path / "missing.jsonl", [{"type": "x"}])

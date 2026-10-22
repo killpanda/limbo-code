@@ -169,12 +169,50 @@ async def stream_with_retry(
             attempt += 1
 
 
+# Provider error texts that mean "the prompt does not fit the context
+# window" (pi-durable's overflow detection). Matched case-insensitively
+# against the exception text, which carries the provider's error body.
+_OVERFLOW_PATTERNS = (
+    "context_length_exceeded",  # OpenAI error code
+    "maximum context length",  # OpenAI / vLLM / DeepSeek
+    "context window",  # OpenAI Responses, Moonshot, various
+    "prompt is too long",  # Anthropic
+    "input is too long",  # Bedrock
+    "too many tokens",
+    "reduce the length of the messages",
+    "exceeds the maximum number of tokens",
+    "model_context_window_exceeded",
+)
+
+
+def is_context_overflow(exc: BaseException) -> bool:
+    """Whether the request failed because the prompt exceeds the window.
+
+    Overflow is not retryable as-is (the same prompt fails again), but it
+    is recoverable: compacting history and resending usually succeeds.
+    HTTP 413 counts too — the body was too large to accept.
+    """
+    status = getattr(exc, "status_code", None)
+    if status == 413:
+        return True
+    if isinstance(status, int) and status not in (400, 422):
+        # 429/5xx bodies sometimes mention tokens ("too many tokens per
+        # minute"): those are rate limits, not overflow.
+        return False
+    text = str(exc).lower()
+    if "per minute" in text or "rate limit" in text:
+        return False
+    return any(pattern in text for pattern in _OVERFLOW_PATTERNS)
+
+
 def friendly_message(exc: BaseException) -> str | None:
     """User-facing Chinese hint for an exhausted/unretryable LLM failure.
 
     Returns None when there is no better advice than the raw error text;
     the raw exception always stays in the trace log either way.
     """
+    if is_context_overflow(exc):
+        return "上下文超出模型窗口，压缩后仍放不下，可 /compact 或 /new 开新会话后重试"
     if isinstance(exc, LLMOverloadedError):
         return "模型服务过载，已自动重试仍失败，可稍后重发上一条消息"
     if isinstance(exc, LLMHttpError):

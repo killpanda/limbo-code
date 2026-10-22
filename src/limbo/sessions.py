@@ -14,6 +14,7 @@ import json
 import os
 import warnings
 from collections.abc import Sequence
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -28,6 +29,10 @@ from limbo.trace import read_trace
 META_TYPE = "meta"
 SNAPSHOT_TYPE = "messages_snapshot"
 COMPACTION_TYPE = "compaction"
+# Durable-session records (pi-durable style "commit intent, then effect"):
+# appended between message lines, never rewritten in place.
+TOOL_INTENT_TYPE = "tool_intent"
+META_PATCH_TYPE = "meta_patch"
 
 
 class SessionNotFoundError(Exception):
@@ -60,6 +65,10 @@ class SessionMeta(BaseModel):
     # Code Mode presentation (deepseek-harness parity): whether the
     # model-facing catalog was collapsed to `run_code`; restored on resume.
     code_mode: bool = False
+    # Whether tool calls are journaled as ``tool_intent`` records before
+    # they run. Legacy sessions lack it, so a dangling call there cannot be
+    # told apart as "never started" vs "interrupted mid-run".
+    tool_intents: bool = False
     # Populated by list/load; not written to disk.
     path: Path | None = None
 
@@ -81,6 +90,31 @@ class CompactionRecord(BaseModel):
     tokens_before: int | None = None
     tokens_after_estimate: int | None = None
     trigger: str = "auto"  # "auto" | "manual"
+
+
+class ToolIntentRecord(BaseModel):
+    """A tool call about to execute, appended before its side effects run.
+
+    Recovery reads it to tell "never started" (no intent) from "may have
+    partially run" (intent without a result). ``replay`` is the tool's
+    declared policy: ``safe`` calls are re-run on resume, ``unsafe`` ones
+    get an interrupted result instead.
+    """
+
+    call_id: str
+    name: str
+    replay: str = "unsafe"
+    created_at: str = ""
+
+
+@dataclass
+class LoadedSession:
+    """Everything :func:`load_session_full` reconstructs from one file."""
+
+    meta: SessionMeta
+    messages: list[Message]
+    compactions: list[CompactionRecord] = field(default_factory=list)
+    intents: list[ToolIntentRecord] = field(default_factory=list)
 
 
 def _utc_now_iso() -> str:
@@ -160,6 +194,38 @@ def append_session_messages(path: Path, messages: list[Message]) -> None:
             f.write(msg.model_dump_json() + "\n")
 
 
+def append_session_records(path: Path, records: Sequence[dict[str, Any]]) -> None:
+    """Append typed (``{"type": ...}``) records to an existing session file.
+
+    Same contract as :func:`append_session_messages`: the file must already
+    exist, and a crash mid-append leaves at most a torn last line, which
+    loading skips.
+    """
+    if not path.exists():
+        raise FileNotFoundError(
+            f"Cannot append to missing session file: {path}"
+        )
+    with path.open("a", encoding="utf-8") as f:
+        for record in records:
+            f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def tool_intent_record(call_id: str, name: str, replay: str) -> dict[str, Any]:
+    """Serialize a :class:`ToolIntentRecord` as an appendable line."""
+    intent = ToolIntentRecord(
+        call_id=call_id, name=name, replay=replay, created_at=_utc_now_iso()
+    )
+    return {"type": TOOL_INTENT_TYPE, **intent.model_dump()}
+
+
+def meta_patch_record(meta: SessionMeta) -> dict[str, Any]:
+    """Serialize the current meta as a patch line (later patches win)."""
+    return {
+        "type": META_PATCH_TYPE,
+        **meta.model_dump(exclude={"path", "id"}),
+    }
+
+
 def _parse_meta(raw: dict[str, Any], fallback_id: str, path: Path) -> SessionMeta:
     data = {k: v for k, v in raw.items() if k != "type"}
     data.setdefault("id", fallback_id)
@@ -209,11 +275,25 @@ def load_session(
 
     Returns the meta, the reconstructed message history (with compaction
     applied), and the raw compaction records (the agent uses the latest one
-    to restore its iterative-summary chain).
+    to restore its iterative-summary chain). See :func:`load_session_full`
+    for the durable-session records as well.
+    """
+    loaded = load_session_full(path)
+    return loaded.meta, loaded.messages, loaded.compactions
+
+
+def load_session_full(path: Path) -> LoadedSession:
+    """Load every record of a session file.
+
+    ``meta_patch`` lines are merged over the meta line in file order;
+    ``tool_intent`` lines are returned for crash recovery; records of an
+    unknown ``type`` (written by a newer version) are skipped.
     """
     meta: SessionMeta | None = None
+    patches: list[dict[str, Any]] = []
     messages: list[Message] = []
     compactions: list[CompactionRecord] = []
+    intents: list[ToolIntentRecord] = []
     with path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -229,24 +309,45 @@ def load_session(
                     stacklevel=2,
                 )
                 continue
-            if record.get("type") == META_TYPE:
-                meta = _parse_meta(record, path.stem, path)
+            if not isinstance(record, dict):
                 continue
-            if record.get("type") == COMPACTION_TYPE:
-                data = {k: v for k, v in record.items() if k != "type"}
+            kind = record.get("type")
+            data = {k: v for k, v in record.items() if k != "type"}
+            if kind is None:
+                try:
+                    messages.append(Message(**record))
+                except ValueError:
+                    continue
+            elif kind == META_TYPE:
+                meta = _parse_meta(record, path.stem, path)
+            elif kind == META_PATCH_TYPE:
+                patches.append(data)
+            elif kind == COMPACTION_TYPE:
                 try:
                     compactions.append(CompactionRecord(**data))
                 except ValueError:
                     continue
-                continue
-            try:
-                messages.append(Message(**record))
-            except ValueError:
-                continue
+            elif kind == TOOL_INTENT_TYPE:
+                try:
+                    intents.append(ToolIntentRecord(**data))
+                except ValueError:
+                    continue
+            # Any other type: a record from a newer version — skip it.
     if meta is None:
         # Legacy file without a meta line.
         meta = SessionMeta(id=path.stem, path=path)
-    return meta, _apply_compactions(messages, compactions), compactions
+    for patch in patches:
+        merged = {**meta.model_dump(exclude={"path"}), **patch, "id": meta.id}
+        try:
+            meta = SessionMeta(path=path, **merged)
+        except ValueError:
+            continue
+    return LoadedSession(
+        meta=meta,
+        messages=_apply_compactions(messages, compactions),
+        compactions=compactions,
+        intents=intents,
+    )
 
 
 def _read_meta_line(path: Path) -> SessionMeta:

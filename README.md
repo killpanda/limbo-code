@@ -195,6 +195,16 @@ to another location.
 Old session files are not automatically cleaned up; remove them manually when
 you no longer need them.
 
+### Tracing viewer
+
+Every run also writes a full trace (LLM request bodies, token usage, tool
+calls, timings, errors) to `~/.limbo/sessions/traces/`. Type
+`/tracing-viewer` to browse it in a local web page, Langfuse-style: turns,
+a waterfall of LLM and tool calls, and per-call details, refreshed live
+while the agent runs. The server listens on 127.0.0.1 only and the URL
+carries a one-time token. `/tracing-viewer <session-id>` opens a past
+session; `/tracing-viewer off` stops the server.
+
 ## Run
 
 ```bash

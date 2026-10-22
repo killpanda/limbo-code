@@ -31,6 +31,7 @@ from limbo.headless import (
     SlashModel,
     SlashNew,
     SlashQuit,
+    SlashTracingViewer,
     Submit,
     TerminalLineParser,
     UnknownCommand,
@@ -488,6 +489,8 @@ def test_parse_submission_commands():
     assert parse_submission("/new") == SlashNew()
     assert parse_submission("/quit") == SlashQuit()
     assert parse_submission("/exit") == SlashQuit()
+    assert parse_submission("/tracing-viewer") == SlashTracingViewer("")
+    assert parse_submission("/tracing-viewer off") == SlashTracingViewer("off")
     assert parse_submission("/bogus") == UnknownCommand("bogus")
 
 

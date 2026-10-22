@@ -85,6 +85,7 @@ Esc 关闭），不发往 LLM，走命令路由：
 | `/sessions` | 弹出会话选择器，Enter 切换，Esc 取消 |
 | `/new` | 清空当前对话，开始新会话（新文件） |
 | `/export [path]` | 导出会话日志：默认 JSONL 全量日志（`~/.limbo/exports/<id>.jsonl`，含完整 LLM 请求体、token 用量、工具执行、报错）；路径以 `.md` 结尾时导出 Markdown |
+| `/tracing-viewer [id\|off]` | 在浏览器查看 trace（见下文「Tracing 网页查看器」）；忙时可用 |
 | `/help` | 显示命令列表 |
 
 切换会话时聊天区重绘：user / assistant 文本原样渲染，历史 tool 消息
@@ -101,18 +102,41 @@ append-only，崩溃/打断最多丢失写入中的一条）。`/export` 默认�
 
 | type | 关键字段 |
 |------|---------|
-| `session_start` | config 快照（不含 api_key）、limbo/python 版本、是否 resume |
+| `session_start` | `trace_schema`（当前 2）、config 快照（不含 api_key）、limbo/python 版本、是否 resume |
 | `user_message` | `turn`、`content` |
-| `llm_request` | `turn`、`iteration`、`body`（完整请求体：messages 含 system prompt、tools、所有参数） |
-| `llm_response` | `duration`、`ttft`、`finish_reason`、`usage`（原始用量，含 provider 缓存字段）、`cached_tokens`（归一化缓存命中）、content/reasoning 长度、tool_calls 摘要 |
+| `llm_request` | `turn`、`iteration`、`attempt`（同一次调用的第几次 HTTP 尝试）、`body`（完整请求体：messages 含 system prompt、tools、所有参数） |
+| `llm_response` | `started_at`、`duration`、`ttft`、`finish_reason`、`usage`（原始用量，含 provider 缓存字段）、`cached_tokens`（归一化缓存命中）、`content` / `reasoning` 全文及长度、`tool_calls`（id、name、arguments） |
 | `llm_error` | `exception_type`、`error`、`traceback` |
 | `tool_call` / `tool_result` | `id`、`name`、`arguments`、`success`、`output`/`error`、耗时；崩溃时带 `exception_type` + `traceback` |
 | `error` | `kind`（如 max_iterations / length_stop / length_stop_loop）、`message` |
-| `turn_end` | `iterations`、`duration`、`status`（completed） |
+| `turn_end` | `started_at`、`iterations`、`duration`、`status`（completed） |
 | `session_save_error` | `error` |
+
+`tool_result`、`compaction` 同样带 `started_at`；`turn_interrupted`（phase
+为 llm_stream 时）带已收到的 `content` / `reasoning`。schema 1 的旧文件没有
+这些字段，读取方用 `ts - duration` 推算开始时间。
 
 导出文件布局：`meta` 行 → trace 记录（按时间序；trace 缺失时退化为原始
 消息）→ `messages_snapshot`（持久化后的完整消息历史）。
+
+## Tracing 网页查看器
+
+`/tracing-viewer` 在本机起一个只读 HTTP 服务（`src/limbo/tracing/`，仅标准库），
+在浏览器里按「会话 → 轮次 → LLM 调用 / 工具调用」展示 trace，类似 Langfuse：
+
+- 左栏轮次列表（状态、耗时、token、错误数，可搜索 / 只看出错）；中栏瀑布图
+  （LLM 条上浅色段为首 token 时间，重试归入同一调用）；右栏详情（输出、
+  reasoning、工具参数与输出、本次请求相对上次新增的消息、完整请求体）。
+- 当前会话每秒增量刷新（只读新增字节），也能切换到同 workdir 的历史会话。
+- `/tracing-viewer <id 前缀>` 打开历史会话，`/tracing-viewer off` 关闭服务；
+  limbo 退出时服务随之关闭。
+- 安全：只绑 127.0.0.1、随机端口；URL 带一次性 token（之后存 HttpOnly
+  cookie），并校验 Host 头。SSH 远程或无图形界面时不自动开浏览器，只打印
+  链接，可用 `ssh -L <port>:127.0.0.1:<port>` 转发。
+
+模块：`index.py`（字节偏移索引 + 摘要，大字段按偏移懒加载）、`model.py`
+（扁平记录 → 会话树，纯逻辑）、`server.py`（`TraceViewer`）、`command.py`
+（TUI / headless 共用的命令逻辑）、`static/index.html`（单文件前端）。
 
 ## 测试接缝（seams）
 
