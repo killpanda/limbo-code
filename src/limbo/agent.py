@@ -242,6 +242,9 @@ class Agent:
         # Compaction records not yet appended (non-destructive compaction:
         # the record goes into the journal, the summarized messages stay).
         self._pending_compactions: list[CompactionRecord] = []
+        # Messages summarized away before they reached disk: written ahead
+        # of the compaction record so the journal still holds them.
+        self._pending_summarized: list[Message] = []
         # Queue items injected or cancelled since the last save; their
         # "dequeued" record is written after the messages that carry them.
         self._pending_dequeued: list[str] = []
@@ -1524,6 +1527,7 @@ class Agent:
 
         system_msg = self.messages[0]
         kept = self.messages[split:]
+        summarized_unsaved = self.messages[self._session_saved_count : split]
         # Kept messages not yet on disk (e.g. this turn's user input): the
         # append path must still write them after the compaction.
         unsaved = min(len(self.messages) - self._session_saved_count, len(kept))
@@ -1548,6 +1552,7 @@ class Agent:
             # Non-destructive compaction (pi-durable): append the record;
             # the summarized messages stay in the journal and loading picks
             # the active range from the record's boundary.
+            self._pending_summarized.extend(summarized_unsaved)
             self._pending_compactions.append(record)
             self._session_saved_count = len(self.messages) - max(unsaved, 0)
         self._previous_summary = summary.strip()
@@ -1628,12 +1633,18 @@ class Agent:
             self._session_saved_title = self._meta.title
             self._session_full_rewrite_needed = False
             self._pending_compactions.clear()
+            self._pending_summarized.clear()
             # The rewrite dropped the queue journal: re-journal what is
             # still queued (everything else has left the queue).
             self._pending_dequeued.clear()
             queued = [queued_record(_queue_record(i)) for i in self._steer_queue]
             if queued:
-                append_session_records(self._session_file, queued)
+                try:
+                    append_session_records(self._session_file, queued)
+                except OSError:
+                    # The file holds no queue journal: rebuild it next save.
+                    self._session_full_rewrite_needed = True
+                    raise
             return
         try:
             if self._meta.title != self._session_saved_title:
@@ -1649,6 +1660,9 @@ class Agent:
                 self._session_saved_meta = meta_snapshot
             records = [compaction_record(c) for c in self._pending_compactions]
             new_messages = self.messages[self._session_saved_count :]
+            if self._pending_summarized:
+                append_session_messages(self._session_file, self._pending_summarized)
+                self._pending_summarized.clear()
             if records:
                 append_session_records(self._session_file, records)
                 self._pending_compactions.clear()
