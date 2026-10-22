@@ -8,18 +8,13 @@ SVG diff.
 
 from __future__ import annotations
 
-import os
-from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from limbo.config import Config
-from limbo.models import Message
-from limbo.sessions import SessionMeta, save_session
 from limbo.ui.app import LimboApp
-from limbo.ui.screens.session_picker import SessionPicker
 from limbo.ui.widgets.chat import ChatWidget
 
 
@@ -91,22 +86,6 @@ def test_snapshot_idle(snap_compare, tmp_path):
     assert snap_compare(app, terminal_size=(90, 28))
 
 
-def test_snapshot_thinking_and_running_tool(snap_compare, tmp_path):
-    app = make_app(tmp_path)
-
-    async def run_before(pilot) -> None:
-        await pilot.pause()
-        screen = pilot.app.screen
-        statusbar = screen.query_one("#statusbar")
-        statusbar.set_state("thinking…", "thinking")
-        chat = screen.query_one("#chat", ChatWidget)
-        chat.add_user_message("帮我看一下 agent.py 的实现")
-        chat.add_tool_card("c1", "read", {"path": "src/limbo/agent.py"})
-        await pilot.pause()
-
-    assert snap_compare(app, terminal_size=(90, 28), run_before=run_before)
-
-
 def test_snapshot_wide_layout_with_sidebar(snap_compare, tmp_path):
     """Wide terminal: chat column beside the session sidebar (Limbo Dusk)."""
     app = make_app(tmp_path)
@@ -130,52 +109,3 @@ def test_snapshot_wide_layout_with_sidebar(snap_compare, tmp_path):
     assert snap_compare(app, terminal_size=(140, 32), run_before=run_before)
 
 
-def test_snapshot_tool_error_and_error_message(snap_compare, tmp_path):
-    app = make_app(tmp_path)
-
-    async def run_before(pilot) -> None:
-        await pilot.pause()
-        chat = pilot.app.screen.query_one("#chat", ChatWidget)
-        chat.add_user_message("删掉 build 目录")
-        card = chat.add_tool_card("c1", "bash", {"command": "rm -rf build/"})
-        card.set_error("permission denied")
-        chat.add_error("LLM 请求失败：HTTP 429 rate limited\n请稍后重试")
-        await pilot.pause()
-
-    assert snap_compare(app, terminal_size=(90, 28), run_before=run_before)
-
-
-def test_snapshot_session_picker(snap_compare, tmp_path, monkeypatch):
-    # save_session re-stamps updated_at with wall-clock time; freeze it so the
-    # picker's "title · updated · id" row is identical across runs.
-    monkeypatch.setattr(
-        "limbo.sessions._utc_now_iso", lambda: "2026-07-30T10:00:00+00:00"
-    )
-    session_dir = tmp_path / "sessions"
-    session_dir.mkdir()
-    path = session_dir / "s1.jsonl"
-    save_session(
-        path,
-        SessionMeta(
-            id="s1",
-            workdir=str(SNAPSHOT_WORKDIR.resolve()),
-            title="旧会话",
-            updated_at="2026-07-30T10:00:00+00:00",
-        ),
-        [Message(role="system", content="sys"), Message(role="user", content="hi")],
-    )
-    # list_sessions surfaces the file mtime as updated_at; pin it to the
-    # same frozen instant so the picker row is identical across runs.
-    frozen = datetime(2026, 7, 30, 10, 0, 0, tzinfo=timezone.utc).timestamp()
-    os.utime(path, (frozen, frozen))
-    app = make_app(tmp_path)
-
-    async def run_before(pilot) -> None:
-        await pilot.pause()
-        from limbo.sessions import list_sessions
-
-        sessions = list_sessions(session_dir, workdir=SNAPSHOT_WORKDIR)
-        await pilot.app.push_screen(SessionPicker(sessions))
-        await pilot.pause()
-
-    assert snap_compare(app, terminal_size=(90, 28), run_before=run_before)

@@ -91,7 +91,9 @@ class BenchApp(App[None]):
             phase_times["refresh_layout"].append(layout_cost)
             if layout_cost > 0.05 and self._profiled is False:
                 self._profiled = True
-                import cProfile, pstats, io
+                import cProfile
+                import io
+                import pstats
 
                 pr = cProfile.Profile()
                 pr.enable()

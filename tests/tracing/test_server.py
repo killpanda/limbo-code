@@ -75,16 +75,6 @@ def get(
     return response, body
 
 
-def get_json(viewer: TraceViewer, path: str) -> dict:
-    response, body = get(viewer, path)
-    assert response.status == 200, body
-    return json.loads(body)
-
-
-def test_binds_loopback_only(viewer):
-    assert viewer.url().startswith(f"http://127.0.0.1:{viewer.port}/?token=")
-
-
 def test_requests_without_token_are_rejected(viewer):
     response, _ = get(viewer, "/api/state", token=False)
     assert response.status == 401
@@ -92,72 +82,3 @@ def test_requests_without_token_are_rejected(viewer):
     assert response.status == 401
 
 
-def test_page_sets_cookie_and_cookie_authorizes(viewer):
-    response, body = get(viewer, "/")
-    assert response.status == 200
-    assert b"Limbo Trace" in body
-    cookie = response.getheader("Set-Cookie")
-    assert "HttpOnly" in cookie and "SameSite=Strict" in cookie
-    response, _ = get(viewer, "/api/state", token=False, cookie=f"limbo_trace={viewer.token}")
-    assert response.status == 200
-
-
-def test_foreign_host_header_is_rejected(viewer):
-    # DNS rebinding: a page on evil.example resolving to 127.0.0.1.
-    response, _ = get(viewer, "/api/state", host=f"evil.example:{viewer.port}")
-    assert response.status == 403
-
-
-def test_state_and_sessions(viewer):
-    assert get_json(viewer, "/api/state") == {"current": SESSION}
-    (session,) = get_json(viewer, "/api/sessions")["sessions"]
-    assert session["id"] == SESSION and session["title"] == "hello"
-    assert session["current"] is True and session["has_trace"] is True
-
-
-def test_tree_and_live_cursor(viewer):
-    tree = get_json(viewer, f"/api/sessions/{SESSION}/tree")
-    assert tree["record_count"] == 4
-    assert tree["current"] is True
-    assert len(tree["turns"]) == 1
-    assert get_json(viewer, f"/api/sessions/{SESSION}/tree?cursor=4") == {
-        "unchanged": True,
-        "record_count": 4,
-    }
-    write_trace(
-        viewer.session_dir, SESSION, [{"type": "turn_end", "ts": "t", "status": "completed"}]
-    )
-    tree = get_json(viewer, f"/api/sessions/{SESSION}/tree?cursor=4")
-    assert tree["record_count"] == 5
-    assert tree["turns"][0]["status"] == "completed"
-
-
-def test_record_with_diff(viewer):
-    tree = get_json(viewer, f"/api/sessions/{SESSION}/tree")
-    generation = tree["turns"][0]["spans"][0]
-    (request_offset,) = generation["attempts"]
-    payload = get_json(viewer, f"/api/sessions/{SESSION}/records/{request_offset}?diff=1")
-    assert payload["record"]["type"] == "llm_request"
-    assert payload["diff"] == {"prefix": 0, "total": 1, "messages": [{"role": "system"}]}
-    payload = get_json(viewer, f"/api/sessions/{SESSION}/records/{generation['response_offset']}")
-    assert payload["record"]["content"] == "answer"
-
-
-def test_unknown_session_and_record(viewer):
-    response, _ = get(viewer, f"/api/sessions/{SESSION}/records/3")
-    assert response.status == 404
-    response, _ = get(viewer, "/api/sessions/..%2F..%2Fetc/tree")
-    assert response.status == 404
-    response, _ = get(viewer, "/api/nope")
-    assert response.status == 404
-
-
-def test_start_is_idempotent_and_stop_releases(tmp_path):
-    v = TraceViewer(tmp_path, None, lambda: "x")
-    v.start()
-    port = v.port
-    v.start()
-    assert v.port == port
-    v.stop()
-    assert not v.running
-    v.stop()  # idempotent

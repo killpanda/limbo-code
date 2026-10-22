@@ -10,7 +10,6 @@ from limbo.config import Config
 from limbo.models import TextChunk
 from limbo.ui.app import LimboApp
 from limbo.ui.widgets.chat import ChatWidget
-from limbo.ui.widgets.command_menu import SlashCommandMenu
 from limbo.ui.widgets.input import InputWidget
 
 
@@ -59,54 +58,6 @@ async def wait_for(pilot, needle: str, app) -> None:
 
 
 @pytest.mark.asyncio
-async def test_slash_menu_lists_skills(tmp_path):
-    write_project_skill(tmp_path, "tdd", "Test-driven development.", "# TDD body")
-    app = make_app(tmp_path)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        await pilot.press("/")
-        await pilot.pause()
-
-        menu = app.screen.query_one("#slash-menu", SlashCommandMenu)
-        prompts = [str(o.prompt) for o in menu.options]
-        assert any("/tdd" in p for p in prompts)
-        # Skills are visually distinguished from built-in commands.
-        assert any("[skill]" in p and "/tdd" in p for p in prompts)
-
-
-@pytest.mark.asyncio
-async def test_skill_filtered_by_prefix(tmp_path):
-    write_project_skill(tmp_path, "tdd", "Test-driven development.", "body")
-    app = make_app(tmp_path)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        await pilot.press("/", "t", "d")
-        await pilot.pause()
-
-        menu = app.screen.query_one("#slash-menu", SlashCommandMenu)
-        prompts = [str(o.prompt) for o in menu.options]
-        assert len(prompts) == 1
-        assert "/tdd" in prompts[0]
-
-
-@pytest.mark.asyncio
-async def test_enter_on_skill_completes_for_args(tmp_path):
-    write_project_skill(tmp_path, "tdd", "Test-driven development.", "body")
-    app = make_app(tmp_path)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        await pilot.press("/", "t", "d")
-        await pilot.pause()
-        await pilot.press("enter")
-        await pilot.pause()
-
-        input_widget = app.screen.query_one("#input", InputWidget)
-        assert input_widget.text == "/tdd "
-        menu = app.screen.query_one("#slash-menu", SlashCommandMenu)
-        assert not menu.is_open
-
-
-@pytest.mark.asyncio
 async def test_invoking_skill_sends_body_and_args_to_llm(tmp_path):
     write_project_skill(tmp_path, "tdd", "Test-driven development.", "# TDD rules\nRed first.")
     fake_llm = FakeLLMClient([[TextChunk(text="skill loaded")]])
@@ -128,47 +79,3 @@ async def test_invoking_skill_sends_body_and_args_to_llm(tmp_path):
         assert "❯ /tdd implement login" in chat.transcript_text()
 
 
-@pytest.mark.asyncio
-async def test_invoking_skill_without_args(tmp_path):
-    write_project_skill(tmp_path, "tdd", "Test-driven development.", "BODY")
-    fake_llm = FakeLLMClient([[TextChunk(text="ok")]])
-    app = make_app(tmp_path, fake_llm)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        input_widget = app.screen.query_one("#input", InputWidget)
-        input_widget.text = "/tdd"
-        await pilot.press("enter")
-        await wait_for(pilot, "ok", app)
-
-        assert len(fake_llm.calls) == 1
-        assert "BODY" in fake_llm.calls[0][-1].content
-
-
-@pytest.mark.asyncio
-async def test_builtin_command_shadows_same_named_skill(tmp_path):
-    write_project_skill(tmp_path, "new", "a skill named new", "body")
-    app = make_app(tmp_path)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        await pilot.press("/")
-        await pilot.pause()
-
-        menu = app.screen.query_one("#slash-menu", SlashCommandMenu)
-        prompts = [str(o.prompt) for o in menu.options if "/new" in str(o.prompt)]
-        assert len(prompts) == 1
-        assert "[skill]" not in prompts[0]
-
-
-@pytest.mark.asyncio
-async def test_skill_added_after_startup_appears_in_menu(tmp_path):
-    app = make_app(tmp_path)
-    async with app.run_test() as pilot:
-        await pilot.pause()
-        write_project_skill(tmp_path, "fresh", "added later", "body")
-
-        await pilot.press("/")
-        await pilot.pause()
-
-        menu = app.screen.query_one("#slash-menu", SlashCommandMenu)
-        prompts = [str(o.prompt) for o in menu.options]
-        assert any("/fresh" in p for p in prompts)

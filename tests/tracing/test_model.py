@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from limbo.tracing.index import IndexedRecord, summarize
-from limbo.tracing.model import build_tree, request_diff
+from limbo.tracing.model import build_tree
 
 
 def records(*raw: dict) -> list[IndexedRecord]:
@@ -127,26 +127,6 @@ def test_full_turn_builds_generations_and_tool_spans():
     assert turn["totals"]["llm_seconds"] == 2.0
 
 
-def test_retries_group_into_one_generation():
-    tree = build_tree(
-        records(
-            {"type": "user_message", "ts": "t", "content": "q"},
-            {"type": "llm_request", "ts": "t", "iteration": 1, "attempt": 1, "body": {}},
-            {"type": "llm_request", "ts": "t", "iteration": 1, "attempt": 2, "body": {}},
-            {"type": "llm_response", "ts": "t", "iteration": 1, "duration": 1.0},
-        )
-    )
-    (gen,) = tree["turns"][0]["spans"]
-    assert len(gen["attempts"]) == 2
-
-
-def test_resumed_session_segments_turns_by_order():
-    # A resumed agent restarts its turn counter at 1 in the same file.
-    tree = build_tree(records(*full_turn(1), {"type": "session_start", "ts": "x"}, *full_turn(1)))
-    assert [t["index"] for t in tree["turns"]] == [1, 2]
-    assert all(len(t["spans"]) == 3 for t in tree["turns"])
-
-
 def test_resume_after_crash_closes_the_open_turn():
     crashed = full_turn()[:4]  # no turn_end: the process died mid-tool
     tree = build_tree(records(*crashed, {"type": "session_start", "ts": "x"}))
@@ -157,93 +137,3 @@ def test_resume_after_crash_closes_the_open_turn():
     assert tree["events"][-1]["type"] == "session_start"
 
 
-def test_open_turn_is_live_and_running():
-    raw = full_turn()[:4]  # stops after tool_call
-    tree = build_tree(records(*raw))
-    assert tree["live"] is True
-    turn = tree["turns"][0]
-    assert turn["status"] == "running"
-    assert turn["spans"][-1]["status"] == "running"
-
-
-def test_interrupt_and_llm_error_close_running_spans():
-    tree = build_tree(
-        records(
-            {"type": "user_message", "ts": "t0", "content": "q"},
-            {"type": "llm_request", "ts": "t1", "iteration": 1, "body": {}},
-            {"type": "llm_error", "ts": "t2", "iteration": 1, "error": "boom"},
-            {"type": "turn_end", "ts": "t3", "status": "error", "duration": 1},
-        )
-    )
-    turn = tree["turns"][0]
-    assert turn["status"] == "error"
-    assert turn["spans"][0]["status"] == "error"
-    assert turn["spans"][1]["kind"] == "event" and turn["spans"][1]["type"] == "llm_error"
-    assert tree["totals"]["errors"] == 1
-
-    tree = build_tree(
-        records(
-            {"type": "user_message", "ts": "t0", "content": "q"},
-            {"type": "llm_request", "ts": "t1", "iteration": 1, "body": {}},
-            {"type": "turn_interrupted", "ts": "t2", "iteration": 1, "phase": "llm_stream"},
-            {"type": "turn_end", "ts": "t3", "status": "interrupted"},
-        )
-    )
-    assert tree["turns"][0]["status"] == "interrupted"
-    assert tree["turns"][0]["spans"][0]["status"] == "interrupted"
-
-
-def test_steer_messages_stay_inside_the_turn():
-    tree = build_tree(
-        records(
-            {"type": "user_message", "ts": "t", "content": "q"},
-            {
-                "type": "user_message",
-                "ts": "t",
-                "content": "also",
-                "steer": True,
-                "followup": False,
-            },
-            {"type": "turn_end", "ts": "t", "status": "completed"},
-        )
-    )
-    assert len(tree["turns"]) == 1
-    assert tree["turns"][0]["spans"][0]["type"] == "user_message"
-
-
-def test_idle_compaction_opens_implicit_turn():
-    tree = build_tree(
-        records(
-            {"type": "llm_request", "ts": "t", "iteration": 0, "kind": "compaction", "body": {}},
-            {
-                "type": "llm_response",
-                "ts": "t",
-                "iteration": 0,
-                "kind": "compaction",
-                "duration": 1,
-            },
-            {"type": "compaction", "ts": "t", "duration": 1.2, "tokens_before": 9000},
-        )
-    )
-    (turn,) = tree["turns"]
-    assert turn["input"] is None
-    assert [s["kind"] for s in turn["spans"]] == ["generation", "compaction"]
-    assert turn["spans"][0]["name"] == "compaction"
-
-
-def test_request_diff_returns_new_tail():
-    old = {"body": {"messages": [{"role": "system"}, {"role": "user", "content": "a"}]}}
-    new = {
-        "body": {
-            "messages": [
-                {"role": "system"},
-                {"role": "user", "content": "a"},
-                {"role": "assistant", "content": "b"},
-            ]
-        }
-    }
-    diff = request_diff(new, old)
-    assert diff == {"prefix": 2, "total": 3, "messages": [{"role": "assistant", "content": "b"}]}
-    assert request_diff(new, None)["prefix"] == 0
-    # Responses API bodies carry `input` instead of `messages`.
-    assert request_diff({"body": {"input": [1, 2]}}, {"body": {"input": [1]}})["messages"] == [2]

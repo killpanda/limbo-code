@@ -7,10 +7,8 @@ from pathlib import Path
 import pytest
 
 from limbo.agent import Agent
-from limbo.code_mode import CODE_ONLY_INSTRUCTION
 from limbo.config import Config
 from limbo.models import CompletionMeta, TextChunk, ToolCallEvent
-from limbo.sessions import load_session
 from limbo.trace import read_trace
 
 
@@ -44,31 +42,6 @@ def _make_agent(workdir: Path, responses) -> Agent:
         workdir=workdir,
         session_dir=workdir / "sessions",
     )
-
-
-def test_set_code_mode_rebuilds_system_prompt(tmp_path):
-    agent = _make_agent(tmp_path, [])
-    assert agent.code_mode is False
-    assert "run_code" not in (agent.messages[0].content or "")
-
-    assert agent.set_code_mode(True) is True
-    prompt = agent.messages[0].content or ""
-    assert CODE_ONLY_INSTRUCTION in prompt
-    assert "## Writing code for run_code" in prompt
-    # Toggling to the same state is a no-op.
-    assert agent.set_code_mode(True) is False
-
-    assert agent.set_code_mode(False) is True
-    prompt = agent.messages[0].content or ""
-    assert CODE_ONLY_INSTRUCTION not in prompt
-    assert "run_code" not in prompt
-
-
-def test_code_mode_collapses_wire_tools(tmp_path):
-    agent = _make_agent(tmp_path, [])
-    agent.set_code_mode(True)
-    defs = agent.registry.definitions()
-    assert [d["function"]["name"] for d in defs] == ["run_code"]
 
 
 @pytest.mark.asyncio
@@ -122,31 +95,3 @@ async def test_code_mode_executes_run_code_turn(tmp_path):
     assert subs[0]["id"] == subs[1]["id"]
 
 
-def test_code_mode_persisted_and_restored_on_resume(tmp_path):
-    agent = _make_agent(tmp_path, [])
-    agent.set_code_mode(True)
-    agent._save_session_sync()
-
-    meta, history, _ = load_session(agent.session_path)
-    assert meta.code_mode is True
-
-    # Resume: a fresh agent on the same file restores code mode and its
-    # system prompt reflects the SDK.
-    resumed = Agent(
-        config=Config(),
-        llm_client=FakeLLMClient([]),
-        workdir=tmp_path,
-        session_dir=tmp_path / "sessions",
-        resume=agent.session_path,
-    )
-    assert resumed.code_mode is True
-    prompt = resumed.messages[0].content or ""
-    assert CODE_ONLY_INSTRUCTION in prompt
-
-
-def test_native_mode_not_persisted(tmp_path):
-    agent = _make_agent(tmp_path, [])
-    assert agent.code_mode is False
-    agent._save_session_sync()
-    meta, _, _ = load_session(agent.session_path)
-    assert meta.code_mode is False

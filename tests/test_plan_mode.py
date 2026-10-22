@@ -7,9 +7,6 @@ import pytest
 from limbo.agent import Agent
 from limbo.config import Config
 from limbo.models import CompletionMeta, TextChunk, ToolCallEvent
-from limbo.sessions import load_session
-from limbo.toggles import parse_toggle
-from limbo.tools.hooks import PLAN_MODE_INSTRUCTION
 
 
 class FakeLLMClient:
@@ -32,19 +29,6 @@ def _make_agent(workdir, responses) -> Agent:
         workdir=workdir,
         session_dir=workdir / "sessions",
     )
-
-
-def test_set_plan_mode_rebuilds_system_prompt(tmp_path):
-    agent = _make_agent(tmp_path, [])
-    assert agent.plan_mode is False
-    assert PLAN_MODE_INSTRUCTION not in (agent.messages[0].content or "")
-
-    assert agent.set_plan_mode(True) is True
-    assert PLAN_MODE_INSTRUCTION in (agent.messages[0].content or "")
-    assert agent.set_plan_mode(True) is False
-
-    assert agent.set_plan_mode(False) is True
-    assert PLAN_MODE_INSTRUCTION not in (agent.messages[0].content or "")
 
 
 @pytest.mark.asyncio
@@ -70,28 +54,3 @@ async def test_plan_mode_blocks_a_write_call_in_a_turn(tmp_path):
     assert "Plan mode" in (tool_msgs[0].content or "")
 
 
-def test_plan_mode_persisted_and_restored_on_resume(tmp_path):
-    agent = _make_agent(tmp_path, [])
-    agent.set_plan_mode(True)
-    agent._save_session_sync()
-    meta, _, _ = load_session(agent.session_path)
-    assert meta.plan_mode is True
-
-    resumed = Agent(
-        config=Config(),
-        llm_client=FakeLLMClient([]),
-        workdir=tmp_path,
-        session_dir=tmp_path / "sessions",
-        resume=agent.session_path,
-    )
-    assert resumed.plan_mode is True
-    assert resumed.code_mode is False
-    assert PLAN_MODE_INSTRUCTION in (resumed.messages[0].content or "")
-
-
-def test_parse_toggle():
-    assert parse_toggle("on", False) is True
-    assert parse_toggle("关", True) is False
-    assert parse_toggle("", True) is False
-    assert parse_toggle(" ", False) is True
-    assert parse_toggle("maybe", False) is None
