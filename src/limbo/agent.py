@@ -32,7 +32,14 @@ from limbo.history import ToolHistory
 from limbo.history import recover as recover_history
 from limbo.llm.catalog import resolve_base_url, resolve_model
 from limbo.llm.client import LLMClient, RequestHook
-from limbo.llm.retry import friendly_message, is_context_overflow
+from limbo.llm.retry import (
+    RetryPolicy,
+    compute_delay,
+    friendly_message,
+    is_context_overflow,
+    is_retryable,
+    retry_after,
+)
 from limbo.llm.usage import (
     PromptSizeEstimator,
     UsageTotals,
@@ -159,6 +166,20 @@ class InterruptEvent:
     phase: str  # "llm_stream" | "tool_batch" | "compact"
 
 
+@dataclass(frozen=True)
+class RetryEvent:
+    """The stream broke mid-response and the same request is being resent.
+
+    Everything streamed since the request started (text, thinking, tool
+    call cards) is void: the retry re-streams the whole response.
+    """
+
+    attempt: int
+    max_attempts: int
+    reason: str
+    delay: float
+
+
 AgentEvent = (
     TextDelta
     | ThinkingDelta
@@ -169,6 +190,7 @@ AgentEvent = (
     | UsageUpdate
     | SteerEvent
     | InterruptEvent
+    | RetryEvent
 )
 
 
@@ -1333,33 +1355,80 @@ class Agent:
                 body=body,
             )
 
-        async for event in self._stream_events(
-            self.messages, tool_definitions, _trace_request
-        ):
-            if isinstance(event, TextChunk):
-                assistant_content += event.text
-                yield TextDelta(text=event.text)
-            elif isinstance(event, ThinkingChunk):
-                assistant_reasoning += event.text
-                if event.signature is not None:
-                    assistant_signature = event.signature
-                yield ThinkingDelta(text=event.text)
-            elif isinstance(event, ToolCallEvent):
-                tool_calls.append(
-                    {
-                        "id": event.id,
-                        "type": "function",
-                        "function": {
-                            "name": event.name,
-                            "arguments": event.arguments,
-                        },
-                    }
+        # Mid-stream retry (pi parity): the client retries failures before
+        # the first event; a retryable failure AFTER output started is
+        # retried here by resending the same request, discarding the
+        # partial response (the frontend voids what it showed).
+        policy = RetryPolicy.from_config(self.config.llm)
+        mid_stream_retries = 0
+        while True:
+            assistant_content = ""
+            assistant_reasoning = ""
+            assistant_signature = None
+            tool_calls = []
+            meta = None
+            streamed = False
+            try:
+                async for event in self._stream_events(
+                    self.messages, tool_definitions, _trace_request
+                ):
+                    streamed = True
+                    if isinstance(event, TextChunk):
+                        assistant_content += event.text
+                        yield TextDelta(text=event.text)
+                    elif isinstance(event, ThinkingChunk):
+                        assistant_reasoning += event.text
+                        if event.signature is not None:
+                            assistant_signature = event.signature
+                        yield ThinkingDelta(text=event.text)
+                    elif isinstance(event, ToolCallEvent):
+                        tool_calls.append(
+                            {
+                                "id": event.id,
+                                "type": "function",
+                                "function": {
+                                    "name": event.name,
+                                    "arguments": event.arguments,
+                                },
+                            }
+                        )
+                        yield ToolCallRequest(
+                            id=event.id, name=event.name, arguments=event.arguments
+                        )
+                    elif isinstance(event, CompletionMeta):
+                        meta = event
+                break
+            except Exception as e:
+                if (
+                    not streamed
+                    or self._interrupt_requested
+                    or mid_stream_retries >= policy.max_retries
+                    or not is_retryable(e)
+                ):
+                    raise
+                delay = compute_delay(mid_stream_retries, policy, retry_after(e))
+                mid_stream_retries += 1
+                self.trace.log(
+                    "llm_stream_retry",
+                    turn=self._turn_count,
+                    iteration=self._iteration_count,
+                    attempt=mid_stream_retries,
+                    error=str(e),
+                    exception_type=type(e).__name__,
+                    discarded_chars=len(assistant_content),
+                    discarded_tool_calls=len(tool_calls),
                 )
-                yield ToolCallRequest(
-                    id=event.id, name=event.name, arguments=event.arguments
+                yield RetryEvent(
+                    attempt=mid_stream_retries,
+                    max_attempts=policy.max_retries,
+                    reason=friendly_message(e) or f"{type(e).__name__}: {e}",
+                    delay=delay,
                 )
-            elif isinstance(event, CompletionMeta):
-                meta = event
+                # Sliced so ESC during the backoff is not held up; the next
+                # attempt then sees the flag and ends as an interrupt.
+                deadline = time.monotonic() + delay
+                while not self._interrupt_requested and time.monotonic() < deadline:
+                    await asyncio.sleep(min(0.1, deadline - time.monotonic()))
 
         if self._stream_cut:
             # RFC LIM-53: the stream was cut mid-response. The partial

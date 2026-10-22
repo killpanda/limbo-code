@@ -41,6 +41,7 @@ from limbo.agent import (
     CompactionEvent,
     ErrorEvent,
     InterruptEvent,
+    RetryEvent,
     SteerEvent,
     TextDelta,
     ThinkingDelta,
@@ -871,6 +872,11 @@ class HeadlessFrontend:
                 self._line(event.warning)
         elif isinstance(event, UsageUpdate):
             self._last_tokens = event.total_tokens
+        elif isinstance(event, RetryEvent):
+            self._line(
+                f"\n⟳ 连接中断，重试（{event.attempt}/{event.max_attempts}）："
+                f"{event.reason}；以上半段回复作废"
+            )
         elif isinstance(event, SteerEvent):
             self._line(f"➤ 插话已注入：{_first_line(event.text)}")
         elif isinstance(event, InterruptEvent):

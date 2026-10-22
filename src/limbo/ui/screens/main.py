@@ -20,6 +20,7 @@ from limbo.agent import (
     CompactionEvent,
     ErrorEvent,
     InterruptEvent,
+    RetryEvent,
     SteerEvent,
     TextDelta,
     ThinkingDelta,
@@ -1301,6 +1302,12 @@ class MainScreen(Screen[None]):
         elif isinstance(event, UsageUpdate):
             statusbar.set_tokens(event.total_tokens)
             self._sync_usage(event.total_tokens)
+        elif isinstance(event, RetryEvent):
+            chat.void_partial_response(
+                f"⟳ 连接中断，{event.delay:.0f} 秒后重试"
+                f"（{event.attempt}/{event.max_attempts}）：{event.reason}"
+                "；上面的半段回复作废"
+            )
         elif isinstance(event, SteerEvent):
             chat.mark_steer_delivered(event.id)
             self._update_queue_status()

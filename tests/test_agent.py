@@ -56,6 +56,8 @@ class FakeLLMClient:
                 }
             )
         for event in self.responses.pop(0):
+            if isinstance(event, BaseException):
+                raise event  # a stream that breaks mid-response
             yield event
 
 
@@ -3164,3 +3166,39 @@ def test_agent_sets_the_prompt_cache_key_on_capable_clients(workdir):
     swapped = CacheAwareClient([])
     agent.update_llm(swapped)
     assert swapped.prompt_cache_key == agent.session_id
+
+
+# -- mid-stream retry (T15) -----------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("max_retries", [1, 0])
+async def test_stream_broken_mid_response_is_resent(workdir, max_retries):
+    import httpx
+
+    from limbo.agent import RetryEvent
+
+    cfg = Config()
+    cfg.llm.max_retries = max_retries
+    cfg.llm.retry_base_delay = 0
+    fake = FakeLLMClient(
+        [
+            [TextChunk(text="half an ans"), httpx.ReadError("connection reset")],
+            [TextChunk(text="the full answer")],
+        ]
+    )
+    agent = Agent(
+        config=cfg, llm_client=fake, workdir=workdir, session_dir=workdir / "sessions"
+    )
+    events = await _collect(agent.run("q"))
+
+    retries = [e for e in events if isinstance(e, RetryEvent)]
+    if max_retries:
+        assert [r.attempt for r in retries] == [1]
+        assert len(fake.calls) == 2
+        # Only the retried response is kept.
+        assert agent.messages[-1].content == "the full answer"
+        assert not any("half an ans" in (m.content or "") for m in agent.messages)
+    else:
+        assert retries == []
+        assert any(isinstance(e, ErrorEvent) for e in events)

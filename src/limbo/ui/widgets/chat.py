@@ -559,6 +559,23 @@ class ChatWidget(VerticalScroll):
             if card.is_attached and not card._pruning:
                 card.toggle()
 
+    def void_partial_response(self, note: str) -> None:
+        """The stream broke and the request is being resent (mid-stream retry).
+
+        What was shown of the broken response (assistant text, thinking,
+        tool call cards) is struck through and detached, so the retried
+        response streams into fresh blocks.
+        """
+        self._assistant_buffer = ""
+        for block in (self._current_assistant, self._current_thinking):
+            if block is not None:
+                block.add_class("voided")
+        self._current_assistant = None
+        self._current_thinking = None
+        self._thinking_dirty = False
+        self.cancel_running_tool_cards()
+        self.add_info(note)
+
     def cancel_running_tool_cards(self) -> None:
         """Mark still-running agent-owned cards as interrupted (RFC LIM-53).
 
