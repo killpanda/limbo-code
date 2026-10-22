@@ -46,6 +46,11 @@ class SessionPicker(Dialog[Path | None]):
         when = relative_time(meta.updated_at) or meta.updated_at[:16].replace("T", " ")
         text.append(f"  {when}", Style(color=v.get("text-secondary", "")))
         text.append(f"  {meta.id}", Style(color=v.get("text-tertiary", "")))
+        if meta.parent_session:
+            # /fork or /handoff child: show where it branched from.
+            text.append(
+                f"  ⑂ {meta.parent_session}", Style(color=v.get("text-tertiary", ""))
+            )
         text.no_wrap = True
         text.overflow = "ellipsis"
         return text

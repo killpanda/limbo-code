@@ -28,7 +28,9 @@ from limbo.headless import (
     InvalidVerifyAnswer,
     Prompt,
     SkipVerify,
+    SlashFork,
     SlashGoal,
+    SlashHandoff,
     SlashModel,
     SlashNew,
     SlashQueue,
@@ -550,6 +552,8 @@ def test_parse_submission_commands():
     assert parse_submission("/tracing-viewer off") == SlashTracingViewer("off")
     assert parse_submission("/bogus") == UnknownCommand("bogus")
     assert parse_submission("/queue 再跑一遍测试") == SlashQueue("再跑一遍测试")
+    assert parse_submission("/fork 2") == SlashFork("2")
+    assert parse_submission("/handoff 继续重构") == SlashHandoff("继续重构")
 
 
 def test_parse_submission_leading_space_forces_plain_text():

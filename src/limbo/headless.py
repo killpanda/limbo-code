@@ -153,6 +153,20 @@ class SlashQueue:
 
 
 @dataclass(frozen=True)
+class SlashFork:
+    """``/fork [n]``: branch into a new session (keep the first n turns)."""
+
+    arg: str
+
+
+@dataclass(frozen=True)
+class SlashHandoff:
+    """``/handoff <note>``: a linked new session that starts from the note."""
+
+    note: str
+
+
+@dataclass(frozen=True)
 class SlashHelp:
     pass
 
@@ -179,6 +193,8 @@ Submission = (
     | SlashModel
     | SlashNew
     | SlashQueue
+    | SlashFork
+    | SlashHandoff
     | SlashHelp
     | SlashQuit
     | SlashTracingViewer
@@ -208,6 +224,10 @@ def parse_submission(text: str) -> Submission:
         return SlashNew()
     if name == "queue":
         return SlashQueue(arg)
+    if name == "fork":
+        return SlashFork(arg)
+    if name == "handoff":
+        return SlashHandoff(arg)
     if name == "help":
         return SlashHelp()
     if name in ("quit", "exit"):
@@ -453,6 +473,8 @@ HELP_TEXT = """可用命令：
   /model [id]    查看/切换模型
   /new           开始新会话
   /queue <文本>  当前任务做完后再处理这条消息（空闲时直接发送）
+  /fork [n]      分叉出新会话继续（n = 只保留前 n 轮），原会话不变
+  /handoff <说明> 带交接说明开新会话（干净上下文，关联原会话）
   /tracing-viewer [id|off]  在浏览器查看 trace（打印本地链接）
   /quit          退出
 忙时输入的普通文本会作为插话排队；Esc / Ctrl+C 中断当前任务。"""
@@ -613,6 +635,10 @@ class HeadlessFrontend:
             await self._cmd_model(command.arg)
         elif isinstance(command, SlashNew):
             self._cmd_new()
+        elif isinstance(command, SlashFork):
+            self._cmd_fork(command.arg)
+        elif isinstance(command, SlashHandoff):
+            self._cmd_handoff(command.note)
         elif isinstance(command, SlashHelp):
             self._line(HELP_TEXT)
         elif isinstance(command, SlashQuit):
@@ -807,6 +833,38 @@ class HeadlessFrontend:
         self._last_tokens = 0
         self._report_session()
         self._line("已开始新会话")
+
+    def _cmd_fork(self, arg: str) -> None:
+        if arg and not arg.isdigit():
+            self._line("用法：/fork [n]（n = 保留前 n 轮对话，省略则全部保留）")
+            return
+        parent = self._agent.session_id
+        self._switch_to(self._agent.fork(int(arg) if arg else None))
+        self._line(f"已从会话 {parent} 分叉，新会话 {self._agent.session_id}")
+
+    def _cmd_handoff(self, note: str) -> None:
+        if not note:
+            self._line("用法：/handoff <交接说明>")
+            return
+        prompt = self._agent.handoff_prompt(note)
+        parent = self._agent.session_id
+        self._switch_to(self._agent.handoff(note))
+        self._line(f"已交接：新会话 {self._agent.session_id}，关联原会话 {parent}")
+        self._start(self._pump.run(prompt))
+
+    def _switch_to(self, path: Path) -> None:
+        old = self._agent
+        old.close()
+        self._agent = Agent(
+            config=self._config,
+            llm_client=self._llm_client,
+            workdir=old.workdir,
+            session_dir=old.session_path.parent,
+            resume=path,
+        )
+        self._pump = self._pump_factory(self._agent)
+        self._last_tokens = self._agent.session_total_tokens
+        self._report_session()
 
     # -- rendering ------------------------------------------------------------
 

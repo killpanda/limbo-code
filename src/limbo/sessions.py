@@ -85,6 +85,11 @@ class SessionMeta(BaseModel):
     # they run. Legacy sessions lack it, so a dangling call there cannot be
     # told apart as "never started" vs "interrupted mid-run".
     tool_intents: bool = False
+    # Lineage (/fork, /handoff): the session this one branched from, and the
+    # id of the last parent message it copied (None for a /handoff, which
+    # starts a fresh context from a note).
+    parent_session: str | None = None
+    fork_at: str | None = None
     # Populated by list/load; not written to disk.
     path: Path | None = None
 

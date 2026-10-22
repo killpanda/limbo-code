@@ -534,6 +534,22 @@ class MainScreen(Screen[None]):
         )
         self._commands.register(
             SlashCommand(
+                "/fork",
+                "从当前会话分叉出新会话继续（原会话不变）；n = 只保留前 n 轮 [n]",
+                takes_args=True,
+                handler=lambda arg: self._fork(arg),
+            )
+        )
+        self._commands.register(
+            SlashCommand(
+                "/handoff",
+                "带一段交接说明开新会话（干净上下文，关联原会话）<说明>",
+                takes_args=True,
+                handler=lambda arg: self._handoff(arg),
+            )
+        )
+        self._commands.register(
+            SlashCommand(
                 "/export",
                 "导出会话日志（默认 JSONL，路径以 .md 结尾则导出 Markdown）[path]",
                 takes_args=True,
@@ -864,6 +880,32 @@ class MainScreen(Screen[None]):
             chat.add_info("没有可切换的历史会话")
             return
         self.app.push_screen(SessionPicker(sessions), self._on_session_picked)
+
+    def _fork(self, arg: str) -> None:
+        chat = self.query_one("#chat", ChatWidget)
+        arg = arg.strip()
+        keep: int | None = None
+        if arg:
+            if not arg.isdigit():
+                chat.add_info("用法：/fork [n]（n = 保留前 n 轮对话，省略则全部保留）")
+                return
+            keep = int(arg)
+        parent = self.agent.session_id
+        self._on_session_picked(self.agent.fork(keep))
+        kept = "全部对话" if keep is None else f"前 {keep} 轮对话"
+        chat.add_info(f"已从会话 {parent} 分叉（保留{kept}），原会话不变")
+
+    def _handoff(self, note: str) -> None:
+        chat = self.query_one("#chat", ChatWidget)
+        if not note.strip():
+            chat.add_info("用法：/handoff <交接说明>（新会话从这段说明开始）")
+            return
+        prompt = self.agent.handoff_prompt(note)
+        parent = self.agent.session_id
+        self._on_session_picked(self.agent.handoff(note))
+        chat.add_info(f"已交接：新会话关联原会话 {parent}")
+        chat.add_user_message(note)
+        self.run_worker(self._handle_turn(prompt))
 
     def _on_session_picked(self, path: Path | None) -> None:
         if path is None:

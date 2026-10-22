@@ -347,13 +347,7 @@ class Agent:
                 None,
             )
         else:
-            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
-            # Random suffix avoids collisions when sessions are created in
-            # quick succession within the same process (e.g. `/new`).
-            self._session_file = (
-                self._session_dir
-                / f"{timestamp}-{os.getpid()}-{secrets.token_hex(2)}.jsonl"
-            )
+            self._session_file = self._new_session_file()
             self._meta = SessionMeta(
                 id=self._session_file.stem,
                 workdir=str(workdir.resolve()),
@@ -401,6 +395,84 @@ class Agent:
             kind="sub_call",
             **fields,
         )
+
+    def _new_session_file(self) -> Path:
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S-%f")
+        # Random suffix avoids collisions when sessions are created in
+        # quick succession within the same process (e.g. `/new`).
+        return (
+            self._session_dir
+            / f"{timestamp}-{os.getpid()}-{secrets.token_hex(2)}.jsonl"
+        )
+
+    # -- lineage: /fork and /handoff -------------------------------------------
+
+    def user_turns(self) -> list[Message]:
+        """The user messages that start a turn (fork points), oldest first."""
+        return [
+            m for m in self.messages[1:]
+            if m.role == "user" and not is_summary_message(m)
+        ]
+
+    def fork(self, keep_turns: int | None = None) -> Path:
+        """Branch this session into a new file; this one is left untouched.
+
+        The child holds a copy of the active history up to the start of
+        user turn ``keep_turns + 1`` (all of it when None), so it loads on
+        its own; ``parent_session``/``fork_at`` record where it came from.
+        Returns the child's path (resume it to continue there).
+        """
+        self._save_session_sync()
+        turns = self.user_turns()
+        cut = len(self.messages)
+        if keep_turns is not None and keep_turns < len(turns):
+            cut = self.messages.index(turns[keep_turns])
+        messages = self.messages[:cut]
+        kept_ids = {m.id for m in messages}
+        compactions = [
+            c for c in self._compactions[-1:] if c.first_kept_entry_id in kept_ids
+        ]
+        title = self.session_meta.title or derive_title(messages)
+        child = self._child_meta(title=f"{title} (fork)" if title else "")
+        child.fork_at = messages[-1].id if len(messages) > 1 else None
+        path = self._session_dir / f"{child.id}.jsonl"
+        save_session(path, child, messages, compactions)
+        self.trace.log("fork", child=child.id, kept_turns=keep_turns, messages=cut)
+        return path
+
+    def handoff(self, note: str) -> Path:
+        """Start a linked child session with an empty context.
+
+        The caller sends ``handoff_prompt(note)`` as the child's first
+        message; the parent stays as it is (its file path is in the prompt
+        so the model can read back details on demand).
+        """
+        self._save_session_sync()
+        child = self._child_meta(title=derive_title([Message(role="user", content=note)]))
+        path = self._session_dir / f"{child.id}.jsonl"
+        save_session(path, child, [])
+        self.trace.log("handoff", child=child.id)
+        return path
+
+    def handoff_prompt(self, note: str) -> str:
+        return (
+            f"{note.strip()}\n\n"
+            f"(Handoff from session {self._meta.id}; its full history is in "
+            f"{self._session_file} — read it only if you need details.)"
+        )
+
+    def _child_meta(self, title: str) -> SessionMeta:
+        path = self._new_session_file()
+        meta = self._meta.model_copy(deep=True)
+        meta.id = path.stem
+        meta.title = title
+        meta.created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        meta.parent_session = self._meta.id
+        meta.fork_at = None
+        meta.goal = None
+        meta.usage = {}
+        meta.path = None
+        return meta
 
     def _apply_prompt_cache_key(self) -> None:
         """Route this session's requests to one provider cache (Responses)."""
