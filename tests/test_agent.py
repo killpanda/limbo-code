@@ -2395,3 +2395,150 @@ def test_agent_close_is_idempotent(workdir):
     )
     agent.close()
     agent.close()  # second close at teardown must not raise
+
+
+# --- durable progress: mid-turn checkpoints ------------------------------
+
+
+class _ProcessKilled(BaseException):
+    """Stands in for kill -9: escapes every ``except Exception``."""
+
+
+@pytest.mark.asyncio
+async def test_checkpoints_persist_progress_before_a_crash(workdir):
+    # The process dies during the second LLM request of a turn. The turn-end
+    # save never runs (kill -9 skips finally-blocks); the checkpoints alone
+    # must have put the user input, the tool-calling response, and its
+    # result on disk.
+    (workdir / "main.py").write_text("x = 1\n")
+
+    class CrashingLLM(FakeLLMClient):
+        async def chat(self, messages, tools, on_request=None):
+            if self.calls:
+                raise _ProcessKilled
+            async for event in super().chat(messages, tools, on_request):
+                yield event
+
+    fake_llm = CrashingLLM(
+        [[ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"})]]
+    )
+    agent = Agent(
+        config=Config(),
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    async def skip_turn_end_save():
+        pass
+
+    agent._save_session = skip_turn_end_save
+    with pytest.raises(_ProcessKilled):
+        await _collect(agent.run("read main.py"))
+
+    from limbo.sessions import load_session
+
+    _, messages, _ = load_session(agent.session_path)
+    roles = [m.role for m in messages]
+    assert roles == ["system", "user", "assistant", "tool"]
+    assert messages[1].content == "read main.py"
+    assert messages[2].tool_calls[0]["id"] == "c1"
+    assert messages[3].tool_call_id == "c1"
+    assert "x = 1" in (messages[3].content or "")
+
+
+@pytest.mark.asyncio
+async def test_tool_calls_are_on_disk_before_tools_run(workdir):
+    seen_on_disk: list[list[str]] = []
+
+    class SpyTool:
+        name = "spy"
+        description = "records what the session file holds"
+        parameters = {"type": "object", "properties": {}}
+
+        def execute(self, arguments):
+            from limbo.sessions import load_session
+
+            _, messages, _ = load_session(agent.session_path)
+            seen_on_disk.append([m.role for m in messages])
+            return ToolResult(success=True, output="ok")
+
+        def cancel(self):
+            pass
+
+    fake_llm = FakeLLMClient(
+        [
+            [ToolCallEvent(id="c1", name="spy", arguments={})],
+            [TextChunk(text="done")],
+        ]
+    )
+    agent = Agent(
+        config=Config(),
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    agent.registry._tools["spy"] = SpyTool()
+
+    await _collect(agent.run("go"))
+
+    assert seen_on_disk == [["system", "user", "assistant"]]
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_failure_warns_once_and_turn_completes(workdir):
+    fake_llm = FakeLLMClient(
+        [
+            [ToolCallEvent(id="c1", name="ls", arguments={})],
+            [TextChunk(text="done")],
+        ]
+    )
+    agent = Agent(
+        config=Config(),
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    agent._save_session_sync = lambda: (_ for _ in ()).throw(OSError("disk full"))
+
+    with pytest.warns(UserWarning, match="Failed to save session") as record:
+        events = await _collect(agent.run("hi"))
+
+    assert any(isinstance(e, TextDelta) and e.text == "done" for e in events)
+    # One warning from the checkpoints (deduplicated per turn) plus the
+    # turn-end save's own warning.
+    assert len([w for w in record if "Failed to save session" in str(w.message)]) == 2
+    errors = [
+        r for r in read_agent_trace(agent)
+        if r["type"] == "session_save_error" and r.get("phase") == "checkpoint"
+    ]
+    assert len(errors) >= 3
+
+
+@pytest.mark.asyncio
+async def test_persist_meta_appends_patch_without_rewrite(workdir, monkeypatch):
+    from limbo.goal import STATUS_ACTIVE, GoalState
+    from limbo.sessions import load_session
+
+    agent = Agent(
+        config=Config(),
+        llm_client=FakeLLMClient([[TextChunk(text="hello")]]),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    agent.persist_meta()  # no file yet: a no-op, the first save writes meta
+    assert not agent.session_path.exists()
+    await _collect(agent.run("hi"))
+
+    replaced: list[object] = []
+    monkeypatch.setattr(os, "replace", lambda s, d: replaced.append((s, d)))
+    agent.session_meta.goal = GoalState(status=STATUS_ACTIVE, text="g", max_rounds=4)
+    agent.persist_meta()
+    agent.persist_meta()  # unchanged: nothing more is written
+    agent._save_session_sync()  # meta already on disk: append path
+
+    assert replaced == []
+    lines = agent.session_path.read_text(encoding="utf-8").splitlines()
+    assert sum(json.loads(line).get("type") == "meta_patch" for line in lines) == 1
+    meta, _, _ = load_session(agent.session_path)
+    assert meta.goal is not None and meta.goal.text == "g"

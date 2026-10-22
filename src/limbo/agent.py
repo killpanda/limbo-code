@@ -7,6 +7,7 @@ import json
 import os
 import platform
 import secrets
+import threading
 import time
 import traceback
 import warnings
@@ -46,8 +47,10 @@ from limbo.sessions import (
     CompactionRecord,
     SessionMeta,
     append_session_messages,
+    append_session_records,
     derive_title,
     load_session,
+    meta_patch_record,
     save_session,
 )
 from limbo.steer import SteerItem, SteerQueue
@@ -227,6 +230,10 @@ class Agent:
         self._session_saved_count = 0
         self._session_saved_meta: str | None = None
         self._session_full_rewrite_needed = False
+        # Serializes session-file writes: checkpoints run in a worker thread
+        # while meta patches (goal changes) are written from the loop.
+        self._session_io_lock = threading.Lock()
+        self._checkpoint_failed_this_turn = False
         self._auto_compaction_failed_this_turn = False
         self._auto_compact_noop_notified = False
 
@@ -572,6 +579,7 @@ class Agent:
         self._consecutive_length_stops = 0
         self._auto_compaction_failed_this_turn = False
         self._auto_compact_noop_notified = False
+        self._checkpoint_failed_this_turn = False
         # RFC LIM-53: an interrupt requested while idle must not leak into
         # this turn (one of the two reset points; compact() is the other).
         self._interrupt_requested = False
@@ -708,6 +716,9 @@ class Agent:
             # is in flight — the same safety argument as loop-top compaction.
             for item in self.drain_steer():
                 yield self._inject_steer(item, followup=False)
+            # Durable progress: the user input, injected steers, and any
+            # compaction above are on disk before the request goes out.
+            await self._checkpoint()
             try:
                 async for event in self._call_llm():
                     yield event
@@ -722,6 +733,9 @@ class Agent:
                 )
                 yield ErrorEvent(message=friendly_message(e) or f"LLM error: {e}")
                 return
+            # The response (and its tool calls) is on disk before any tool
+            # runs, so a crash mid-batch leaves the calls for repair.
+            await self._checkpoint()
 
             last = self.messages[-1]
             if not last.tool_calls:
@@ -827,6 +841,7 @@ class Agent:
                 yield ToolCallRequest(id=tc["id"], name=name, arguments=arguments)
             async for event in self._execute_tool_calls(last):
                 yield event
+            await self._checkpoint()
             if self._turn_interrupted:
                 # RFC LIM-53: batch results (real or placeholder) are all
                 # recorded; end the turn instead of starting another call.
@@ -1319,26 +1334,35 @@ class Agent:
         Full rewrite happens when the file does not exist yet (first save),
         when compaction reshaped the history, when a resumed session's
         repaired history must be re-synced, or when the meta record changed
-        (title, code_mode, goal, ...) — the meta line is only written by a
-        full rewrite, so any meta drift forces one. The meta snapshot
-        comparison replaces ad-hoc dirty flags, so future meta fields (e.g.
-        the LIM-40 goal state mutated by TurnPump._save_state) are covered
-        automatically. Otherwise only the messages appended since the last
-        save are written — long sessions no longer rewrite megabytes every
-        turn.
+        (title, code_mode, goal, ...) without having been patched in via
+        :meth:`persist_meta` — the meta line is only written by a full
+        rewrite. The meta snapshot comparison replaces ad-hoc dirty flags,
+        so future meta fields are covered automatically. Otherwise only the
+        messages appended since the last save are written — long sessions
+        no longer rewrite megabytes every turn.
         """
         # Keep the presentation mode in sync before snapshotting the meta.
         self._meta.code_mode = self.code_mode
         if not self._meta.title:
             self._meta.title = derive_title(self.messages)
-        # updated_at is stamped by save_session (full rewrite) and refreshed
-        # in-memory on the append path; exclude it so the comparison below
-        # compares real meta content, not the always-moving timestamp.
-        meta_snapshot = json.dumps(
+        meta_snapshot = self._meta_snapshot()
+        with self._session_io_lock:
+            self._write_session_locked(meta_snapshot)
+
+    def _meta_snapshot(self) -> str:
+        """The meta content compared against what is on disk.
+
+        updated_at is stamped by save_session (full rewrite) and refreshed
+        in-memory on the append path; it is excluded so the comparison
+        sees real meta content, not the always-moving timestamp.
+        """
+        return json.dumps(
             self._meta.model_dump(exclude={"path", "updated_at"}),
             ensure_ascii=False,
             sort_keys=True,
         )
+
+    def _write_session_locked(self, meta_snapshot: str) -> None:
         if (
             self._session_full_rewrite_needed
             or meta_snapshot != self._session_saved_meta
@@ -1382,3 +1406,48 @@ class Agent:
             self._save_session_sync()
 
         await asyncio.to_thread(_sync)
+
+    async def _checkpoint(self) -> None:
+        """Persist history at a mid-turn consistency point.
+
+        Durable progress (pi-durable's "only committed state is visible"):
+        the loop calls this before each LLM request, after each response,
+        and after each tool batch, so a killed process loses at most the
+        in-flight step instead of the whole turn. Cheap in steady state —
+        an append of the new messages only. A failure never breaks the
+        turn: it is traced, warned once per turn, and retried at the next
+        checkpoint (a failed append already forces a full rewrite).
+        """
+        try:
+            await asyncio.to_thread(self._save_session_sync)
+        except Exception as e:  # noqa: BLE001
+            self.trace.log(
+                "session_save_error",
+                turn=self._turn_count,
+                iteration=self._iteration_count,
+                phase="checkpoint",
+                error=str(e),
+            )
+            if not self._checkpoint_failed_this_turn:
+                self._checkpoint_failed_this_turn = True
+                warnings.warn(f"Failed to save session: {e}", stacklevel=2)
+
+    def persist_meta(self) -> None:
+        """Persist a meta change now, as an appended ``meta_patch`` line.
+
+        Used for state that must survive a crash before the next turn-end
+        save (the goal state written by ``TurnPump``). Appending avoids a
+        full rewrite; loading merges patches over the meta line. Before the
+        first save there is no file yet — the first save writes the meta.
+        """
+        if not self._session_file.exists():
+            return
+        self._meta.code_mode = self.code_mode
+        snapshot = self._meta_snapshot()
+        with self._session_io_lock:
+            if snapshot == self._session_saved_meta:
+                return
+            append_session_records(
+                self._session_file, [meta_patch_record(self._meta)]
+            )
+            self._session_saved_meta = snapshot
