@@ -8,15 +8,24 @@ from typing import Any
 from rich.text import Text
 from textual.widgets import Static
 
-DEFAULT_HINTS: tuple[tuple[str, str], ...] = (
+IDLE_HINTS: tuple[tuple[str, str], ...] = (
     ("enter", "发送"),
     ("shift+enter", "换行"),
-    ("/", "命令"),
+    ("/ !", "命令"),
     ("ctrl+p", "面板"),
     ("ctrl+l", "模型"),
     ("ctrl+o", "展开"),
-    ("esc", "中断"),
 )
+# While a turn runs, Enter steers it and Alt+Enter queues a follow-up for
+# after the task.
+BUSY_HINTS: tuple[tuple[str, str], ...] = (
+    ("enter", "插话"),
+    ("alt+enter", "做完再做"),
+    ("shift+enter", "换行"),
+    ("esc", "中断"),
+    ("ctrl+o", "展开"),
+)
+DEFAULT_HINTS = IDLE_HINTS
 
 
 class KeyHints(Static):

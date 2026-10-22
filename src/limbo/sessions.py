@@ -23,7 +23,7 @@ from pydantic import BaseModel
 
 from limbo.compaction import is_summary_message, make_summary_message
 from limbo.goal import GoalState
-from limbo.models import Message
+from limbo.models import Attachment, Message
 from limbo.trace import read_trace
 
 META_TYPE = "meta"
@@ -33,6 +33,9 @@ COMPACTION_TYPE = "compaction"
 # appended between message lines, never rewritten in place.
 TOOL_INTENT_TYPE = "tool_intent"
 META_PATCH_TYPE = "meta_patch"
+# Queued user messages (steer / follow-up inbox): "queued" when offered,
+# "dequeued" once injected into history or cancelled.
+QUEUE_TYPE = "queue"
 
 
 class SessionNotFoundError(Exception):
@@ -78,9 +81,9 @@ class CompactionRecord(BaseModel):
 
     ``first_kept_entry_id`` marks the keep boundary (pi's entry model):
     on load, messages before that entry are dropped and the stored
-    ``summary`` is re-inserted as the conversation summary. Because the
-    session file is fully rewritten after each compaction, the boundary is
-    normally a no-op — it is a defensive fallback and an audit trail.
+    ``summary`` is re-inserted as the conversation summary. Compaction is
+    non-destructive: the record is appended and the summarized messages
+    stay in the file, so the boundary selects the active range on load.
     """
 
     id: str
@@ -89,7 +92,7 @@ class CompactionRecord(BaseModel):
     summary: str = ""
     tokens_before: int | None = None
     tokens_after_estimate: int | None = None
-    trigger: str = "auto"  # "auto" | "manual"
+    trigger: str = "auto"  # "auto" | "manual" | "overflow"
 
 
 class ToolIntentRecord(BaseModel):
@@ -107,6 +110,15 @@ class ToolIntentRecord(BaseModel):
     created_at: str = ""
 
 
+class QueuedMessageRecord(BaseModel):
+    """A user message queued mid-turn, journaled so a crash keeps it."""
+
+    id: str
+    text: str
+    attachments: list[Attachment] = []
+    mode: str = "steer"  # "steer" | "follow_up"
+
+
 @dataclass
 class LoadedSession:
     """Everything :func:`load_session_full` reconstructs from one file."""
@@ -115,6 +127,8 @@ class LoadedSession:
     messages: list[Message]
     compactions: list[CompactionRecord] = field(default_factory=list)
     intents: list[ToolIntentRecord] = field(default_factory=list)
+    # Messages still queued when the file was last written, in FIFO order.
+    queue: list[QueuedMessageRecord] = field(default_factory=list)
 
 
 def _utc_now_iso() -> str:
@@ -226,6 +240,58 @@ def meta_patch_record(meta: SessionMeta) -> dict[str, Any]:
     }
 
 
+def queued_record(item: QueuedMessageRecord) -> dict[str, Any]:
+    """Serialize a newly queued message."""
+    return {"type": QUEUE_TYPE, "op": "queued", **item.model_dump()}
+
+
+def dequeued_record(ids: Sequence[str]) -> dict[str, Any]:
+    """Serialize queue items leaving the queue (injected or cancelled)."""
+    return {"type": QUEUE_TYPE, "op": "dequeued", "ids": list(ids)}
+
+
+def compaction_record(record: CompactionRecord) -> dict[str, Any]:
+    """Serialize a compaction as an appendable session line."""
+    return {"type": COMPACTION_TYPE, **record.model_dump()}
+
+
+def rewrite_meta_line(path: Path, meta: SessionMeta) -> None:
+    """Atomically replace the meta line, keeping every other record.
+
+    Listing reads only the first line, so a title change must land there;
+    everything else in the journal (messages, compactions, intents) is
+    copied verbatim. ``meta_patch`` lines are dropped: the new meta line
+    already carries their merged state, and an older patch would otherwise
+    override it on load.
+    """
+    meta.updated_at = _utc_now_iso()
+    meta_line = json.dumps(
+        {"type": META_TYPE, **meta.model_dump(exclude={"path"})},
+        ensure_ascii=False,
+    )
+    tmp_file = path.with_suffix(".tmp")
+    with path.open("r", encoding="utf-8") as src, tmp_file.open(
+        "w", encoding="utf-8"
+    ) as dst:
+        dst.write(meta_line + "\n")
+        for line in src:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                record = json.loads(stripped)
+            except json.JSONDecodeError:
+                record = None
+            if isinstance(record, dict) and record.get("type") in (
+                META_TYPE,
+                META_PATCH_TYPE,
+            ):
+                continue
+            dst.write(stripped + "\n")
+    tmp_file.chmod(0o600)
+    os.replace(tmp_file, path)
+
+
 def _parse_meta(raw: dict[str, Any], fallback_id: str, path: Path) -> SessionMeta:
     data = {k: v for k, v in raw.items() if k != "type"}
     data.setdefault("id", fallback_id)
@@ -238,10 +304,12 @@ def _apply_compactions(
     """Reconstruct the post-compaction history from the latest record.
 
     Only the most recent record participates in reconstruction (older ones
-    stay on disk for audit). Since the session file is rewritten after each
-    compaction, the drop is normally a no-op; if the boundary id is missing
-    (hand-edited file, partial write), the record is ignored with a warning
-    — better uncompacted than data loss.
+    stay on disk for audit). Compaction is non-destructive: the summarized
+    messages stay in the journal and this function selects the active range
+    — everything from the record's ``first_kept_entry_id`` on, behind the
+    summary. If the boundary id is missing (hand-edited file, partial
+    write), the record is ignored with a warning — better uncompacted than
+    data loss.
     """
     if not compactions:
         return messages
@@ -259,12 +327,19 @@ def _apply_compactions(
         return messages
     head = messages[:1] if messages and messages[0].role == "system" else []
     kept = messages[boundary:]
-    # The summary normally already sits in the file right after the system
-    # message (saved post-compaction); re-insert it only if missing.
+    # A full rewrite stores the summary message before the boundary; the
+    # append path stores only the record, and a stored summary may belong to
+    # an older compaction. Reuse the stored message (keeping its id) only
+    # when it matches the latest record; otherwise rebuild it.
     dropped = messages[len(head) : boundary]
-    summary_msg = next((m for m in dropped if is_summary_message(m)), None)
-    if summary_msg is None:
-        summary_msg = make_summary_message(latest.summary)
+    stored = next((m for m in reversed(dropped) if is_summary_message(m)), None)
+    rebuilt = make_summary_message(latest.summary)
+    if stored is not None and (
+        not latest.summary or stored.content == rebuilt.content
+    ):
+        summary_msg = stored
+    else:
+        summary_msg = rebuilt
     return [*head, summary_msg, *kept]
 
 
@@ -294,6 +369,7 @@ def load_session_full(path: Path) -> LoadedSession:
     messages: list[Message] = []
     compactions: list[CompactionRecord] = []
     intents: list[ToolIntentRecord] = []
+    queued: dict[str, QueuedMessageRecord] = {}
     with path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -327,6 +403,18 @@ def load_session_full(path: Path) -> LoadedSession:
                     compactions.append(CompactionRecord(**data))
                 except ValueError:
                     continue
+            elif kind == QUEUE_TYPE:
+                if data.get("op") == "queued":
+                    try:
+                        item = QueuedMessageRecord(
+                            **{k: v for k, v in data.items() if k != "op"}
+                        )
+                    except ValueError:
+                        continue
+                    queued[item.id] = item
+                elif data.get("op") == "dequeued":
+                    for item_id in data.get("ids") or []:
+                        queued.pop(item_id, None)
             elif kind == TOOL_INTENT_TYPE:
                 try:
                     intents.append(ToolIntentRecord(**data))
@@ -347,6 +435,7 @@ def load_session_full(path: Path) -> LoadedSession:
         messages=_apply_compactions(messages, compactions),
         compactions=compactions,
         intents=intents,
+        queue=list(queued.values()),
     )
 
 

@@ -72,8 +72,10 @@ from limbo.pump import (
     GoalVerifyResultEvent,
     GoalVerifyStarted,
     PumpEvent,
+    QueueHeld,
     TurnPump,
 )
+from limbo.steer import FOLLOW_UP
 from limbo.tracing.command import TracingViewerCommand
 
 # -- input events (stdin → frontend) ------------------------------------------
@@ -140,6 +142,13 @@ class SlashNew:
 
 
 @dataclass(frozen=True)
+class SlashQueue:
+    """``/queue <text>``: a follow-up, handled after the current task."""
+
+    text: str
+
+
+@dataclass(frozen=True)
 class SlashHelp:
     pass
 
@@ -165,6 +174,7 @@ Submission = (
     | SlashCompact
     | SlashModel
     | SlashNew
+    | SlashQueue
     | SlashHelp
     | SlashQuit
     | SlashTracingViewer
@@ -192,6 +202,8 @@ def parse_submission(text: str) -> Submission:
         return SlashModel(arg)
     if name == "new":
         return SlashNew()
+    if name == "queue":
+        return SlashQueue(arg)
     if name == "help":
         return SlashHelp()
     if name in ("quit", "exit"):
@@ -436,6 +448,7 @@ HELP_TEXT = """可用命令：
   /compact       立即压缩对话历史
   /model [id]    查看/切换模型
   /new           开始新会话
+  /queue <文本>  当前任务做完后再处理这条消息（空闲时直接发送）
   /tracing-viewer [id|off]  在浏览器查看 trace（打印本地链接）
   /quit          退出
 忙时输入的普通文本会作为插话排队；Esc / Ctrl+C 中断当前任务。"""
@@ -552,6 +565,9 @@ class HeadlessFrontend:
             if isinstance(command, Prompt):
                 self._agent.steer(text)
                 self._line(f"➤ 已排队插话：{_first_line(text)}")
+            elif isinstance(command, SlashQueue) and command.text:
+                self._agent.steer(command.text, mode=FOLLOW_UP)
+                self._line(f"➤ 已排队，当前任务完成后处理：{_first_line(command.text)}")
             elif isinstance(command, SlashHelp):
                 self._line(HELP_TEXT)
             elif isinstance(command, SlashTracingViewer):
@@ -564,6 +580,12 @@ class HeadlessFrontend:
             return
         if isinstance(command, Prompt):
             self._start(self._pump.run(text))
+        elif isinstance(command, SlashQueue):
+            if command.text:
+                # Idle: nothing to wait for, so it is a plain prompt.
+                self._start(self._pump.run(command.text))
+            else:
+                self._line("用法：/queue <文本>")
         elif isinstance(command, SlashGoal):
             self._cmd_goal(command.arg)
         elif isinstance(command, SlashCompact):
@@ -847,6 +869,13 @@ class HeadlessFrontend:
             )
         elif isinstance(event, GoalResumed):
             self._line(f"🎯 恢复 goal 闭环，预算已重置（{event.max_rounds} 轮）")
+        elif isinstance(event, QueueHeld):
+            count = len(event.items)
+            if event.policy == "withdraw":
+                texts = "；".join(_first_line(item.text) for item in event.items)
+                self._line(f"上一轮出错，已撤回 {count} 条排队消息：{texts}")
+            else:
+                self._line(f"上一轮出错，{count} 条排队消息保留，下次发送时一起处理")
 
     # -- integration reporting ------------------------------------------------
 
@@ -901,6 +930,7 @@ async def _run(
             workdir,
             max_rounds=config.goal.max_rounds,
             verify_timeout_ms=config.goal.verify_timeout_ms,
+            after_failed_run=config.queue.after_failed_run,
         )
 
     agent = Agent(

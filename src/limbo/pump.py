@@ -44,6 +44,7 @@ from limbo.goal import (
     run_verify,
 )
 from limbo.models import Attachment
+from limbo.steer import STEER, SteerItem
 
 # -- goal events (frontend renders these; headless prints them) ---------------
 
@@ -79,12 +80,25 @@ class GoalResumed:
     max_rounds: int
 
 
+@dataclass(frozen=True)
+class QueueHeld:
+    """A failed turn ended the task with messages still queued.
+
+    ``policy`` is ``[queue] after_failed_run``: "keep" left ``items``
+    queued for the next submission; "withdraw" took them out of the queue.
+    """
+
+    policy: str
+    items: list[SteerItem]
+
+
 GoalEvent = (
     GoalVerifyStarted
     | GoalVerifyResultEvent
     | GoalPassed
     | GoalExhausted
     | GoalResumed
+    | QueueHeld
 )
 
 PumpEvent = AgentEvent | GoalEvent
@@ -109,8 +123,10 @@ class TurnPump:
         *,
         max_rounds: int = 10,
         verify_timeout_ms: int = 600_000,
+        after_failed_run: str = "continue",
     ) -> None:
         self._agent = agent
+        self._after_failed_run = after_failed_run
         self._workdir = workdir
         self._max_rounds = max_rounds
         self._verify_timeout_ms = verify_timeout_ms
@@ -235,10 +251,11 @@ class TurnPump:
         """Run goal rounds; turn leftovers into follow-up turns.
 
         The follow-up drain lives here and nowhere else (RFC LIM-20):
-        ``_run_once`` drains between rounds (user steers outrank goal
+        ``_run_once`` drains steers between rounds (user steers outrank goal
         continuation); this supervisor catches whatever is queued past its
         last boundary — steers that arrived during verify / the wrap-up
-        turn / the teardown window — and pumps one more turn for them.
+        turn / the teardown window, and every ``follow_up`` message, which
+        waits for the whole task — and pumps one more turn for them.
         """
         next_input = user_input
         next_attachments = attachments
@@ -251,6 +268,10 @@ class TurnPump:
                 # RFC LIM-53: an interrupted pump never auto-follows-up —
                 # leftovers stay queued for the next run()'s head fallback.
                 if self._agent.was_interrupted:
+                    return
+                # [queue] after_failed_run: a failed turn ends the task
+                # without draining (the queue was handled in _run_once).
+                if self._holds_queue_after_failure():
                     return
 
                 leftovers = self._agent.drain_steer()
@@ -308,10 +329,18 @@ class TurnPump:
                 self._agent.trace.log("goal_interrupted")
                 return
 
+            # [queue] after_failed_run: with messages queued behind a failed
+            # turn, "keep"/"withdraw" end the task instead of feeding them
+            # one by one into a provider that keeps failing.
+            if self._holds_queue_after_failure() and self._agent.queued_items:
+                yield self._hold_queue()
+                return
+
             # Turn boundary, user first: leftover steer messages (error
             # exits) outrank goal continuation. E1: yield one SteerEvent
             # per item so the frontend flips the queued cards by id.
-            leftovers = self._agent.drain_steer()
+            # Follow-ups wait for the whole task (the supervisor's drain).
+            leftovers = self._agent.drain_steer((STEER,))
             if leftovers:
                 for item in leftovers:
                     yield SteerEvent(id=item.id, text=item.text)
@@ -372,6 +401,23 @@ class TurnPump:
                 "goal_round", next_round=state.rounds_completed + 1
             )
             next_input = build_goal_prompt(state, result)
+
+    def _holds_queue_after_failure(self) -> bool:
+        return self._agent.last_run_failed and self._after_failed_run in (
+            "keep",
+            "withdraw",
+        )
+
+    def _hold_queue(self) -> QueueHeld:
+        items = self._agent.queued_items
+        if self._after_failed_run == "withdraw":
+            items = [item for item in items if self._agent.cancel_steer(item.id)]
+        self._agent.trace.log(
+            "queue_held",
+            policy=self._after_failed_run,
+            ids=[item.id for item in items],
+        )
+        return QueueHeld(policy=self._after_failed_run, items=items)
 
     async def _run_verify(self, command: str) -> VerifyResult:
         task = asyncio.create_task(

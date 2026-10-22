@@ -5,7 +5,7 @@ from __future__ import annotations
 import warnings
 from enum import Enum
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import toml  # type: ignore[import-untyped]
 import tomlkit
@@ -221,12 +221,26 @@ class GoalSettings(BaseModel):
     verify_timeout_ms: int = 600_000
 
 
+class QueueSettings(BaseModel):
+    """[queue] section: the queued-message inbox (steer / follow-up)."""
+
+    # What happens to queued messages when a turn fails (the LLM errored
+    # after its retries): "continue" feeds them into the next turn as
+    # usual; "keep" stops the task and leaves them queued for the next
+    # submission; "withdraw" stops the task and takes them out of the
+    # queue (the TUI puts their text back into the input box). With
+    # "keep"/"withdraw" a persistently failing provider cannot burn
+    # through the queue one message per failed turn.
+    after_failed_run: Literal["continue", "keep", "withdraw"] = "continue"
+
+
 class Config(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     compaction: CompactionSettings = Field(default_factory=CompactionSettings)
     goal: GoalSettings = Field(default_factory=GoalSettings)
+    queue: QueueSettings = Field(default_factory=QueueSettings)
     # [providers.<id>] per-provider overrides, keyed by catalog provider id
     # (e.g. [providers.glm], [providers.codex]).
     providers: dict[str, ProviderOverride] = Field(default_factory=dict)

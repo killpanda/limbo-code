@@ -291,3 +291,12 @@ def test_kitty_keyboard_mode_disable_decision():
     assert not KittyKeyboardMode.ENABLED.disable_textual_kitty_key(in_herdr=True)
     # disabled: always force raw/legacy input.
     assert KittyKeyboardMode.DISABLED.disable_textual_kitty_key(in_herdr=False)
+
+
+def test_queue_after_failed_run_defaults_and_validates():
+    from pydantic import ValidationError
+
+    assert Config().queue.after_failed_run == "continue"
+    assert Config(queue={"after_failed_run": "withdraw"}).queue.after_failed_run == "withdraw"
+    with pytest.raises(ValidationError):
+        Config(queue={"after_failed_run": "drop"})

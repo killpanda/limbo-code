@@ -244,25 +244,36 @@ class FakeAgent:
         self.session_meta = SessionMeta(id="fake")
         self.trace = TraceLogger(workdir / "trace.jsonl")
         self.was_interrupted = False
+        # Turns (by input) that end on an LLM error.
+        self.failing_inputs: set[str] = set()
+        self.last_run_failed = False
         from limbo.steer import SteerQueue
 
         self._queue = SteerQueue()
 
     async def run(self, user_input, attachments=None):
         self.inputs.append(user_input)
+        self.last_run_failed = user_input in self.failing_inputs
         yield TextDelta(text=f"turn:{user_input[:20]}")
 
     async def compact(self, trigger="manual"):
         yield CompactionEvent(compacted=False, trigger=trigger, reason="fake")
 
-    def drain_steer(self):
-        return self._queue.drain()
+    def drain_steer(self, modes=("steer", "follow_up")):
+        return self._queue.drain(modes)
 
     def has_pending_steer(self):
         return len(self._queue) > 0
 
-    def steer(self, text):
-        return self._queue.offer(text).id
+    def steer(self, text, attachments=None, mode="steer"):
+        return self._queue.offer(text, attachments, mode).id
+
+    def cancel_steer(self, item_id):
+        return self._queue.cancel(item_id) is not None
+
+    @property
+    def queued_items(self):
+        return list(self._queue)
 
     def persist_meta(self):
         pass
@@ -284,11 +295,11 @@ async def test_leftover_steer_outranks_goal_and_yields_steer_events(
     original_drain = agent.drain_steer
     drained_once = {"done": False}
 
-    def fake_drain():
+    def fake_drain(modes=("steer", "follow_up")):
         if not drained_once["done"]:
             drained_once["done"] = True
             return [leftover]
-        return original_drain()
+        return original_drain(modes)
 
     agent.drain_steer = fake_drain
 
@@ -329,13 +340,13 @@ async def test_supervisor_drains_stragglers_into_followup_turn(workdir):
     original_drain = agent.drain_steer
     calls = {"n": 0}
 
-    def fake_drain():
+    def fake_drain(modes=("steer", "follow_up")):
         calls["n"] += 1
         if calls["n"] == 2:
             # Boundary drain (call 1) found nothing; the supervisor drain
             # (call 2) sees the straggler.
             return [straggler]
-        return original_drain()
+        return original_drain(modes)
 
     agent.drain_steer = fake_drain
 
@@ -424,3 +435,76 @@ def test_pump_imports_without_textual():
         "assert not bad, f'non-UI layer pulled in textual: {bad}'"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+@pytest.mark.asyncio
+async def test_follow_up_waits_for_the_goal_loop(workdir, monkeypatch):
+    """A follow-up never enters a goal round: it runs after the loop ends."""
+    agent = FakeAgent(workdir)
+    pump = TurnPump(agent, workdir)
+    pump.set_goal("g", verify_command="pytest")
+    agent.steer("整理一下", mode="follow_up")
+    verdicts = iter([VerifyResult(exit_code=1), VerifyResult(exit_code=0)])
+
+    async def verify(command, workdir, **kwargs):
+        return next(verdicts)
+
+    monkeypatch.setattr(pump_module, "run_verify", verify)
+
+    events = await collect(pump.run("goal prompt"))
+
+    # Two goal rounds first; the follow-up is the last turn.
+    assert len(agent.inputs) == 3
+    assert agent.inputs[-1] == "整理一下"
+    assert any(isinstance(e, GoalPassed) for e in events)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("policy", ["continue", "keep", "withdraw"])
+async def test_after_failed_run_policy(workdir, policy):
+    from limbo.pump import QueueHeld
+
+    agent = FakeAgent(workdir)
+    agent.failing_inputs = {"first"}
+    pump = TurnPump(agent, workdir, after_failed_run=policy)
+    agent.steer("queued one")
+    agent.steer("queued two", mode="follow_up")
+
+    events = await collect(pump.run("first"))
+
+    held = [e for e in events if isinstance(e, QueueHeld)]
+    if policy == "continue":
+        # Today's behavior: the steer feeds the next turn, then the
+        # follow-up gets its own turn after the task.
+        assert agent.inputs == ["first", "queued one", "queued two"]
+        assert held == []
+    else:
+        # The task stops after the failed turn; nothing is fed in.
+        assert agent.inputs == ["first"]
+        assert [e.policy for e in held] == [policy]
+        assert [i.text for i in held[0].items] == ["queued one", "queued two"]
+        remaining = [i.text for i in agent.queued_items]
+        if policy == "keep":
+            assert remaining == ["queued one", "queued two"]
+        else:
+            assert remaining == []
+    assert not pump.running
+
+
+@pytest.mark.asyncio
+async def test_failed_run_without_queue_keeps_goal_loop(workdir, monkeypatch):
+    """The policy is about queued messages: with an empty queue a failed
+    turn behaves as before (the goal loop goes on to verify)."""
+    agent = FakeAgent(workdir)
+    agent.failing_inputs = {"goal prompt"}
+    pump = TurnPump(agent, workdir, after_failed_run="keep")
+    pump.set_goal("g", verify_command="pytest")
+
+    async def passing(command, workdir, **kwargs):
+        return VerifyResult(exit_code=0)
+
+    monkeypatch.setattr(pump_module, "run_verify", passing)
+
+    events = await collect(pump.run("goal prompt"))
+
+    assert any(isinstance(e, GoalPassed) for e in events)

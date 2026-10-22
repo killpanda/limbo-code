@@ -54,10 +54,12 @@ from limbo.pump import (
     GoalVerifyResultEvent,
     GoalVerifyStarted,
     PumpEvent,
+    QueueHeld,
     TurnPump,
 )
 from limbo.sessions import derive_title, export_jsonl, export_markdown, list_sessions
 from limbo.skills import Skill, discover_skills
+from limbo.steer import FOLLOW_UP, STEER
 from limbo.tools.bash import BashTool
 from limbo.tracing.command import TracingViewerCommand
 from limbo.ui import recent_models
@@ -74,12 +76,16 @@ from limbo.ui.widgets.activity import ActivityLine
 from limbo.ui.widgets.chat import ChatWidget, QueuedMessage
 from limbo.ui.widgets.command_menu import SlashCommandMenu
 from limbo.ui.widgets.input import InputWidget, PasteMarkersInvalid, UserSubmitted
-from limbo.ui.widgets.key_hints import KeyHints
+from limbo.ui.widgets.key_hints import BUSY_HINTS, IDLE_HINTS, KeyHints
 from limbo.ui.widgets.landing import Landing
 from limbo.ui.widgets.pills import Pills
 from limbo.ui.widgets.sidebar import WIDE_MIN_WIDTH, Sidebar, git_branch
 from limbo.ui.widgets.status_bar import StatusBar
 
+# Key hints under the input. While a turn runs, Enter steers it and
+# Alt+Enter queues a follow-up for after the task (pi-durable's inbox).
+_HINT_IDLE = IDLE_HINTS
+_HINT_BUSY = BUSY_HINTS
 
 class MainScreen(Screen[None]):
     """Chat screen (Limbo Dusk): status bar / chat flow + input beside a
@@ -162,6 +168,7 @@ class MainScreen(Screen[None]):
             self.workdir,
             max_rounds=self.config.goal.max_rounds,
             verify_timeout_ms=self.config.goal.verify_timeout_ms,
+            after_failed_run=self.config.queue.after_failed_run,
         )
 
     def _new_agent(self, resume: Path | None = None) -> Agent:
@@ -180,6 +187,9 @@ class MainScreen(Screen[None]):
     ) -> None:
         """Report semantic lifecycle state to active integrations."""
         self._integrations.report(state, message=message)
+
+    def _set_hint(self, hints: tuple[tuple[str, str], ...]) -> None:
+        self.query_one("#hint", KeyHints).set_hints(hints)
 
     def _report_session(self) -> None:
         """Report the current session identity (startup, /new, /sessions)."""
@@ -220,6 +230,7 @@ class MainScreen(Screen[None]):
             chat.add_info(
                 f"已恢复会话 {meta.id} · {meta.title or '(无标题)'}"
             )
+            self._render_restored_queue()
         self._refresh_goal_indicator()  # D6: silent resume, badge only
         # Code Mode badge: sync on startup so a resumed code-mode session
         # shows it without a fresh toggle.
@@ -861,6 +872,7 @@ class MainScreen(Screen[None]):
         self._render_history()
         meta = self.agent.session_meta
         chat.add_info(f"已切换到会话 {meta.id} · {meta.title or '(无标题)'}")
+        self._render_restored_queue()
         self.query_one("#sidebar", Sidebar).reset_session()
         self._sync_sidebar()
         self._report_session()
@@ -1026,10 +1038,14 @@ class MainScreen(Screen[None]):
             attachments = [*attachments, *attachments_from_text(text)]
         chat = self.query_one("#chat", ChatWidget)
         if self._agent_busy:
-            # Mid-turn submission (RFC LIM-20): queue for steer injection,
-            # render optimistically — never start a second turn worker.
-            item_id = self.agent.steer(text, attachments)
-            chat.add_queued_message(item_id, text, attachments)
+            # Mid-turn submission (RFC LIM-20): queue for steer injection
+            # (Alt+Enter: a follow-up after the task), render optimistically
+            # — never start a second turn worker.
+            mode = FOLLOW_UP if event.followup else STEER
+            item_id = self.agent.steer(text, attachments, mode=mode)
+            chat.add_queued_message(
+                item_id, text, attachments, followup=event.followup
+            )
             self._update_queue_status()
             return
         chat.add_user_message(text, attachments)
@@ -1101,6 +1117,43 @@ class MainScreen(Screen[None]):
                 pass
 
     # -- steer queue UI (LIM-20) ---------------------------------------------
+
+    def _on_queue_held(self, event: QueueHeld) -> None:
+        """A failed turn ended the task with messages queued behind it."""
+        chat = self.query_one("#chat", ChatWidget)
+        count = len(event.items)
+        if event.policy == "withdraw":
+            for item in event.items:
+                chat.mark_steer_cancelled(item.id)
+            # Hand the text back for editing/resending, unless the user is
+            # already typing something else.
+            input_widget = self.query_one("#input", InputWidget)
+            if not input_widget.text.strip():
+                input_widget.text = "\n\n".join(item.text for item in event.items)
+            chat.add_info(f"上一轮出错，已撤回 {count} 条排队消息，文本放回了输入框")
+        else:
+            chat.add_info(f"上一轮出错，{count} 条排队消息保留，下次发送时一起处理")
+        self._update_queue_status()
+
+    def _render_restored_queue(self) -> None:
+        """Show messages still queued when the session was last written.
+
+        They are drained by the next turn (steers at its start, follow-ups
+        after it), like any queued message.
+        """
+        items = self.agent.queued_items
+        if not items:
+            return
+        chat = self.query_one("#chat", ChatWidget)
+        chat.add_info(f"恢复了 {len(items)} 条排队消息，将在下一轮处理")
+        for item in items:
+            chat.add_queued_message(
+                item.id,
+                item.text,
+                item.attachments,
+                followup=item.mode == FOLLOW_UP,
+            )
+        self._update_queue_status()
 
     def _update_queue_status(self) -> None:
         self.query_one("#statusbar", StatusBar).set_queued(self.agent.queued_count)
@@ -1177,6 +1230,7 @@ class MainScreen(Screen[None]):
         # owned by the pump (``running`` is set eagerly on call).
         statusbar.set_state("thinking…", "thinking")
         self._report_state("working")
+        self._set_hint(_HINT_BUSY)
         # pump.run() sets ``running`` eagerly at call time, so the badge
         # refresh below already sees the loop as executing (rainbow on).
         events = self.pump.run(user_input, attachments)
@@ -1205,6 +1259,7 @@ class MainScreen(Screen[None]):
             )
             self._sync_usage()
             self._report_state("idle")
+            self._set_hint(_HINT_IDLE)
             self._refresh_goal_indicator()
             # M2: a proposal round that ends without leftover steers pops
             # the verify-command confirmation picker.
@@ -1274,6 +1329,8 @@ class MainScreen(Screen[None]):
         elif isinstance(event, GoalResumed):
             chat.add_info(f"🎯 恢复 goal 闭环，预算已重置（{event.max_rounds} 轮）")
             self._refresh_goal_indicator()
+        elif isinstance(event, QueueHeld):
+            self._on_queue_held(event)
         elif isinstance(event, ToolCallRequest):
             chat.add_tool_card(event.id, event.name, event.arguments)
             statusbar.set_state(f"running {event.name}…", "tool")

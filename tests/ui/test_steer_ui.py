@@ -537,3 +537,68 @@ async def test_queued_steer_message_delivered_verbatim(tmp_path):
         gate.set()
         await wait_until(pilot, lambda: len(client.calls) == 2 and "done" in chat.transcript_text())
         assert client.calls[1][-1].content == f"顺便看看 {outside}"
+
+
+@pytest.mark.asyncio
+async def test_alt_enter_while_busy_queues_follow_up_after_the_task(tmp_path):
+    """Alt+Enter while busy: the message is not injected into the running
+    turn; it starts its own turn once the task is done."""
+    gate = asyncio.Event()
+    client = GatedClient()
+    client.add([ToolCallEvent(id="c1", name="read", arguments={"path": "main.py"})])
+    client.add([TextChunk(text="mid")], gate=gate)
+    client.add([TextChunk(text="followed up")])
+    (tmp_path / "main.py").write_text("x = 1\n")
+    app = make_app(tmp_path, client)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = get_screen(pilot)
+        chat = screen.query_one("#chat", ChatWidget)
+        input_widget = screen.query_one("#input", InputWidget)
+
+        screen.run_worker(screen._handle_turn("read main.py"))
+        await wait_until(pilot, lambda: len(client.calls) == 2)
+        assert "alt+enter" in str(screen.query_one("#hint").render()).lower()
+
+        input_widget.text = "然后写总结"
+        await pilot.press("alt+enter")
+        await pilot.pause()
+        assert [i.mode for i in screen.agent.queued_items] == ["follow_up"]
+
+        gate.set()
+        await wait_until(
+            pilot,
+            lambda: len(client.calls) == 3
+            and "followed up" in chat.transcript_text(),
+        )
+
+        # Not injected mid-turn (the second request did not carry it); it
+        # opened the follow-up turn instead.
+        assert all(m.content != "然后写总结" for m in client.calls[1])
+        assert client.calls[2][-1].content == "然后写总结"
+        assert not screen._agent_busy
+        assert "alt+enter" not in str(screen.query_one("#hint").render()).lower()
+
+
+@pytest.mark.asyncio
+async def test_withdrawn_queue_returns_text_to_the_input(tmp_path):
+    from limbo.pump import QueueHeld
+
+    app = make_app(tmp_path, GatedClient())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = get_screen(pilot)
+        chat = screen.query_one("#chat", ChatWidget)
+        input_widget = screen.query_one("#input", InputWidget)
+        item_id = screen.agent.steer("第一条")
+        chat.add_queued_message(item_id, "第一条")
+        item = screen.agent.queued_items[0]
+        assert screen.agent.cancel_steer(item_id)
+
+        await screen._process_agent_event(QueueHeld(policy="withdraw", items=[item]))
+        await pilot.pause()
+
+        assert input_widget.text == "第一条"
+        transcript = chat.transcript_text()
+        assert "（已取消）" in transcript
+        assert "已撤回 1 条排队消息" in transcript

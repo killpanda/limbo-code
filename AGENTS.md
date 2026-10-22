@@ -67,7 +67,7 @@ src/limbo/
 - Loop top: auto-compaction check → steer drain → LLM call. A provider context-overflow error (`llm.retry.is_context_overflow`: 413 or known overflow texts, never rate limits) triggers `compact(trigger="overflow")` and one resend per turn; a second overflow or a failed compaction surfaces as `ErrorEvent`. Turn ends on a tool-call-free response; `max_iterations` (default 50) cancels pending calls with placeholder results
 - Tool calls in one turn run **concurrently** (`[tools] parallel`); results stream in completion order, recorded in source order; same-file mutations serialized by `mutation_queue`
 - `finish_reason` `length`/`max_tokens` → whole batch failed without execution; the error result names the effective `max_tokens` and steers the model to write large scripts via `write` instead of re-issuing the same call. 3 consecutive length stops abort the turn with actionable guidance (trace `kind=length_stop_loop`); a text-only truncated response emits a "may be incomplete" warning
-- Mid-turn user input queues as *steer* (LIM-20): injected at loop top, or as turn-end follow-up
+- Mid-turn user input queues as *steer* (LIM-20): injected at loop top, or as turn-end follow-up. Alt+Enter (headless: `/queue <text>`) queues a `follow_up` instead: only `TurnPump._supervise` drains it, after the whole task (goal loop included). Every queue change is journaled in the session file (`queue` records: `queued` immediately, `dequeued` after the message carrying it is saved), so queued messages survive a crash and are restored (and re-rendered) on resume
 - Reasoning is stored on assistant messages and replayed per dialect (Anthropic thinking signatures, Kimi `reasoning_content`, Responses encrypted items)
 - Usage counters normalize in `llm/usage.py` (`input_tokens`+`cache_read`, `prompt_tokens`, DeepSeek cache hits) and feed the compaction trigger via `PromptSizeEstimator`
 
@@ -81,6 +81,8 @@ Providers/models live in `llm/catalog.py`; unknown models get generic OpenAI-com
 [tools]      # bash_enabled = true, parallel = true
 [compaction] # enabled, reserve_tokens = 16384, keep_recent_tokens = 20000
 [goal]       # max_rounds = 10, verify_timeout_ms = 600000
+[queue]      # after_failed_run = "continue" | "keep" | "withdraw" (queued
+             # messages after an LLM-error turn; keep/withdraw end the task)
 [ui]         # theme, show_banner
 [providers.<id>]  # base_url / api_key / api_key_env / headers
 ```
@@ -91,7 +93,7 @@ Skills: `~/.limbo/skills/<name>/SKILL.md` (user) and `<workdir>/.agents/skills/<
 
 ## UI
 
-Single column: status bar (state/elapsed/tokens/model/workdir/queued + rainbow 🎯GOAL badge while a goal loop runs + ⌨code badge while Code Mode is on) → scrolling chat flow (user `❯`, streaming Markdown, tool cards, errors) → input box (Enter submits, Shift+Enter newline, paste markers, `ctrl+v` image attach) → hint line. Slash commands: `/sessions /new /export /tracing-viewer /compact /model /code-mode /help /2048 /goal` + skill commands. '/'-leading input that matches no command but looks like a path is sent as a normal message with existing files auto-attached (`ui/path_input.py`); a leading space forces plain text. After palette changes run `python scripts/check_contrast.py` (≥ 4.5:1).
+Single column: status bar (state/elapsed/tokens/model/workdir/queued + rainbow 🎯GOAL badge while a goal loop runs + ⌨code badge while Code Mode is on) → scrolling chat flow (user `❯`, streaming Markdown, tool cards, errors) → input box (Enter submits, Shift+Enter newline, Alt+Enter queues a follow-up while busy (`ui/key_fixes.py` maps its modifyOtherKeys/kitty/ESC forms), paste markers, `ctrl+v` image attach) → hint line. Slash commands: `/sessions /new /export /tracing-viewer /compact /model /code-mode /help /2048 /goal` + skill commands. '/'-leading input that matches no command but looks like a path is sent as a normal message with existing files auto-attached (`ui/path_input.py`); a leading space forces plain text. After palette changes run `python scripts/check_contrast.py` (≥ 4.5:1).
 
 `/goal <text>` starts closed-loop mode (LIM-40): the first round is a proposal round — the model explores the repo and proposes acceptance command(s) in a `<verify_proposal>` block; the user confirms in a picker (accept / edit / skip), then the goal branch of the `TurnPump` (non-UI, shared by any frontend) runs each round as a complete `Agent.run()` turn and executes the verify command; exit 0 ends the loop, otherwise the failure output is fed back verbatim into the next round until `max_rounds`, when a no-tool wrap-up turn summarizes and any user message resumes with a fresh budget. Goal state persists on `SessionMeta.goal`. Esc during verify cancels the subprocess.
 
@@ -105,7 +107,7 @@ Single column: status bar (state/elapsed/tokens/model/workdir/queued + rainbow �
   history — sub-calls never do. `SessionMeta.code_mode` persists the mode
   across resume
 - System prompt = hardcoded tool guidelines + `<workdir>/AGENTS.md` & `~/.limbo/AGENTS.md` (XML-wrapped) + skills catalog. **This file is injected into every request — keep it accurate and lean.**
-- Session JSONL is checkpointed mid-turn (before/after each LLM request, after each tool batch): new messages are appended; full atomic rewrite (0600) only on first save, compaction, or unpatched meta drift. Typed records `meta_patch` (merged over the meta line on load; goal state via `Agent.persist_meta()`) and `tool_intent` sit between message lines; unknown types are skipped. Trace holds the full-fidelity record
+- Session JSONL is checkpointed mid-turn (before/after each LLM request, after each tool batch): new messages are appended; full atomic rewrite (0600) only on first save, after a failed append, or when resume repaired dangling calls. Meta changes append `meta_patch` (a title change rewrites just the meta line via `rewrite_meta_line`, which keeps every other record). Compaction is non-destructive: a `compaction` record is appended, summarized messages stay in the file, and loading selects the active range from the latest record's `first_kept_entry_id`. Typed records `meta_patch` (merged over the meta line on load; goal state via `Agent.persist_meta()`) and `tool_intent` sit between message lines; unknown types are skipped. Trace holds the full-fidelity record
 
 ## Testing
 
