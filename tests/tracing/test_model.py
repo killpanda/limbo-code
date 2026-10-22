@@ -147,6 +147,16 @@ def test_resumed_session_segments_turns_by_order():
     assert all(len(t["spans"]) == 3 for t in tree["turns"])
 
 
+def test_resume_after_crash_closes_the_open_turn():
+    crashed = full_turn()[:4]  # no turn_end: the process died mid-tool
+    tree = build_tree(records(*crashed, {"type": "session_start", "ts": "x"}))
+    (turn,) = tree["turns"]
+    assert turn["status"] == "unfinished"
+    assert turn["spans"][-1]["status"] == "unfinished"
+    assert tree["live"] is False
+    assert tree["events"][-1]["type"] == "session_start"
+
+
 def test_open_turn_is_live_and_running():
     raw = full_turn()[:4]  # stops after tool_call
     tree = build_tree(records(*raw))

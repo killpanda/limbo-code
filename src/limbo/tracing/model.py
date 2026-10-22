@@ -143,6 +143,12 @@ class _Builder:
         summary, offset = item.summary, item.offset
         kind = summary.get("type")
         if kind == "session_start":
+            if self._open is not None:
+                # A resume after a crash: the previous run never logged
+                # turn_end, and nothing after this belongs to that turn.
+                self._open["status"] = "unfinished"
+                self._fail_pending(summary, "unfinished")
+                self._open = None
             if not self.session:
                 self.session = {k: v for k, v in summary.items() if k != "type"}
                 self.session["offset"] = offset

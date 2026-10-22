@@ -45,7 +45,8 @@ def summarize(record: dict[str, Any]) -> dict[str, Any]:
     for key, value in record.items():
         if key == "body":
             if isinstance(value, dict):
-                summary["model"] = value.get("model")
+                if value.get("model") is not None:
+                    summary["model"] = value["model"]
                 messages = value.get("messages", value.get("input"))
                 if isinstance(messages, list):
                     summary["message_count"] = len(messages)
