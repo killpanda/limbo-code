@@ -68,6 +68,8 @@ class SessionMeta(BaseModel):
     # Code Mode presentation (deepseek-harness parity): whether the
     # model-facing catalog was collapsed to `run_code`; restored on resume.
     code_mode: bool = False
+    # Plan mode (/plan): the read-only tool hook is mounted; restored on resume.
+    plan_mode: bool = False
     # Whether tool calls are journaled as ``tool_intent`` records before
     # they run. Legacy sessions lack it, so a dangling call there cannot be
     # told apart as "never started" vs "interrupted mid-run".

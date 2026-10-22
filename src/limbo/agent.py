@@ -311,8 +311,9 @@ class Agent:
             # Restore the presentation mode: recover_history dropped the
             # loaded system message, so rebuild the fresh one in code mode
             # when the session was saved with it on.
-            if self._meta.code_mode:
-                self.registry.code_mode = True
+            if self._meta.code_mode or self._meta.plan_mode:
+                self.registry.code_mode = self._meta.code_mode
+                self.registry.plan_mode = self._meta.plan_mode
                 self._init_system_message()
             # Restore the iterative-summary chain across sessions.
             self._previous_summary = next(
@@ -491,6 +492,26 @@ class Agent:
         self.trace.log(
             "code_mode", turn=self._turn_count, enabled=enabled
         )
+        return True
+
+    # -- plan mode (read-only tool hook) ------------------------------------
+
+    @property
+    def plan_mode(self) -> bool:
+        """Whether the read-only PlanModeHook is mounted on the registry."""
+        return self.registry.plan_mode
+
+    def set_plan_mode(self, enabled: bool) -> bool:
+        """Toggle plan mode: mount/unmount the hook, rebuild the prompt.
+
+        Returns False when the mode did not change. Like Code Mode, the
+        frontend owns the busy guard.
+        """
+        if self.registry.plan_mode == enabled:
+            return False
+        self.registry.plan_mode = enabled
+        self._init_system_message()
+        self.trace.log("plan_mode", turn=self._turn_count, enabled=enabled)
         return True
 
     # -- steer queue (LIM-20) -------------------------------------------------
@@ -1588,6 +1609,7 @@ class Agent:
         """
         # Keep the presentation mode in sync before snapshotting the meta.
         self._meta.code_mode = self.code_mode
+        self._meta.plan_mode = self.plan_mode
         if not self._meta.title:
             self._meta.title = derive_title(self.messages)
         meta_snapshot = self._meta_snapshot()
@@ -1726,6 +1748,7 @@ class Agent:
         if not self._session_file.exists():
             return
         self._meta.code_mode = self.code_mode
+        self._meta.plan_mode = self.plan_mode
         snapshot = self._meta_snapshot()
         with self._session_io_lock:
             if snapshot == self._session_saved_meta:
