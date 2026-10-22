@@ -135,11 +135,15 @@ class QueuedMessage(Vertical):
         item_id: str,
         text: str,
         attachments: list[Attachment] | None = None,
+        *,
+        followup: bool = False,
     ) -> None:
         super().__init__(classes="queued-message")
         self.item_id = item_id
         self._text = text
         self._attachments = attachments or []
+        # A follow-up waits for the whole task, a steer joins the turn.
+        self._followup = followup
         self.state = "queued"  # queued | delivered | cancelled
 
     def compose(self) -> ComposeResult:
@@ -169,7 +173,8 @@ class QueuedMessage(Vertical):
         try:
             if self.state == "queued":
                 status = self.query_one(".queued-status", Horizontal)
-                status.mount(Static("⏳ 排队中", classes="queued-hint", markup=False))
+                hint = "⏳ 排队中（做完再做）" if self._followup else "⏳ 排队中"
+                status.mount(Static(hint, classes="queued-hint", markup=False))
                 status.mount(Static("✕ 取消", classes="queued-cancel", markup=False))
             elif self.state == "cancelled":
                 status = self.query_one(".queued-status", Horizontal)
@@ -340,12 +345,17 @@ class ChatWidget(VerticalScroll):
     # -- queued steer messages (LIM-20) --------------------------------------
 
     def add_queued_message(
-        self, item_id: str, text: str, attachments: list[Attachment] | None = None
+        self,
+        item_id: str,
+        text: str,
+        attachments: list[Attachment] | None = None,
+        *,
+        followup: bool = False,
     ) -> QueuedMessage:
         """Optimistically render a message queued for steer injection."""
         self._current_assistant = None
         self._close_thinking()
-        card = QueuedMessage(item_id, text, attachments)
+        card = QueuedMessage(item_id, text, attachments, followup=followup)
         self.queued_cards[item_id] = card
         self.messages.append(card)
         self._mount_and_scroll(card)

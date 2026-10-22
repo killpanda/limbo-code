@@ -255,14 +255,14 @@ class FakeAgent:
     async def compact(self, trigger="manual"):
         yield CompactionEvent(compacted=False, trigger=trigger, reason="fake")
 
-    def drain_steer(self):
-        return self._queue.drain()
+    def drain_steer(self, modes=("steer", "follow_up")):
+        return self._queue.drain(modes)
 
     def has_pending_steer(self):
         return len(self._queue) > 0
 
-    def steer(self, text):
-        return self._queue.offer(text).id
+    def steer(self, text, attachments=None, mode="steer"):
+        return self._queue.offer(text, attachments, mode).id
 
     def persist_meta(self):
         pass
@@ -284,11 +284,11 @@ async def test_leftover_steer_outranks_goal_and_yields_steer_events(
     original_drain = agent.drain_steer
     drained_once = {"done": False}
 
-    def fake_drain():
+    def fake_drain(modes=("steer", "follow_up")):
         if not drained_once["done"]:
             drained_once["done"] = True
             return [leftover]
-        return original_drain()
+        return original_drain(modes)
 
     agent.drain_steer = fake_drain
 
@@ -329,13 +329,13 @@ async def test_supervisor_drains_stragglers_into_followup_turn(workdir):
     original_drain = agent.drain_steer
     calls = {"n": 0}
 
-    def fake_drain():
+    def fake_drain(modes=("steer", "follow_up")):
         calls["n"] += 1
         if calls["n"] == 2:
             # Boundary drain (call 1) found nothing; the supervisor drain
             # (call 2) sees the straggler.
             return [straggler]
-        return original_drain()
+        return original_drain(modes)
 
     agent.drain_steer = fake_drain
 
@@ -424,3 +424,25 @@ def test_pump_imports_without_textual():
         "assert not bad, f'non-UI layer pulled in textual: {bad}'"
     )
     subprocess.run([sys.executable, "-c", code], check=True)
+
+
+@pytest.mark.asyncio
+async def test_follow_up_waits_for_the_goal_loop(workdir, monkeypatch):
+    """A follow-up never enters a goal round: it runs after the loop ends."""
+    agent = FakeAgent(workdir)
+    pump = TurnPump(agent, workdir)
+    pump.set_goal("g", verify_command="pytest")
+    agent.steer("整理一下", mode="follow_up")
+    verdicts = iter([VerifyResult(exit_code=1), VerifyResult(exit_code=0)])
+
+    async def verify(command, workdir, **kwargs):
+        return next(verdicts)
+
+    monkeypatch.setattr(pump_module, "run_verify", verify)
+
+    events = await collect(pump.run("goal prompt"))
+
+    # Two goal rounds first; the follow-up is the last turn.
+    assert len(agent.inputs) == 3
+    assert agent.inputs[-1] == "整理一下"
+    assert any(isinstance(e, GoalPassed) for e in events)

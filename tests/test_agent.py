@@ -925,6 +925,115 @@ async def test_agent_resume_of_legacy_session_marks_it_journaled(workdir):
     assert load_session_full(path).meta.tool_intents is True
 
 
+def _resume(agent: Agent, responses=()) -> Agent:
+    return Agent(
+        config=Config(),
+        llm_client=FakeLLMClient(list(responses)),
+        workdir=agent.workdir,
+        session_dir=agent.session_path.parent,
+        resume=agent.session_path,
+    )
+
+
+@pytest.mark.asyncio
+async def test_queued_messages_survive_a_crash(workdir):
+    agent = Agent(
+        config=Config(),
+        llm_client=FakeLLMClient([[TextChunk(text="a")]]),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    await _collect(agent.run("hi"))
+    # Queued while a task runs; the process dies before they are drained.
+    steer_id = agent.steer("also check the docs")
+    follow_id = agent.steer("then write a summary", mode="follow_up")
+
+    resumed = _resume(agent, [[TextChunk(text="b")]])
+
+    assert [(i.id, i.text, i.mode) for i in resumed.queued_items] == [
+        (steer_id, "also check the docs", "steer"),
+        (follow_id, "then write a summary", "follow_up"),
+    ]
+    # The next turn injects the steer before its input; the follow-up
+    # stays for the pump's end-of-task drain.
+    events = await _collect(resumed.run("continue"))
+    assert [e.id for e in events if isinstance(e, SteerEvent)] == [steer_id]
+    assert [i.id for i in resumed.queued_items] == [follow_id]
+    # The drained steer is journaled as dequeued; the follow-up is not.
+    again = _resume(resumed)
+    assert [i.id for i in again.queued_items] == [follow_id]
+
+
+@pytest.mark.asyncio
+async def test_cancelled_queue_item_does_not_come_back(workdir):
+    agent = Agent(
+        config=Config(),
+        llm_client=FakeLLMClient([[TextChunk(text="a")]]),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    await _collect(agent.run("hi"))
+    item_id = agent.steer("never mind")
+    assert agent.cancel_steer(item_id)
+    await agent._save_session()
+
+    assert _resume(agent).queued_items == []
+
+
+@pytest.mark.asyncio
+async def test_queue_is_rejournaled_by_a_full_rewrite(workdir):
+    # Queued before the session file exists: the first (full) save must
+    # journal it, since there was nothing to append to.
+    agent = Agent(
+        config=Config(),
+        llm_client=FakeLLMClient([[TextChunk(text="a")]]),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    item_id = agent.steer("after this", mode="follow_up")
+
+    await _collect(agent.run("hi"))
+
+    assert [i.id for i in _resume(agent).queued_items] == [item_id]
+
+
+@pytest.mark.asyncio
+async def test_follow_up_is_not_injected_mid_turn(workdir):
+    class QueueingTool:
+        name = "queueing"
+        description = "queues one steer and one follow-up"
+        parameters = {"type": "object", "properties": {}}
+        replay = "unsafe"
+
+        def execute(self, arguments):
+            agent.steer("steer now")
+            agent.steer("later please", mode="follow_up")
+            return ToolResult(success=True, output="ok")
+
+        def cancel(self):
+            pass
+
+    agent = Agent(
+        config=Config(),
+        llm_client=FakeLLMClient(
+            [
+                [ToolCallEvent(id="c1", name="queueing", arguments={})],
+                [TextChunk(text="done")],
+            ]
+        ),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    agent.registry._tools["queueing"] = QueueingTool()
+
+    await _collect(agent.run("go"))
+
+    contents = [m.content for m in agent.messages if m.role == "user"]
+    assert "steer now" in contents
+    assert "later please" not in contents
+    assert [i.text for i in agent.queued_items] == ["later please"]
+
+
 @pytest.mark.asyncio
 async def test_agent_stores_reasoning_on_assistant_message(workdir):
     from limbo.agent import ThinkingDelta

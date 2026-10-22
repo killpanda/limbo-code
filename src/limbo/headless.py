@@ -74,6 +74,7 @@ from limbo.pump import (
     PumpEvent,
     TurnPump,
 )
+from limbo.steer import FOLLOW_UP
 from limbo.tracing.command import TracingViewerCommand
 
 # -- input events (stdin → frontend) ------------------------------------------
@@ -140,6 +141,13 @@ class SlashNew:
 
 
 @dataclass(frozen=True)
+class SlashQueue:
+    """``/queue <text>``: a follow-up, handled after the current task."""
+
+    text: str
+
+
+@dataclass(frozen=True)
 class SlashHelp:
     pass
 
@@ -165,6 +173,7 @@ Submission = (
     | SlashCompact
     | SlashModel
     | SlashNew
+    | SlashQueue
     | SlashHelp
     | SlashQuit
     | SlashTracingViewer
@@ -192,6 +201,8 @@ def parse_submission(text: str) -> Submission:
         return SlashModel(arg)
     if name == "new":
         return SlashNew()
+    if name == "queue":
+        return SlashQueue(arg)
     if name == "help":
         return SlashHelp()
     if name in ("quit", "exit"):
@@ -436,6 +447,7 @@ HELP_TEXT = """可用命令：
   /compact       立即压缩对话历史
   /model [id]    查看/切换模型
   /new           开始新会话
+  /queue <文本>  当前任务做完后再处理这条消息（空闲时直接发送）
   /tracing-viewer [id|off]  在浏览器查看 trace（打印本地链接）
   /quit          退出
 忙时输入的普通文本会作为插话排队；Esc / Ctrl+C 中断当前任务。"""
@@ -552,6 +564,9 @@ class HeadlessFrontend:
             if isinstance(command, Prompt):
                 self._agent.steer(text)
                 self._line(f"➤ 已排队插话：{_first_line(text)}")
+            elif isinstance(command, SlashQueue) and command.text:
+                self._agent.steer(command.text, mode=FOLLOW_UP)
+                self._line(f"➤ 已排队，当前任务完成后处理：{_first_line(command.text)}")
             elif isinstance(command, SlashHelp):
                 self._line(HELP_TEXT)
             elif isinstance(command, SlashTracingViewer):
@@ -564,6 +579,12 @@ class HeadlessFrontend:
             return
         if isinstance(command, Prompt):
             self._start(self._pump.run(text))
+        elif isinstance(command, SlashQueue):
+            if command.text:
+                # Idle: nothing to wait for, so it is a plain prompt.
+                self._start(self._pump.run(command.text))
+            else:
+                self._line("用法：/queue <文本>")
         elif isinstance(command, SlashGoal):
             self._cmd_goal(command.arg)
         elif isinstance(command, SlashCompact):

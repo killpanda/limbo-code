@@ -46,18 +46,21 @@ from limbo.models import (
 from limbo.prompt import build_system_prompt
 from limbo.sessions import (
     CompactionRecord,
+    QueuedMessageRecord,
     SessionMeta,
     append_session_messages,
     append_session_records,
     compaction_record,
+    dequeued_record,
     derive_title,
     load_session_full,
     meta_patch_record,
+    queued_record,
     rewrite_meta_line,
     save_session,
     tool_intent_record,
 )
-from limbo.steer import SteerItem, SteerQueue
+from limbo.steer import FOLLOW_UP, STEER, SteerItem, SteerMode, SteerQueue
 from limbo.tools.registry import ToolRegistry
 from limbo.trace import TRACE_SCHEMA, TraceLogger, trace_path_for, utc_now_iso
 
@@ -239,6 +242,9 @@ class Agent:
         # Compaction records not yet appended (non-destructive compaction:
         # the record goes into the journal, the summarized messages stay).
         self._pending_compactions: list[CompactionRecord] = []
+        # Queue items injected or cancelled since the last save; their
+        # "dequeued" record is written after the messages that carry them.
+        self._pending_dequeued: list[str] = []
         # Serializes session-file writes: checkpoints run in a worker thread
         # while meta patches (goal changes) are written from the loop.
         self._session_io_lock = threading.Lock()
@@ -270,6 +276,20 @@ class Agent:
             )
             self.messages.extend(recovery.messages)
             self._pending_reruns = recovery.rerun
+            if loaded.queue:
+                # Messages still queued when the process died (pi-durable's
+                # persisted inbox): back into the queue, already journaled.
+                self._steer_queue.restore(
+                    [
+                        SteerItem(
+                            id=q.id,
+                            text=q.text,
+                            attachments=q.attachments,
+                            mode=FOLLOW_UP if q.mode == FOLLOW_UP else STEER,
+                        )
+                        for q in loaded.queue
+                    ]
+                )
             self._session_saved_meta = self._meta_snapshot()
             # From here on every call is journaled, so a later crash can be
             # recovered precisely even if this session predates intents
@@ -462,13 +482,43 @@ class Agent:
 
     # -- steer queue (LIM-20) -------------------------------------------------
 
-    def steer(self, text: str, attachments: list[Attachment] | None = None) -> str:
-        """Queue a user message for injection into the running turn.
+    def steer(
+        self,
+        text: str,
+        attachments: list[Attachment] | None = None,
+        mode: SteerMode = STEER,
+    ) -> str:
+        """Queue a user message for the running task.
 
-        Non-blocking; safe to call from the UI at any time. Returns the
-        queued item's id (the UI binds its queued card to it).
+        ``steer`` (default) is injected at the next consistency point of the
+        running turn; ``follow_up`` waits until the task is done. The item
+        is journaled immediately so a crash keeps it. Non-blocking; safe to
+        call from the UI at any time. Returns the queued item's id (the UI
+        binds its queued card to it).
         """
-        return self._steer_queue.offer(text, attachments).id
+        with self._session_io_lock:
+            item = self._steer_queue.offer(text, attachments, mode)
+            if self._session_file.exists() and not self._session_full_rewrite_needed:
+                try:
+                    append_session_records(
+                        self._session_file, [queued_record(_queue_record(item))]
+                    )
+                except OSError as e:
+                    # The next full rewrite journals the whole queue.
+                    self._session_full_rewrite_needed = True
+                    self.trace.log(
+                        "session_save_error",
+                        turn=self._turn_count,
+                        phase="queue",
+                        error=str(e),
+                    )
+            # Otherwise the first (full) save journals the queue.
+        return item.id
+
+    def _dequeue(self, items: list[SteerItem]) -> list[SteerItem]:
+        """Note items that left the queue; journaled with the next save."""
+        self._pending_dequeued.extend(item.id for item in items)
+        return items
 
     def cancel_steer(self, item_id: str) -> bool:
         """Cancel a still-queued steer message.
@@ -477,9 +527,11 @@ class Agent:
         injected — past the boundary it is part of history and cannot be
         retracted) or the id is unknown.
         """
-        item = self._steer_queue.cancel(item_id)
-        if item is None:
-            return False
+        with self._session_io_lock:
+            item = self._steer_queue.cancel(item_id)
+            if item is None:
+                return False
+            self._dequeue([item])
         self.trace.log(
             "steer_cancelled",
             turn=self._turn_count,
@@ -490,17 +542,31 @@ class Agent:
 
     def cancel_latest_steer(self) -> str | None:
         """Cancel the newest queued steer message (Esc path)."""
-        item = self._steer_queue.cancel_latest()
-        if item is None:
-            return None
+        with self._session_io_lock:
+            item = self._steer_queue.cancel_latest()
+            if item is None:
+                return None
+            self._dequeue([item])
         self.trace.log(
             "steer_cancelled", turn=self._turn_count, id=item.id, text=item.text
         )
         return item.id
 
-    def drain_steer(self) -> list[SteerItem]:
-        """Remove and return all queued items in FIFO order."""
-        return self._steer_queue.drain()
+    def drain_steer(
+        self, modes: tuple[SteerMode, ...] = (STEER, FOLLOW_UP)
+    ) -> list[SteerItem]:
+        """Remove and return the queued items of ``modes`` in FIFO order.
+
+        The agent's own drains (loop top, turn end, run head) take steers
+        only; follow-ups wait for the pump's end-of-task drain.
+        """
+        with self._session_io_lock:
+            return self._dequeue(self._steer_queue.drain(modes))
+
+    @property
+    def queued_items(self) -> list[SteerItem]:
+        """Read-only snapshot of the queue (e.g. to re-render after resume)."""
+        return list(self._steer_queue)
 
     # -- interrupt (LIM-53) ---------------------------------------------------
 
@@ -632,7 +698,7 @@ class Agent:
         # Fallback drain (RFC LIM-20): leftovers from a previous turn (error
         # exit, max-iterations cancellation, or the exit-window race) are
         # injected BEFORE this turn's input so submission order is preserved.
-        for item in self.drain_steer():
+        for item in self.drain_steer((STEER,)):
             yield self._inject_steer(item, followup=True)
         async for event in self._rerun_interrupted():
             yield event
@@ -811,7 +877,7 @@ class Agent:
             # Loop-top steer drain (RFC LIM-20): history is consistent here
             # (previous batch's tool results are all recorded) and no request
             # is in flight — the same safety argument as loop-top compaction.
-            for item in self.drain_steer():
+            for item in self.drain_steer((STEER,)):
                 yield self._inject_steer(item, followup=False)
             # Durable progress: the user input, injected steers, and any
             # compaction above are on disk before the request goes out.
@@ -871,7 +937,7 @@ class Agent:
                 # fallback drain, never auto-injected by the interrupt.
                 if self._turn_interrupted:
                     break
-                pending = self.drain_steer()
+                pending = self.drain_steer((STEER,))
                 if not pending:
                     break
                 self._iteration_count = 0
@@ -1528,6 +1594,12 @@ class Agent:
             self._session_saved_title = self._meta.title
             self._session_full_rewrite_needed = False
             self._pending_compactions.clear()
+            # The rewrite dropped the queue journal: re-journal what is
+            # still queued (everything else has left the queue).
+            self._pending_dequeued.clear()
+            queued = [queued_record(_queue_record(i)) for i in self._steer_queue]
+            if queued:
+                append_session_records(self._session_file, queued)
             return
         try:
             if self._meta.title != self._session_saved_title:
@@ -1549,6 +1621,13 @@ class Agent:
             if new_messages:
                 append_session_messages(self._session_file, new_messages)
                 self._session_saved_count = len(self.messages)
+            if self._pending_dequeued:
+                # After the messages: an injected item must never vanish
+                # from the queue before its message is on disk.
+                append_session_records(
+                    self._session_file, [dequeued_record(self._pending_dequeued)]
+                )
+                self._pending_dequeued.clear()
         except OSError:
             # Partial or failed append: some records may already be on disk,
             # and re-appending next time would duplicate them. Force a full
@@ -1620,3 +1699,9 @@ class Agent:
                 self._session_file, [meta_patch_record(self._meta)]
             )
             self._session_saved_meta = snapshot
+
+
+def _queue_record(item: SteerItem) -> QueuedMessageRecord:
+    return QueuedMessageRecord(
+        id=item.id, text=item.text, attachments=item.attachments, mode=item.mode
+    )

@@ -40,10 +40,14 @@ class UserSubmitted(Message):
         attachments: list[Attachment] | None = None,
         *,
         force_text: bool = False,
+        followup: bool = False,
     ):
         self.message = message
         self.attachments = attachments or []
         self.force_text = force_text
+        # Alt+Enter: while busy, queue as a follow-up (after the task)
+        # instead of steering the running turn.
+        self.followup = followup
         super().__init__()
 
 
@@ -79,6 +83,7 @@ class InputWidget(TextArea):
     BINDINGS = [
         Binding("enter", "submit", "Submit", priority=True),
         Binding("shift+enter", "newline", "Newline", priority=True),
+        Binding("alt+enter", "submit_followup", "Queue follow-up", priority=True),
         Binding("up", "menu_up", show=False, priority=True),
         Binding("down", "menu_down", show=False, priority=True),
         Binding("tab", "menu_complete", show=False, priority=True),
@@ -244,7 +249,10 @@ class InputWidget(TextArea):
 
     # -- submission ------------------------------------------------------------
 
-    def action_submit(self) -> None:
+    def action_submit_followup(self) -> None:
+        self.action_submit(followup=True)
+
+    def action_submit(self, followup: bool = False) -> None:
         screen = self._menu_screen()
         if screen is not None and screen.slash_menu_complete(execute=True):
             return
@@ -265,7 +273,11 @@ class InputWidget(TextArea):
             self._history_index = None
             self._history_value = None
             self._draft = ""
-            self.post_message(UserSubmitted(text, attachments, force_text=force_text))
+            self.post_message(
+                UserSubmitted(
+                    text, attachments, force_text=force_text, followup=followup
+                )
+            )
             self.clear()
 
     def action_newline(self) -> None:

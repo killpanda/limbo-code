@@ -23,7 +23,7 @@ from pydantic import BaseModel
 
 from limbo.compaction import is_summary_message, make_summary_message
 from limbo.goal import GoalState
-from limbo.models import Message
+from limbo.models import Attachment, Message
 from limbo.trace import read_trace
 
 META_TYPE = "meta"
@@ -33,6 +33,9 @@ COMPACTION_TYPE = "compaction"
 # appended between message lines, never rewritten in place.
 TOOL_INTENT_TYPE = "tool_intent"
 META_PATCH_TYPE = "meta_patch"
+# Queued user messages (steer / follow-up inbox): "queued" when offered,
+# "dequeued" once injected into history or cancelled.
+QUEUE_TYPE = "queue"
 
 
 class SessionNotFoundError(Exception):
@@ -107,6 +110,15 @@ class ToolIntentRecord(BaseModel):
     created_at: str = ""
 
 
+class QueuedMessageRecord(BaseModel):
+    """A user message queued mid-turn, journaled so a crash keeps it."""
+
+    id: str
+    text: str
+    attachments: list[Attachment] = []
+    mode: str = "steer"  # "steer" | "follow_up"
+
+
 @dataclass
 class LoadedSession:
     """Everything :func:`load_session_full` reconstructs from one file."""
@@ -115,6 +127,8 @@ class LoadedSession:
     messages: list[Message]
     compactions: list[CompactionRecord] = field(default_factory=list)
     intents: list[ToolIntentRecord] = field(default_factory=list)
+    # Messages still queued when the file was last written, in FIFO order.
+    queue: list[QueuedMessageRecord] = field(default_factory=list)
 
 
 def _utc_now_iso() -> str:
@@ -224,6 +238,16 @@ def meta_patch_record(meta: SessionMeta) -> dict[str, Any]:
         "type": META_PATCH_TYPE,
         **meta.model_dump(exclude={"path", "id"}),
     }
+
+
+def queued_record(item: QueuedMessageRecord) -> dict[str, Any]:
+    """Serialize a newly queued message."""
+    return {"type": QUEUE_TYPE, "op": "queued", **item.model_dump()}
+
+
+def dequeued_record(ids: Sequence[str]) -> dict[str, Any]:
+    """Serialize queue items leaving the queue (injected or cancelled)."""
+    return {"type": QUEUE_TYPE, "op": "dequeued", "ids": list(ids)}
 
 
 def compaction_record(record: CompactionRecord) -> dict[str, Any]:
@@ -345,6 +369,7 @@ def load_session_full(path: Path) -> LoadedSession:
     messages: list[Message] = []
     compactions: list[CompactionRecord] = []
     intents: list[ToolIntentRecord] = []
+    queued: dict[str, QueuedMessageRecord] = {}
     with path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -378,6 +403,18 @@ def load_session_full(path: Path) -> LoadedSession:
                     compactions.append(CompactionRecord(**data))
                 except ValueError:
                     continue
+            elif kind == QUEUE_TYPE:
+                if data.get("op") == "queued":
+                    try:
+                        item = QueuedMessageRecord(
+                            **{k: v for k, v in data.items() if k != "op"}
+                        )
+                    except ValueError:
+                        continue
+                    queued[item.id] = item
+                elif data.get("op") == "dequeued":
+                    for item_id in data.get("ids") or []:
+                        queued.pop(item_id, None)
             elif kind == TOOL_INTENT_TYPE:
                 try:
                     intents.append(ToolIntentRecord(**data))
@@ -398,6 +435,7 @@ def load_session_full(path: Path) -> LoadedSession:
         messages=_apply_compactions(messages, compactions),
         compactions=compactions,
         intents=intents,
+        queue=list(queued.values()),
     )
 
 
