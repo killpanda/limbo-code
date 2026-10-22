@@ -311,3 +311,27 @@ def save_model_to_config(model: str, path: Path | None = None) -> bool:
     except Exception:  # noqa: BLE001 - any failure degrades to session-only
         return False
     return True
+
+
+def save_thinking_to_config(level: str | None, path: Path | None = None) -> bool:
+    """Persist ``[llm] thinking_effort`` (None removes it); same contract as
+    :func:`save_model_to_config`."""
+    path = path or DEFAULT_CONFIG_PATH
+    try:
+        if path.exists():
+            doc = tomlkit.parse(path.read_text(encoding="utf-8"))
+        else:
+            doc = tomlkit.document()
+        llm = doc.get("llm")
+        if not isinstance(llm, dict):
+            llm = tomlkit.table()
+            doc["llm"] = llm
+        if level is None:
+            llm.pop("thinking_effort", None)
+        else:
+            llm["thinking_effort"] = level
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+    except Exception:  # noqa: BLE001 - any failure degrades to session-only
+        return False
+    return True

@@ -368,41 +368,39 @@ CommandPalette .palette-input {
     margin-bottom: 1;
 }
 
-/* ---- 模型选择弹窗 ---- */
-ModelPicker {
-    align: center middle;
-}
-ModelPicker #model-picker {
-    width: 80%;
-    max-width: 110;
-    height: auto;
-    max-height: 80%;
-    border: round $accent;
-    background: $surface;
-    padding: 1 2;
-}
-ModelPicker #picker-title {
-    text-style: bold;
+/* ---- 模型选择 / 登录弹窗 ---- */
+ModelPicker #model-search, AuthDialog Input {
+    border: none;
+    background: $panel;
+    padding: 0 1;
+    height: 1;
     margin-bottom: 1;
 }
+AuthDialog Input:focus {
+    background: $selected-bg;
+}
 ModelPicker ListView {
-    height: auto;
-    max-height: 24;
+    max-height: 16;
 }
-ModelPicker ListView:focus > ListItem.-highlight {
-    background: $panel;
-    color: $accent;
-}
-ModelPicker .provider-header {
+ModelPicker .provider-header, ModelPicker .recent-header {
     color: $text-secondary;
     text-style: bold;
 }
 ModelPicker .unavailable {
     color: $text-tertiary;
 }
+ModelPicker .custom-row {
+    color: $primary;
+}
 ModelPicker #picker-hint {
     color: $warning;
-    margin-top: 1;
+    height: auto;
+}
+AuthDialog .auth-intro {
+    height: auto;
+    margin-bottom: 1;
+}
+AuthDialog .auth-status {
     height: auto;
 }
 

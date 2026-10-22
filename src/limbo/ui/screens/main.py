@@ -27,7 +27,7 @@ from limbo.agent import (
     UsageUpdate,
 )
 from limbo.compaction import is_summary_message
-from limbo.config import Config
+from limbo.config import Config, save_thinking_to_config
 from limbo.goal import (
     STATUS_ACTIVE,
     GoalClear,
@@ -38,7 +38,7 @@ from limbo.goal import (
     parse_verify_proposal,
 )
 from limbo.integrations import AgentState, create_reporters, install_exit_hooks
-from limbo.llm.catalog import resolve_model
+from limbo.llm.catalog import resolve_model, thinking_choices
 from limbo.llm.client import LLMClient
 from limbo.llm.factory import create_llm_client
 from limbo.model_switch import (
@@ -59,6 +59,7 @@ from limbo.pump import (
 from limbo.sessions import derive_title, export_jsonl, export_markdown, list_sessions
 from limbo.skills import Skill, discover_skills
 from limbo.tools.bash import BashTool
+from limbo.ui import recent_models
 from limbo.ui.commands import SlashCommand, SlashCommandRegistry
 from limbo.ui.path_input import attachments_from_text, looks_like_path
 from limbo.ui.screens.btw import BtwScreen
@@ -92,6 +93,8 @@ class MainScreen(Screen[None]):
         Binding("ctrl+o", "toggle_tools", "展开/收起工具输出"),
         Binding("ctrl+p", "command_palette", "命令面板", priority=True),
         Binding("ctrl+s", "sessions", "会话", priority=True),
+        Binding("ctrl+l", "models", "模型", priority=True),
+        Binding("shift+tab", "cycle_thinking", "思考档位", priority=True),
         # Only enabled in compact mode (see check_action), so the input's
         # own ctrl+d keeps working on wide terminals.
         Binding("ctrl+d", "toggle_sidebar", "侧栏详情", priority=True),
@@ -669,6 +672,26 @@ class MainScreen(Screen[None]):
             self._on_model_picked,
         )
 
+    def action_models(self) -> None:
+        self._switch_model("")
+
+    def action_cycle_thinking(self) -> None:
+        """shift+tab: step ``thinking_effort`` through the model's levels."""
+        spec = resolve_model(self.config.llm.model)
+        choices = thinking_choices(spec)
+        if not choices:
+            self.app.notify(f"{spec.id} 没有可调的思考档位", timeout=2)
+            return
+        current = self.config.llm.thinking_effort
+        index = choices.index(current) if current in choices else 0
+        level = choices[(index + 1) % len(choices)]
+        # The clients read config.llm.thinking_effort per request, so the
+        # next request uses the new level without swapping the client.
+        self.config.llm.thinking_effort = level
+        save_thinking_to_config(level)
+        self._sync_sidebar()
+        self.app.notify(f"思考档位 · {level or '默认'}", timeout=2)
+
     def _on_model_picked(self, model_id: str | None) -> None:
         if model_id is not None:
             self._apply_model_switch(model_id)
@@ -679,10 +702,13 @@ class MainScreen(Screen[None]):
 
     def _apply_model_switch(self, model_id: str) -> None:
         chat = self.query_one("#chat", ChatWidget)
+        previous = self.config.llm.model
         verdict = prepare_model_switch(model_id, self.config)
         for notice in verdict.notices:
             chat.add_info(notice)
         if verdict.switched:
+            recent_models.push(previous)
+            recent_models.push(model_id)
             self.run_worker(self._swap_llm_client())
 
     # -- /code-mode: Code Mode presentation toggle ---------------------------
