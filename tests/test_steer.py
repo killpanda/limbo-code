@@ -64,3 +64,26 @@ def test_cancel_latest_pops_newest_first():
     assert len(queue) == 1
     assert queue.cancel_latest() is not None
     assert queue.cancel_latest() is None
+
+
+def test_drain_by_mode_leaves_follow_ups_queued():
+    queue = SteerQueue()
+    queue.offer("steer one")
+    later = queue.offer("after the task", mode="follow_up")
+    queue.offer("steer two")
+
+    drained = queue.drain(("steer",))
+
+    assert [i.text for i in drained] == ["steer one", "steer two"]
+    assert list(queue) == [later]
+    assert queue.drain() == [later]
+
+
+def test_restore_appends_in_order():
+    queue = SteerQueue()
+    first = queue.offer("live")
+    restored = SteerQueue().offer("from disk", mode="follow_up")
+
+    queue.restore([restored])
+
+    assert list(queue) == [first, restored]

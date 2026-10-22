@@ -25,6 +25,14 @@ def test_kitty_shift_enter():
     assert _keys_for("\x1b[13;2u") == ["shift+enter"]
 
 
+def test_alt_enter_encodings():
+    """Alt+Enter (queue a follow-up) in modifyOtherKeys, kitty and the
+    legacy ESC-prefixed form all reach the app as alt+enter."""
+    assert _keys_for("\x1b[27;3;13~") == ["alt+enter"]
+    assert _keys_for("\x1b[13;3u") == ["alt+enter"]
+    assert _keys_for("\x1b\r") == ["alt+enter"]
+
+
 def test_other_sequences_unaffected():
     assert _keys_for("a") == ["a"]
     assert _keys_for("\x1b[A") == ["up"]

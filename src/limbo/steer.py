@@ -4,16 +4,27 @@ The queue owns queueing semantics — id generation, FIFO order, and the
 cancel boundary (an item can be cancelled by id only until it is drained;
 past that point it is part of the conversation history and cannot be
 retracted). The Agent owns the other half: *when* to drain (loop top,
-turn end, run head — the history-consistency points) and the tracing.
+turn end, run head — the history-consistency points), the tracing, and
+journaling the queue into the session file so it survives a crash.
+
+Two modes (pi-durable's inbox): a ``steer`` message is injected at the
+next consistency point of the running turn; a ``follow_up`` waits until
+the current task (including a goal loop) is done and then starts a turn.
 """
 
 from __future__ import annotations
 
 import collections
 import secrets
+from collections.abc import Collection
 from dataclasses import dataclass, field
+from typing import Literal
 
 from limbo.models import Attachment
+
+SteerMode = Literal["steer", "follow_up"]
+STEER: SteerMode = "steer"
+FOLLOW_UP: SteerMode = "follow_up"
 
 
 @dataclass(frozen=True)
@@ -23,6 +34,7 @@ class SteerItem:
     id: str
     text: str
     attachments: list[Attachment] = field(default_factory=list)
+    mode: SteerMode = STEER
 
 
 class SteerQueue:
@@ -43,13 +55,25 @@ class SteerQueue:
         """Read-only view of the queued items (FIFO); does not drain."""
         return iter(tuple(self._items))
 
-    def offer(self, text: str, attachments: list[Attachment] | None = None) -> SteerItem:
+    def offer(
+        self,
+        text: str,
+        attachments: list[Attachment] | None = None,
+        mode: SteerMode = STEER,
+    ) -> SteerItem:
         """Queue a message; returns the item (the UI binds its card to the id)."""
         item = SteerItem(
-            id=secrets.token_hex(4), text=text, attachments=attachments or []
+            id=secrets.token_hex(4),
+            text=text,
+            attachments=attachments or [],
+            mode=mode,
         )
         self._items.append(item)
         return item
+
+    def restore(self, items: list[SteerItem]) -> None:
+        """Put items recovered from the session file back, in order."""
+        self._items.extend(items)
 
     def cancel(self, item_id: str) -> SteerItem | None:
         """Remove and return a still-queued item.
@@ -69,8 +93,9 @@ class SteerQueue:
             return None
         return self._items.pop()
 
-    def drain(self) -> list[SteerItem]:
-        """Remove and return all queued items in FIFO order."""
-        items = list(self._items)
-        self._items.clear()
+    def drain(self, modes: Collection[SteerMode] = (STEER, FOLLOW_UP)) -> list[SteerItem]:
+        """Remove and return the queued items of ``modes`` in FIFO order."""
+        items = [item for item in self._items if item.mode in modes]
+        for item in items:
+            self._items.remove(item)
         return items

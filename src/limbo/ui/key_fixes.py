@@ -24,6 +24,9 @@ from textual._xterm_parser import XTermParser
 # - "\x1b[13;2u":    standard kitty encoding (already parsed correctly when
 #   the protocol is enabled, but not when TEXTUAL_DISABLE_KITTY_KEY is set)
 _SHIFT_ENTER_SEQUENCES = frozenset({"\x1b[27;2;13~", "\x1b[13;2u"})
+# Same story for Alt+Enter (queue a follow-up): modifyOtherKeys modifier 3
+# is parsed as a bare "\r", and the legacy ESC-prefixed form loses the Alt.
+_ALT_ENTER_SEQUENCES = frozenset({"\x1b[27;3;13~", "\x1b[13;3u", "\x1b\r"})
 
 _original_sequence_to_key_events = XTermParser._sequence_to_key_events
 
@@ -31,6 +34,9 @@ _original_sequence_to_key_events = XTermParser._sequence_to_key_events
 def _sequence_to_key_events(self, sequence: str, alt: bool = False):
     if sequence in _SHIFT_ENTER_SEQUENCES:
         yield events.Key("shift+enter", None)
+        return
+    if sequence in _ALT_ENTER_SEQUENCES:
+        yield events.Key("alt+enter", None)
         return
     yield from _original_sequence_to_key_events(self, sequence, alt)
 

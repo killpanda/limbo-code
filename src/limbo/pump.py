@@ -44,6 +44,7 @@ from limbo.goal import (
     run_verify,
 )
 from limbo.models import Attachment
+from limbo.steer import STEER
 
 # -- goal events (frontend renders these; headless prints them) ---------------
 
@@ -235,10 +236,11 @@ class TurnPump:
         """Run goal rounds; turn leftovers into follow-up turns.
 
         The follow-up drain lives here and nowhere else (RFC LIM-20):
-        ``_run_once`` drains between rounds (user steers outrank goal
+        ``_run_once`` drains steers between rounds (user steers outrank goal
         continuation); this supervisor catches whatever is queued past its
         last boundary — steers that arrived during verify / the wrap-up
-        turn / the teardown window — and pumps one more turn for them.
+        turn / the teardown window, and every ``follow_up`` message, which
+        waits for the whole task — and pumps one more turn for them.
         """
         next_input = user_input
         next_attachments = attachments
@@ -311,7 +313,8 @@ class TurnPump:
             # Turn boundary, user first: leftover steer messages (error
             # exits) outrank goal continuation. E1: yield one SteerEvent
             # per item so the frontend flips the queued cards by id.
-            leftovers = self._agent.drain_steer()
+            # Follow-ups wait for the whole task (the supervisor's drain).
+            leftovers = self._agent.drain_steer((STEER,))
             if leftovers:
                 for item in leftovers:
                     yield SteerEvent(id=item.id, text=item.text)

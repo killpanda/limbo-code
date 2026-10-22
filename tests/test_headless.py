@@ -30,6 +30,7 @@ from limbo.headless import (
     SlashGoal,
     SlashModel,
     SlashNew,
+    SlashQueue,
     SlashQuit,
     Submit,
     TerminalLineParser,
@@ -220,6 +221,34 @@ async def test_steer_while_busy_queues_and_follows_up(workdir):
     assert "插话已注入" in out  # SteerEvent at the turn boundary
     assert "第一轮完成" in out
     assert "第二轮完成" in out
+
+
+@pytest.mark.asyncio
+async def test_queue_while_busy_runs_after_the_task(workdir):
+    started = asyncio.Event()
+    release = asyncio.Event()
+    frontend, chunks, _ = make_frontend(
+        workdir,
+        [
+            gated_response(started, release, [TextChunk(text="第一轮完成")]),
+            [TextChunk(text="后续完成")],
+        ],
+    )
+
+    async def script():
+        yield Submit("第一个任务")
+        await started.wait()
+        yield Submit("/queue 然后整理文档")
+        await wait_until(lambda: "当前任务完成后处理" in output_of(chunks))
+        release.set()
+        yield Eof()
+
+    rc = await frontend.run(script())
+
+    assert rc == 0
+    out = output_of(chunks)
+    assert "➤ 已排队，当前任务完成后处理：然后整理文档" in out
+    assert out.index("第一轮完成") < out.index("后续完成")
 
 
 # -- interrupt -----------------------------------------------------------------
@@ -489,6 +518,7 @@ def test_parse_submission_commands():
     assert parse_submission("/quit") == SlashQuit()
     assert parse_submission("/exit") == SlashQuit()
     assert parse_submission("/bogus") == UnknownCommand("bogus")
+    assert parse_submission("/queue 再跑一遍测试") == SlashQueue("再跑一遍测试")
 
 
 def test_parse_submission_leading_space_forces_plain_text():
