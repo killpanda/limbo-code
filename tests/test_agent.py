@@ -2028,6 +2028,61 @@ async def test_compaction_is_non_destructive_on_disk(workdir, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_messages_summarized_before_saving_still_reach_the_journal(workdir):
+    cfg = _compact_cfg()
+    fake_llm = FakeLLMClient(
+        [
+            [TextChunk(text="ok"), CompletionMeta(usage={"prompt_tokens": 100})],
+            [TextChunk(text="SUMMARY"), CompletionMeta()],
+            [TextChunk(text="after"), CompletionMeta(usage={"prompt_tokens": 100})],
+        ]
+    )
+    agent = Agent(
+        config=cfg,
+        llm_client=fake_llm,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    await _collect(agent.run("hi"))  # file exists from here on
+    # Added after the last save and old enough to be summarized right away.
+    agent.messages.append(Message(role="user", content="UNSAVED " + "a" * 3000))
+    agent.messages.append(Message(role="assistant", content="b" * 3000))
+    agent.messages.append(Message(role="user", content="c" * 3000))
+    agent.messages.append(Message(role="assistant", content="d" * 3000))
+
+    await _collect(agent.compact(trigger="manual"))
+    await _collect(agent.run("next"))
+
+    raw = agent.session_path.read_text()
+    assert "UNSAVED" in raw
+    assert raw.index("UNSAVED") < raw.index('"type": "compaction"')
+    resumed = _resume(agent)
+    assert [m.content for m in resumed.messages[2:]] == [
+        m.content for m in agent.messages[2:]
+    ]
+
+
+def test_failed_queue_rejournal_forces_the_next_full_rewrite(workdir, monkeypatch):
+    import limbo.agent as agent_mod
+
+    agent = Agent(
+        config=Config(),
+        llm_client=FakeLLMClient([]),
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    agent.steer("queued", mode="follow_up")
+
+    def fail(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(agent_mod, "append_session_records", fail)
+    with pytest.raises(OSError):
+        agent._save_session_sync()
+    assert agent._session_full_rewrite_needed
+
+
+@pytest.mark.asyncio
 async def test_two_appended_compactions_then_resume(workdir):
     from limbo.compaction import is_summary_message
 
