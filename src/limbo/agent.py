@@ -31,7 +31,7 @@ from limbo.history import ToolHistory
 from limbo.history import recover as recover_history
 from limbo.llm.catalog import resolve_base_url, resolve_model
 from limbo.llm.client import LLMClient, RequestHook
-from limbo.llm.retry import friendly_message
+from limbo.llm.retry import friendly_message, is_context_overflow
 from limbo.llm.usage import PromptSizeEstimator, estimate_tokens, normalize_usage
 from limbo.models import (
     Attachment,
@@ -111,7 +111,7 @@ class CompactionEvent:
     """Outcome of one compaction attempt (auto at loop top, or /compact)."""
 
     compacted: bool
-    trigger: str  # "auto" | "manual"
+    trigger: str  # "auto" | "manual" | "overflow"
     before_tokens: int = 0
     after_estimate: int | None = None
     summary_chars: int = 0
@@ -235,6 +235,7 @@ class Agent:
         # while meta patches (goal changes) are written from the loop.
         self._session_io_lock = threading.Lock()
         self._checkpoint_failed_this_turn = False
+        self._overflow_recovered_this_turn = False
         self._auto_compaction_failed_this_turn = False
         self._auto_compact_noop_notified = False
 
@@ -603,6 +604,7 @@ class Agent:
         self._auto_compaction_failed_this_turn = False
         self._auto_compact_noop_notified = False
         self._checkpoint_failed_this_turn = False
+        self._overflow_recovered_this_turn = False
         # RFC LIM-53: an interrupt requested while idle must not leak into
         # this turn (one of the two reset points; compact() is the other).
         self._interrupt_requested = False
@@ -805,7 +807,23 @@ class Agent:
                     error=str(e),
                     exception_type=type(e).__name__,
                     traceback=traceback.format_exc(),
+                    context_overflow=is_context_overflow(e),
                 )
+                if is_context_overflow(e) and not self._overflow_recovered_this_turn:
+                    # pi-durable's overflow recovery: compact, then resend
+                    # once. A second overflow in the same turn surfaces.
+                    self._overflow_recovered_this_turn = True
+                    compacted = False
+                    async for event in self.compact(trigger="overflow"):
+                        if isinstance(event, CompactionEvent):
+                            compacted = event.compacted
+                        yield event
+                    if compacted and not self._turn_interrupted:
+                        # The rejected request does not use up an iteration.
+                        self._iteration_count -= 1
+                        continue
+                    if self._turn_interrupted:
+                        break
                 yield ErrorEvent(message=friendly_message(e) or f"LLM error: {e}")
                 return
             # The response (and its tool calls) is on disk before any tool
@@ -1277,8 +1295,10 @@ class Agent:
     async def compact(self, trigger: str = "auto") -> AsyncIterator[AgentEvent]:
         """Compact history: summarize the old region, keep the recent tail.
 
-        Shared by the loop-top auto trigger (``trigger="auto"``) and the
-        ``/compact`` slash command (``trigger="manual"``). On any failure
+        Shared by the loop-top auto trigger (``trigger="auto"``), the
+        ``/compact`` slash command (``trigger="manual"``), and the recovery
+        from a provider's context-overflow error (``trigger="overflow"``,
+        followed by one resend of the request). On any failure
         the history is left untouched; an auto failure suppresses further
         auto attempts for the rest of the turn (the guard resets in
         :meth:`run`), while ``/compact`` can always be retried by hand.
@@ -1301,6 +1321,8 @@ class Agent:
                     return
                 self._auto_compact_noop_notified = True
                 reason = "最近消息过大或历史太短，无法安全切分保留边界，本次跳过自动压缩"
+            elif trigger == "overflow":
+                reason = "最近消息过大或历史太短，无法安全切分保留边界，无法通过压缩腾出上下文"
             else:
                 reason = "历史太短，无需压缩"
             yield CompactionEvent(

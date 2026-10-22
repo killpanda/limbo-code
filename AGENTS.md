@@ -62,7 +62,7 @@ src/limbo/
 ## Agent Loop
 
 - `Agent.run()` yields `AgentEvent`: `TextDelta`, `ThinkingDelta`, `ToolCallRequest`, `ToolResultEvent`, `ErrorEvent`, `CompactionEvent`, `UsageUpdate`, `SteerEvent`
-- Loop top: auto-compaction check → steer drain → LLM call. Turn ends on a tool-call-free response; `max_iterations` (default 50) cancels pending calls with placeholder results
+- Loop top: auto-compaction check → steer drain → LLM call. A provider context-overflow error (`llm.retry.is_context_overflow`: 413 or known overflow texts, never rate limits) triggers `compact(trigger="overflow")` and one resend per turn; a second overflow or a failed compaction surfaces as `ErrorEvent`. Turn ends on a tool-call-free response; `max_iterations` (default 50) cancels pending calls with placeholder results
 - Tool calls in one turn run **concurrently** (`[tools] parallel`); results stream in completion order, recorded in source order; same-file mutations serialized by `mutation_queue`
 - `finish_reason` `length`/`max_tokens` → whole batch failed without execution; the error result names the effective `max_tokens` and steers the model to write large scripts via `write` instead of re-issuing the same call. 3 consecutive length stops abort the turn with actionable guidance (trace `kind=length_stop_loop`); a text-only truncated response emits a "may be incomplete" warning
 - Mid-turn user input queues as *steer* (LIM-20): injected at loop top, or as turn-end follow-up

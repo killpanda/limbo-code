@@ -1707,6 +1707,90 @@ async def test_auto_compaction_summary_failure_keeps_history_and_guards_turn(
     assert client.summary_attempts == 2
 
 
+class _OverflowingClient:
+    """Rejects the main request with a context-overflow error ``overflows``
+    times; summary requests (no tools) succeed."""
+
+    def __init__(self, overflows: int):
+        self.calls = []
+        self.overflows = overflows
+
+    async def chat(self, messages, tools, on_request=None):
+        self.calls.append((messages, tools))
+        if not tools:
+            yield TextChunk(text="SUMMARY")
+            yield CompletionMeta()
+            return
+        if self.overflows:
+            self.overflows -= 1
+            raise LLMHttpError(400, "Error code: 400 - prompt is too long: 250000 tokens")
+        yield TextChunk(text="final")
+        yield CompletionMeta(usage={"prompt_tokens": 100})
+
+
+@pytest.mark.asyncio
+async def test_context_overflow_compacts_and_retries_once(workdir):
+    client = _OverflowingClient(overflows=1)
+    agent = Agent(
+        config=_compact_cfg(),
+        llm_client=client,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    _seed_history(agent)
+
+    events = await _collect(agent.run("x" * 2000))
+
+    compacted = [e for e in events if isinstance(e, CompactionEvent)]
+    assert [(e.compacted, e.trigger) for e in compacted] == [(True, "overflow")]
+    assert not [e for e in events if isinstance(e, ErrorEvent)]
+    assert "final" in "".join(e.text for e in events if isinstance(e, TextDelta))
+    # Rejected request, summary, then the resend with the compacted history.
+    assert [bool(tools) for _, tools in client.calls] == [True, False, True]
+    assert client.calls[2][0][1].content.startswith(f"<{SUMMARY_TAG}>")
+    trace = read_agent_trace(agent)
+    assert any(
+        r["type"] == "llm_error" and r["context_overflow"] for r in trace
+    )
+
+
+@pytest.mark.asyncio
+async def test_context_overflow_twice_in_a_turn_surfaces_error(workdir):
+    client = _OverflowingClient(overflows=2)
+    agent = Agent(
+        config=_compact_cfg(),
+        llm_client=client,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+    _seed_history(agent)
+
+    events = await _collect(agent.run("x" * 2000))
+
+    errors = [e for e in events if isinstance(e, ErrorEvent)]
+    assert len(errors) == 1 and "上下文超出" in errors[0].message
+    # Exactly one compaction attempt, then the second overflow surfaced.
+    assert sum(1 for _, tools in client.calls if not tools) == 1
+
+
+@pytest.mark.asyncio
+async def test_context_overflow_without_compactable_history_surfaces_error(workdir):
+    client = _OverflowingClient(overflows=1)
+    agent = Agent(
+        config=_compact_cfg(),
+        llm_client=client,
+        workdir=workdir,
+        session_dir=workdir / "sessions",
+    )
+
+    events = await _collect(agent.run("hi"))
+
+    compacted = [e for e in events if isinstance(e, CompactionEvent)]
+    assert compacted and not compacted[0].compacted
+    assert [e for e in events if isinstance(e, ErrorEvent)]
+    assert all(tools for _, tools in client.calls)
+
+
 @pytest.mark.asyncio
 async def test_manual_compact_skips_threshold(workdir):
     cfg = _compact_cfg()

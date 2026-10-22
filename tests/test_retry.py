@@ -23,6 +23,7 @@ from limbo.llm.retry import (
     RetryPolicy,
     compute_delay,
     friendly_message,
+    is_context_overflow,
     is_retryable,
     parse_retry_after,
     retry_after,
@@ -304,3 +305,32 @@ def test_friendly_message_returns_none_for_other_errors():
     assert friendly_message(_status_error(400)) is None
     assert friendly_message(LLMHttpError(401)) is None
     assert friendly_message(ValueError("x")) is None
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        LLMHttpError(400, "Error code: 400 - prompt is too long: 250000 tokens > 200000 maximum"),
+        LLMHttpError(400, '{"error": {"code": "context_length_exceeded"}}'),
+        LLMHttpError(413, "Request Entity Too Large"),
+        RuntimeError("invalid_request_error: This model's maximum context length is 131072 tokens"),
+        RuntimeError("context_length_exceeded: input exceeds the context window"),
+    ],
+)
+def test_context_overflow_detected(exc):
+    assert is_context_overflow(exc)
+    assert not is_retryable(exc)
+    assert "上下文超出" in (friendly_message(exc) or "")
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        LLMHttpError(429, "Rate limit reached: too many tokens per minute"),
+        LLMHttpError(500, "context window service unavailable"),
+        LLMHttpError(400, "invalid tool schema"),
+        RuntimeError("rate limit: too many tokens"),
+    ],
+)
+def test_context_overflow_not_confused_with_rate_limits(exc):
+    assert not is_context_overflow(exc)
