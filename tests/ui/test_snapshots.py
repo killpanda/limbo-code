@@ -48,6 +48,20 @@ def _deterministic_ui(monkeypatch):
     frozen = SimpleNamespace(monotonic=lambda: 100.0)
     monkeypatch.setattr("limbo.ui.widgets.status_bar.time", frozen)
     monkeypatch.setattr("limbo.ui.widgets.tool_card.time", frozen)
+    monkeypatch.setattr("limbo.ui.widgets.activity.time", frozen)
+    # Relative times ("3 天前") on the landing and in the session picker are
+    # measured against a fixed "now" so snapshots don't age day by day.
+    import limbo.ui.widgets.landing as landing_module
+
+    class _FrozenDatetime(landing_module.datetime):  # type: ignore[misc]
+        @classmethod
+        def now(cls, tz=None):  # type: ignore[override]
+            return cls(2026, 8, 1, 12, 0, tzinfo=tz)
+
+    monkeypatch.setattr(landing_module, "datetime", _FrozenDatetime)
+    # __version__ comes from git (vcs versioning): v0.2.2 on a tag,
+    # v0.2.3.devN+g<sha> on a branch checkout in CI.
+    monkeypatch.setattr(landing_module, "__version__", "0.0.0")
     from limbo.ui.widgets.status_bar import StatusBar
 
     monkeypatch.setattr(StatusBar, "_tick", lambda self: None)
