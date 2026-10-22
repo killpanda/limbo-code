@@ -82,3 +82,20 @@ def test_requests_without_token_are_rejected(viewer):
     assert response.status == 401
 
 
+
+
+def test_token_is_swapped_for_an_httponly_cookie(viewer):
+    response, body = get(viewer, "/")
+    assert response.status == 302
+    assert response.getheader("Location") == "/"
+    cookie = response.getheader("Set-Cookie") or ""
+    assert f"limbo_trace={viewer.token}" in cookie
+    assert "HttpOnly" in cookie
+    assert "Content-Security-Policy" in response.headers
+    assert response.getheader("X-Frame-Options") == "DENY"
+    assert body == b""
+
+    # The cookie now authorizes the page without a token in the URL.
+    page, html = get(viewer, "/", token=False, cookie=f"limbo_trace={viewer.token}")
+    assert page.status == 200
+    assert b"<html" in html.lower()
