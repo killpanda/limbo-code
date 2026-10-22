@@ -76,6 +76,7 @@ from limbo.pump import (
     TurnPump,
 )
 from limbo.steer import FOLLOW_UP
+from limbo.toggles import parse_toggle
 from limbo.tracing.command import TracingViewerCommand
 
 # -- input events (stdin → frontend) ------------------------------------------
@@ -149,6 +150,13 @@ class SlashQueue:
 
 
 @dataclass(frozen=True)
+class SlashPlan:
+    """``/plan [on|off]``: read-only plan mode."""
+
+    arg: str
+
+
+@dataclass(frozen=True)
 class SlashHelp:
     pass
 
@@ -175,6 +183,7 @@ Submission = (
     | SlashModel
     | SlashNew
     | SlashQueue
+    | SlashPlan
     | SlashHelp
     | SlashQuit
     | SlashTracingViewer
@@ -204,6 +213,8 @@ def parse_submission(text: str) -> Submission:
         return SlashNew()
     if name == "queue":
         return SlashQueue(arg)
+    if name == "plan":
+        return SlashPlan(arg)
     if name == "help":
         return SlashHelp()
     if name in ("quit", "exit"):
@@ -449,6 +460,7 @@ HELP_TEXT = """可用命令：
   /model [id]    查看/切换模型
   /new           开始新会话
   /queue <文本>  当前任务做完后再处理这条消息（空闲时直接发送）
+  /plan [on|off] 计划模式：只读探索并给出方案，写类工具被拦下
   /tracing-viewer [id|off]  在浏览器查看 trace（打印本地链接）
   /quit          退出
 忙时输入的普通文本会作为插话排队；Esc / Ctrl+C 中断当前任务。"""
@@ -594,6 +606,8 @@ class HeadlessFrontend:
             await self._cmd_model(command.arg)
         elif isinstance(command, SlashNew):
             self._cmd_new()
+        elif isinstance(command, SlashPlan):
+            self._cmd_plan(command.arg)
         elif isinstance(command, SlashHelp):
             self._line(HELP_TEXT)
         elif isinstance(command, SlashQuit):
@@ -602,6 +616,19 @@ class HeadlessFrontend:
             await self._cmd_tracing_viewer(command.arg)
         elif isinstance(command, UnknownCommand):
             self._line(f"未知命令 /{command.name}（/help 查看可用命令）")
+
+    def _cmd_plan(self, arg: str) -> None:
+        enabled = parse_toggle(arg, self._agent.plan_mode)
+        if enabled is None:
+            self._line("用法：/plan on|off（无参则切换）")
+        elif self._agent.set_plan_mode(enabled):
+            self._line(
+                "计划模式已开启：只读探索，edit/write 和会改动状态的命令会被拦下"
+                if enabled
+                else "计划模式已关闭：工具恢复正常"
+            )
+        else:
+            self._line(f"计划模式已是{'开启' if enabled else '关闭'}状态")
 
     def _on_interrupt(self, event: Interrupt) -> None:
         if self._awaiting_verify:

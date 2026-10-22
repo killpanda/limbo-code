@@ -120,3 +120,30 @@ async def test_code_mode_in_help_and_menu(tmp_path):
         await pilot.pause()
         chat = screen.query_one("#chat", ChatWidget)
         assert "/code-mode" in chat.transcript_text()
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_toggle_and_badge(tmp_path):
+    app = make_app(tmp_path)
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = get_screen(pilot)
+        chat = screen.query_one("#chat", ChatWidget)
+        statusbar = screen.query_one("#statusbar", StatusBar)
+        assert "📋plan" not in statusbar._context_text()
+
+        screen._handle_command("/plan")
+        await pilot.pause()
+        assert screen.agent.plan_mode is True
+        assert "📋plan" in statusbar._context_text()
+        assert "计划模式已开启" in chat.transcript_text()
+
+        screen._handle_command("/plan bogus")
+        await pilot.pause()
+        assert "用法：/plan" in chat.transcript_text()
+
+        # A new session starts outside plan mode; the badge follows.
+        screen._start_new_session()
+        await pilot.pause()
+        assert screen.agent.plan_mode is False
+        assert "📋plan" not in statusbar._context_text()

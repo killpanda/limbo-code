@@ -57,6 +57,7 @@ from limbo.pump import (
 from limbo.sessions import derive_title, export_jsonl, export_markdown, list_sessions
 from limbo.skills import Skill, discover_skills
 from limbo.steer import FOLLOW_UP, STEER
+from limbo.toggles import parse_toggle
 from limbo.tools.bash import BashTool
 from limbo.tracing.command import TracingViewerCommand
 from limbo.ui.banner import startup_art_text
@@ -210,7 +211,7 @@ class MainScreen(Screen[None]):
         self._refresh_goal_indicator()  # D6: silent resume, badge only
         # Code Mode badge: sync on startup so a resumed code-mode session
         # shows it without a fresh toggle.
-        self.query_one("#statusbar", StatusBar).set_code_mode(self.agent.code_mode)
+        self._sync_mode_badges()
         self.query_one("#input", InputWidget).focus()
         self._report_session()
         self._report_state("idle")
@@ -469,6 +470,14 @@ class MainScreen(Screen[None]):
         )
         self._commands.register(
             SlashCommand(
+                "/plan",
+                "切换计划模式：只读探索并给出方案，写类工具被拦下 [on|off]",
+                takes_args=True,
+                handler=lambda arg: self._plan_mode(arg),
+            )
+        )
+        self._commands.register(
+            SlashCommand(
                 "/help",
                 "显示帮助",
                 allow_when_busy=True,
@@ -626,14 +635,8 @@ class MainScreen(Screen[None]):
         system prompt mid-stream would corrupt the in-flight turn.
         """
         chat = self.query_one("#chat", ChatWidget)
-        arg = arg.strip().lower()
-        if arg in ("on", "1", "true", "yes", "开", "开启"):
-            enabled = True
-        elif arg in ("off", "0", "false", "no", "关", "关闭"):
-            enabled = False
-        elif arg == "":
-            enabled = not self.agent.code_mode
-        else:
+        enabled = parse_toggle(arg, self.agent.code_mode)
+        if enabled is None:
             chat.add_info("用法：/code-mode on|off（无参则切换）")
             return
         if self.agent.set_code_mode(enabled):
@@ -646,6 +649,25 @@ class MainScreen(Screen[None]):
             self.query_one("#statusbar", StatusBar).set_code_mode(enabled)
         else:
             chat.add_info(f"Code Mode 已是{'开启' if enabled else '关闭'}状态")
+
+    # -- /plan: read-only plan mode -----------------------------------------
+
+    def _plan_mode(self, arg: str) -> None:
+        """Handle /plan: mount/unmount the read-only tool hook."""
+        chat = self.query_one("#chat", ChatWidget)
+        enabled = parse_toggle(arg, self.agent.plan_mode)
+        if enabled is None:
+            chat.add_info("用法：/plan on|off（无参则切换）")
+            return
+        if self.agent.set_plan_mode(enabled):
+            chat.add_info(
+                "计划模式已开启：只读探索，edit/write 和会改动状态的命令会被拦下"
+                if enabled
+                else "计划模式已关闭：工具恢复正常"
+            )
+            self.query_one("#statusbar", StatusBar).set_plan_mode(enabled)
+        else:
+            chat.add_info(f"计划模式已是{'开启' if enabled else '关闭'}状态")
 
     async def _swap_llm_client(self) -> None:
         """Swap the client for the *current* config model (converges on
@@ -669,6 +691,7 @@ class MainScreen(Screen[None]):
         self.pump = self._new_pump(self.agent)
         chat.clear()
         chat.add_info(f"已开始新会话 {self.agent.session_id}")
+        self._sync_mode_badges()
         self._report_session()
 
     def _invoke_skill(self, skill: Skill, arg: str) -> None:
@@ -716,7 +739,13 @@ class MainScreen(Screen[None]):
         meta = self.agent.session_meta
         chat.add_info(f"已切换到会话 {meta.id} · {meta.title or '(无标题)'}")
         self._render_restored_queue()
+        self._sync_mode_badges()
         self._report_session()
+
+    def _sync_mode_badges(self) -> None:
+        status = self.query_one("#statusbar", StatusBar)
+        status.set_code_mode(self.agent.code_mode)
+        status.set_plan_mode(self.agent.plan_mode)
 
     def _render_history(self) -> None:
         """Render the agent's restored history into the chat flow.
