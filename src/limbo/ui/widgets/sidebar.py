@@ -109,6 +109,7 @@ class Sidebar(VerticalScroll):
         self._goal: str | None = None
         self._goal_progress: tuple[int, int] | None = None
         self._code_mode = False
+        self._plan_mode = False
         self._skills: list[str] = []
 
     def compose(self) -> ComposeResult:
@@ -173,6 +174,10 @@ class Sidebar(VerticalScroll):
 
     def set_code_mode(self, enabled: bool) -> None:
         self._code_mode = enabled
+        self._render_extra()
+
+    def set_plan_mode(self, enabled: bool) -> None:
+        self._plan_mode = enabled
         self._render_extra()
 
     def set_skills(self, names: list[str]) -> None:
@@ -327,6 +332,9 @@ class Sidebar(VerticalScroll):
             text.append("on", style=c["accent"])
         else:
             text.append("off", style=c["dim"])
+        if self._plan_mode:
+            text.append(" · 计划模式 ", style=c["mid"])
+            text.append("on", style=c["accent"])
         if self._skills:
             shown = ", ".join(self._skills[:4])
             more = f" 等 {len(self._skills)} 个" if len(self._skills) > 4 else ""

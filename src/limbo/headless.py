@@ -80,6 +80,7 @@ from limbo.pump import (
     TurnPump,
 )
 from limbo.steer import FOLLOW_UP
+from limbo.toggles import parse_toggle
 from limbo.tracing.command import TracingViewerCommand
 
 # -- input events (stdin → frontend) ------------------------------------------
@@ -160,6 +161,13 @@ class SlashFork:
 
 
 @dataclass(frozen=True)
+class SlashPlan:
+    """``/plan [on|off]``: read-only plan mode."""
+
+    arg: str
+
+
+@dataclass(frozen=True)
 class SlashHandoff:
     """``/handoff <note>``: a linked new session that starts from the note."""
 
@@ -195,6 +203,7 @@ Submission = (
     | SlashQueue
     | SlashFork
     | SlashHandoff
+    | SlashPlan
     | SlashHelp
     | SlashQuit
     | SlashTracingViewer
@@ -228,6 +237,8 @@ def parse_submission(text: str) -> Submission:
         return SlashFork(arg)
     if name == "handoff":
         return SlashHandoff(arg)
+    if name == "plan":
+        return SlashPlan(arg)
     if name == "help":
         return SlashHelp()
     if name in ("quit", "exit"):
@@ -475,6 +486,7 @@ HELP_TEXT = """可用命令：
   /queue <文本>  当前任务做完后再处理这条消息（空闲时直接发送）
   /fork [n]      分叉出新会话继续（n = 只保留前 n 轮），原会话不变
   /handoff <说明> 带交接说明开新会话（干净上下文，关联原会话）
+  /plan [on|off] 计划模式：只读探索并给出方案，写类工具被拦下
   /tracing-viewer [id|off]  在浏览器查看 trace（打印本地链接）
   /quit          退出
 忙时输入的普通文本会作为插话排队；Esc / Ctrl+C 中断当前任务。"""
@@ -639,6 +651,8 @@ class HeadlessFrontend:
             self._cmd_fork(command.arg)
         elif isinstance(command, SlashHandoff):
             self._cmd_handoff(command.note)
+        elif isinstance(command, SlashPlan):
+            self._cmd_plan(command.arg)
         elif isinstance(command, SlashHelp):
             self._line(HELP_TEXT)
         elif isinstance(command, SlashQuit):
@@ -647,6 +661,19 @@ class HeadlessFrontend:
             await self._cmd_tracing_viewer(command.arg)
         elif isinstance(command, UnknownCommand):
             self._line(f"未知命令 /{command.name}（/help 查看可用命令）")
+
+    def _cmd_plan(self, arg: str) -> None:
+        enabled = parse_toggle(arg, self._agent.plan_mode)
+        if enabled is None:
+            self._line("用法：/plan on|off（无参则切换）")
+        elif self._agent.set_plan_mode(enabled):
+            self._line(
+                "计划模式已开启：只读探索，edit/write 和会改动状态的命令会被拦下"
+                if enabled
+                else "计划模式已关闭：工具恢复正常"
+            )
+        else:
+            self._line(f"计划模式已是{'开启' if enabled else '关闭'}状态")
 
     def _on_interrupt(self, event: Interrupt) -> None:
         if self._awaiting_verify:

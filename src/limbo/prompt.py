@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 
 from limbo.code_mode import CODE_ONLY_INSTRUCTION, render_tools_sdk
 from limbo.skills import discover_skills, format_skills_for_prompt
+from limbo.tools.hooks import PLAN_MODE_INSTRUCTION
 
 if TYPE_CHECKING:
     from limbo.tools.registry import ToolRegistry
@@ -109,6 +110,8 @@ def build_system_prompt(
         parts.append(
             f"\n\n{CODE_ONLY_INSTRUCTION}\n\n{render_tools_sdk(registry)}"
         )
+    if registry.plan_mode:
+        parts.append(f"\n\n{PLAN_MODE_INSTRUCTION}")
     context = _context_block(workdir, home or Path.home())
     if context is not None:
         parts.append(context)

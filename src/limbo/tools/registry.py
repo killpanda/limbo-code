@@ -17,6 +17,7 @@ from limbo.tools.bash import BashTool
 from limbo.tools.edit import EditTool
 from limbo.tools.find import FindTool
 from limbo.tools.grep import GrepTool
+from limbo.tools.hooks import Block, PlanModeHook, Rewrite, ToolHook
 from limbo.tools.ls import LsTool
 from limbo.tools.read import ReadTool
 from limbo.tools.run_code import RunCodeTool
@@ -46,6 +47,9 @@ class ToolRegistry:
         # Trace sink for Code Mode sub-calls (set by the agent): each one is
         # logged as tool_call/tool_result with its run_code parent_call_id.
         self.trace_log: Callable[..., None] | None = None
+        # before_tool/after_tool chain (tools/hooks.py). Empty by default:
+        # no safety fences; /plan mounts the read-only PlanModeHook.
+        self.hooks: list[ToolHook] = []
         for tool_class in [EditTool, WriteTool, LsTool, ReadTool, GrepTool, FindTool]:
             self.register(tool_class)  # type: ignore[type-abstract]
         if self.config.tools.bash_enabled:
@@ -86,12 +90,34 @@ class ToolRegistry:
         tool = self.get(name)
         if tool is None:
             return ToolResult(success=False, error=f"Unknown tool: {name}")
+        for hook in list(self.hooks):
+            try:
+                decision = hook.before_tool(name, arguments)
+            except Exception as e:  # noqa: BLE001 - a broken hook fails closed
+                return ToolResult(
+                    success=False, error=f"Blocked by hook {hook.name}: {e}"
+                )
+            if isinstance(decision, Block):
+                return ToolResult(success=False, error=decision.reason)
+            if isinstance(decision, Rewrite):
+                arguments = decision.arguments
         token = _CURRENT_CALL.set(call_id) if call_id is not None else None
         try:
-            return await asyncio.to_thread(tool.execute, arguments)
+            result = await asyncio.to_thread(tool.execute, arguments)
         finally:
             if token is not None:
                 _CURRENT_CALL.reset(token)
+        for hook in list(self.hooks):
+            try:
+                replaced = hook.after_tool(name, arguments, result)
+            except Exception as e:  # noqa: BLE001
+                return ToolResult(
+                    success=False,
+                    error=f"Hook {hook.name} failed after {name} ran: {e}",
+                )
+            if replaced is not None:
+                result = replaced
+        return result
 
     async def _execute_traced(
         self, name: str, arguments: dict[str, Any], call_id: str, parent: str
@@ -114,6 +140,23 @@ class ToolRegistry:
                 duration=time.monotonic() - start,
             )
         return result
+
+    # -- plan mode (read-only hook) ----------------------------------------
+
+    @property
+    def plan_mode(self) -> bool:
+        return any(isinstance(h, PlanModeHook) for h in self.hooks)
+
+    @plan_mode.setter
+    def plan_mode(self, enabled: bool) -> None:
+        if enabled == self.plan_mode:
+            return
+        if enabled:
+            self.hooks.append(
+                PlanModeHook(lambda n: self.replay_policy(n) == "safe")
+            )
+        else:
+            self.hooks = [h for h in self.hooks if not isinstance(h, PlanModeHook)]
 
     def cancel_active(self) -> None:
         """Cancel in-flight interruptible tools (ESC interrupt, RFC LIM-53).

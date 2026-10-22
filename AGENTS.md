@@ -2,7 +2,7 @@
 
 **Limbo** is a minimal terminal AI coding agent (Python 3.11+, Textual). Users converse with an LLM in a TUI to explore, read, edit, and write code via 7 tools. A `--headless` flag runs a plain-terminal REPL frontend instead of the TUI (Herdr/script control, RFC LIM-60).
 
-**Tools execute immediately — no confirmation flow, no safety fences.** File tools are not scoped to the workdir (absolute paths and symlinks are honored as-is), there is no sensitive-file skip list, and `bash` runs every command as given (no dangerous-command filter).
+**Tools execute immediately — no confirmation flow, no safety fences.** File tools are not scoped to the workdir (absolute paths and symlinks are honored as-is), there is no sensitive-file skip list, and `bash` runs every command as given (no dangerous-command filter). `ToolRegistry.execute` runs a `before_tool`/`after_tool` hook chain (`tools/hooks.py`: `Block` / `Rewrite` / replace result; a raising hook blocks) that is empty by default; the only built-in hook is `/plan` (read-only plan mode: replay-safe tools and read-only bash only, also enforced on Code Mode sub-calls, persisted as `SessionMeta.plan_mode`).
 
 ## Quick Start
 
@@ -50,7 +50,7 @@ src/limbo/
 │                     # scaffold.py (plumbing shared by dialect clients: credentials, retry, images)
 ├── tools/            # base.py (BaseTool + path resolution + truncation), registry.py (dispatch;
 │                     # code_mode flag filters definitions() to [run_code], all_definitions() feeds
-│                     # the SDK), mutation_queue.py (per-file locks), ignore.py (.gitignore),
+│                     # the SDK), hooks.py (before/after tool hook chain + plan mode), mutation_queue.py (per-file locks), ignore.py (.gitignore),
 │                     # read/bash/edit/write/grep/find/ls/run_code.py (the Code Mode transport)
 └── ui/               # app.py + app.tcss (ALL styles here; theme vars only, no bare hex),
                       # theme.py (limbo-dark/-light, RFC LIM-16), commands.py (slash registry
@@ -94,7 +94,7 @@ Skills: `~/.limbo/skills/<name>/SKILL.md` (user) and `<workdir>/.agents/skills/<
 
 ## UI
 
-Single column: status bar (state/elapsed/tokens/model/workdir/queued + rainbow 🎯GOAL badge while a goal loop runs + ⌨code badge while Code Mode is on) → scrolling chat flow (user `❯`, streaming Markdown, tool cards, errors) → input box (Enter submits, Shift+Enter newline, Alt+Enter queues a follow-up while busy (`ui/key_fixes.py` maps its modifyOtherKeys/kitty/ESC forms), paste markers, `ctrl+v` image attach) → hint line. Slash commands: `/sessions /new /fork /handoff /export /tracing-viewer /compact /model /code-mode /help /2048 /goal` + skill commands. '/'-leading input that matches no command but looks like a path is sent as a normal message with existing files auto-attached (`ui/path_input.py`); a leading space forces plain text. After palette changes run `python scripts/check_contrast.py` (≥ 4.5:1).
+Single column: status bar (state/elapsed/tokens/model/workdir/queued + rainbow 🎯GOAL badge while a goal loop runs + ⌨code badge while Code Mode is on) → scrolling chat flow (user `❯`, streaming Markdown, tool cards, errors) → input box (Enter submits, Shift+Enter newline, Alt+Enter queues a follow-up while busy (`ui/key_fixes.py` maps its modifyOtherKeys/kitty/ESC forms), paste markers, `ctrl+v` image attach) → hint line. Slash commands: `/sessions /new /fork /handoff /export /tracing-viewer /compact /model /code-mode /plan /help /2048 /goal` + skill commands. '/'-leading input that matches no command but looks like a path is sent as a normal message with existing files auto-attached (`ui/path_input.py`); a leading space forces plain text. After palette changes run `python scripts/check_contrast.py` (≥ 4.5:1).
 
 `/goal <text>` starts closed-loop mode (LIM-40): the first round is a proposal round — the model explores the repo and proposes acceptance command(s) in a `<verify_proposal>` block; the user confirms in a picker (accept / edit / skip), then the goal branch of the `TurnPump` (non-UI, shared by any frontend) runs each round as a complete `Agent.run()` turn and executes the verify command; exit 0 ends the loop, otherwise the failure output is fed back verbatim into the next round until `max_rounds`, when a no-tool wrap-up turn summarizes and any user message resumes with a fresh budget. Goal state persists on `SessionMeta.goal`. Esc during verify cancels the subprocess.
 

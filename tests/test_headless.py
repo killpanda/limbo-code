@@ -33,6 +33,7 @@ from limbo.headless import (
     SlashHandoff,
     SlashModel,
     SlashNew,
+    SlashPlan,
     SlashQueue,
     SlashQuit,
     SlashTracingViewer,
@@ -554,6 +555,8 @@ def test_parse_submission_commands():
     assert parse_submission("/queue 再跑一遍测试") == SlashQueue("再跑一遍测试")
     assert parse_submission("/fork 2") == SlashFork("2")
     assert parse_submission("/handoff 继续重构") == SlashHandoff("继续重构")
+    assert parse_submission("/plan") == SlashPlan("")
+    assert parse_submission("/plan off") == SlashPlan("off")
 
 
 def test_parse_submission_leading_space_forces_plain_text():
