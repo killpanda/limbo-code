@@ -39,17 +39,7 @@ jobs:
           UV_PYTHON: ${{ matrix.python-version }}
 
       - name: Run tests
-        shell: bash
-        run: |
-          set -o pipefail
-          uv run python -m pytest -v 2>&1 | tee pytest.log
-
-      - name: Surface failures (temporary debug)
-        if: failure()
-        shell: bash
-        run: |
-          grep -nE "FAILED|ERROR|Error|assert|Fatal|Segmentation|Killed|Traceback" pytest.log | head -40 | sed 's/^/::error::/' || true
-          tail -30 pytest.log | sed 's/^/::warning::/'
+        run: uv run python -m pytest -v
 
       - name: Lint
         run: uv run ruff check src tests
