@@ -558,3 +558,58 @@ def test_append_session_records_requires_existing_file(tmp_path: Path):
 
     with pytest.raises(FileNotFoundError):
         append_session_records(tmp_path / "missing.jsonl", [{"type": "x"}])
+
+
+def test_rewrite_meta_line_keeps_records_and_drops_patches(tmp_path: Path):
+    from limbo.sessions import (
+        append_session_records,
+        load_session_full,
+        meta_patch_record,
+        rewrite_meta_line,
+        tool_intent_record,
+    )
+
+    path = tmp_path / "s.jsonl"
+    meta = make_meta(title="old")
+    save_session(path, meta, make_messages())
+    append_session_records(
+        path, [meta_patch_record(meta), tool_intent_record("c1", "bash", "unsafe")]
+    )
+
+    meta.title = "new"
+    rewrite_meta_line(path, meta)
+
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    assert records[0]["type"] == "meta" and records[0]["title"] == "new"
+    assert not any(r.get("type") == "meta_patch" for r in records)
+    loaded = load_session_full(path)
+    assert loaded.meta.title == "new"
+    assert len(loaded.messages) == len(make_messages())
+    assert [i.call_id for i in loaded.intents] == ["c1"]
+
+
+def test_latest_record_summary_wins_over_an_older_stored_summary(tmp_path: Path):
+    from limbo.compaction import is_summary_message, make_summary_message
+    from limbo.sessions import CompactionRecord
+
+    messages, boundary_id = _compacted_messages()
+    # The stored summary belongs to an earlier compaction; a later one was
+    # appended with its own summary and a later boundary.
+    later = CompactionRecord(
+        id="cmp-2",
+        first_kept_entry_id=messages[-1].id,
+        summary="NEWER SUMMARY",
+    )
+    path = tmp_path / "s.jsonl"
+    save_session(
+        path,
+        make_meta(),
+        messages,
+        compactions=[make_compaction_record(boundary_id), later],
+    )
+
+    _, loaded, _ = load_session(path)
+
+    assert is_summary_message(loaded[1])
+    assert loaded[1].content == make_summary_message("NEWER SUMMARY").content
+    assert [m.id for m in loaded[2:]] == [messages[-1].id]
