@@ -250,6 +250,7 @@ class Agent:
         self._session_io_lock = threading.Lock()
         self._checkpoint_failed_this_turn = False
         self._overflow_recovered_this_turn = False
+        self._last_run_failed = False
         self._auto_compaction_failed_this_turn = False
         self._auto_compact_noop_notified = False
 
@@ -588,6 +589,15 @@ class Agent:
         self.registry.cancel_active()
 
     @property
+    def last_run_failed(self) -> bool:
+        """Whether the last turn ended on an LLM error (after its retries).
+
+        Reset at run() entry; the pump applies ``[queue] after_failed_run``
+        to the queued messages when it is set.
+        """
+        return self._last_run_failed
+
+    @property
     def was_interrupted(self) -> bool:
         """Whether the last turn ended by user interrupt.
 
@@ -687,6 +697,7 @@ class Agent:
         self._auto_compact_noop_notified = False
         self._checkpoint_failed_this_turn = False
         self._overflow_recovered_this_turn = False
+        self._last_run_failed = False
         # RFC LIM-53: an interrupt requested while idle must not leak into
         # this turn (one of the two reset points; compact() is the other).
         self._interrupt_requested = False
@@ -910,6 +921,7 @@ class Agent:
                         continue
                     if self._turn_interrupted:
                         break
+                self._last_run_failed = True
                 yield ErrorEvent(message=friendly_message(e) or f"LLM error: {e}")
                 return
             # The response (and its tool calls) is on disk before any tool

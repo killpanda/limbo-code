@@ -72,6 +72,7 @@ from limbo.pump import (
     GoalVerifyResultEvent,
     GoalVerifyStarted,
     PumpEvent,
+    QueueHeld,
     TurnPump,
 )
 from limbo.steer import FOLLOW_UP
@@ -868,6 +869,13 @@ class HeadlessFrontend:
             )
         elif isinstance(event, GoalResumed):
             self._line(f"🎯 恢复 goal 闭环，预算已重置（{event.max_rounds} 轮）")
+        elif isinstance(event, QueueHeld):
+            count = len(event.items)
+            if event.policy == "withdraw":
+                texts = "；".join(_first_line(item.text) for item in event.items)
+                self._line(f"上一轮出错，已撤回 {count} 条排队消息：{texts}")
+            else:
+                self._line(f"上一轮出错，{count} 条排队消息保留，下次发送时一起处理")
 
     # -- integration reporting ------------------------------------------------
 
@@ -922,6 +930,7 @@ async def _run(
             workdir,
             max_rounds=config.goal.max_rounds,
             verify_timeout_ms=config.goal.verify_timeout_ms,
+            after_failed_run=config.queue.after_failed_run,
         )
 
     agent = Agent(

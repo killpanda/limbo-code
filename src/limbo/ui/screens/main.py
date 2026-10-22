@@ -51,6 +51,7 @@ from limbo.pump import (
     GoalVerifyResultEvent,
     GoalVerifyStarted,
     PumpEvent,
+    QueueHeld,
     TurnPump,
 )
 from limbo.sessions import derive_title, export_jsonl, export_markdown, list_sessions
@@ -149,6 +150,7 @@ class MainScreen(Screen[None]):
             self.workdir,
             max_rounds=self.config.goal.max_rounds,
             verify_timeout_ms=self.config.goal.verify_timeout_ms,
+            after_failed_run=self.config.queue.after_failed_run,
         )
 
     def _new_agent(self, resume: Path | None = None) -> Agent:
@@ -957,6 +959,23 @@ class MainScreen(Screen[None]):
 
     # -- steer queue UI (LIM-20) ---------------------------------------------
 
+    def _on_queue_held(self, event: QueueHeld) -> None:
+        """A failed turn ended the task with messages queued behind it."""
+        chat = self.query_one("#chat", ChatWidget)
+        count = len(event.items)
+        if event.policy == "withdraw":
+            for item in event.items:
+                chat.mark_steer_cancelled(item.id)
+            # Hand the text back for editing/resending, unless the user is
+            # already typing something else.
+            input_widget = self.query_one("#input", InputWidget)
+            if not input_widget.text.strip():
+                input_widget.text = "\n\n".join(item.text for item in event.items)
+            chat.add_info(f"上一轮出错，已撤回 {count} 条排队消息，文本放回了输入框")
+        else:
+            chat.add_info(f"上一轮出错，{count} 条排队消息保留，下次发送时一起处理")
+        self._update_queue_status()
+
     def _render_restored_queue(self) -> None:
         """Show messages still queued when the session was last written.
 
@@ -1145,6 +1164,8 @@ class MainScreen(Screen[None]):
         elif isinstance(event, GoalResumed):
             chat.add_info(f"🎯 恢复 goal 闭环，预算已重置（{event.max_rounds} 轮）")
             self._refresh_goal_indicator()
+        elif isinstance(event, QueueHeld):
+            self._on_queue_held(event)
         elif isinstance(event, ToolCallRequest):
             chat.add_tool_card(event.id, event.name, event.arguments)
             statusbar.set_state(f"running {event.name}…", "tool")

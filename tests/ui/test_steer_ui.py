@@ -578,3 +578,27 @@ async def test_alt_enter_while_busy_queues_follow_up_after_the_task(tmp_path):
         assert client.calls[2][-1].content == "然后写总结"
         assert not screen._agent_busy
         assert "Alt+Enter" not in str(screen.query_one("#hint").render())
+
+
+@pytest.mark.asyncio
+async def test_withdrawn_queue_returns_text_to_the_input(tmp_path):
+    from limbo.pump import QueueHeld
+
+    app = make_app(tmp_path, GatedClient())
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        screen = get_screen(pilot)
+        chat = screen.query_one("#chat", ChatWidget)
+        input_widget = screen.query_one("#input", InputWidget)
+        item_id = screen.agent.steer("第一条")
+        chat.add_queued_message(item_id, "第一条")
+        item = screen.agent.queued_items[0]
+        assert screen.agent.cancel_steer(item_id)
+
+        await screen._process_agent_event(QueueHeld(policy="withdraw", items=[item]))
+        await pilot.pause()
+
+        assert input_widget.text == "第一条"
+        transcript = chat.transcript_text()
+        assert "（已取消）" in transcript
+        assert "已撤回 1 条排队消息" in transcript
