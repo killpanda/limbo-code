@@ -205,6 +205,17 @@ def is_context_overflow(exc: BaseException) -> bool:
     return any(pattern in text for pattern in _OVERFLOW_PATTERNS)
 
 
+def _http_hint(status_code: int | None) -> str | None:
+    """The user-facing hint for an HTTP status, if there is a better one."""
+    if status_code == 408:
+        return "请求超时，已自动重试仍失败，请检查网络后重发上一条消息"
+    if status_code == 429:
+        return "服务限流，已自动重试仍失败，可稍后重发上一条消息"
+    if status_code is not None and status_code >= 500:
+        return "模型服务异常，已自动重试仍失败，可稍后重发上一条消息"
+    return None
+
+
 def friendly_message(exc: BaseException) -> str | None:
     """User-facing Chinese hint for an exhausted/unretryable LLM failure.
 
@@ -215,23 +226,9 @@ def friendly_message(exc: BaseException) -> str | None:
         return "上下文超出模型窗口，压缩后仍放不下，可 /compact 或 /new 开新会话后重试"
     if isinstance(exc, LLMOverloadedError):
         return "模型服务过载，已自动重试仍失败，可稍后重发上一条消息"
-    if isinstance(exc, LLMHttpError):
-        if exc.status_code == 429:
-            return "服务限流，已自动重试仍失败，可稍后重发上一条消息"
-        if exc.status_code >= 500:
-            return "模型服务异常，已自动重试仍失败，可稍后重发上一条消息"
-        if exc.status_code == 408:
-            return "请求超时，已自动重试仍失败，请检查网络后重发上一条消息"
-        return None
-    if isinstance(exc, APIStatusError):
+    if isinstance(exc, (LLMHttpError, APIStatusError)):
         # RateLimitError (429) is an APIStatusError subclass.
-        if exc.status_code == 429:
-            return "服务限流，已自动重试仍失败，可稍后重发上一条消息"
-        if exc.status_code >= 500:
-            return "模型服务异常，已自动重试仍失败，可稍后重发上一条消息"
-        if exc.status_code == 408:
-            return "请求超时，已自动重试仍失败，请检查网络后重发上一条消息"
-        return None
+        return _http_hint(exc.status_code)
     if isinstance(exc, APITimeoutError) or isinstance(
         exc, (httpx.ReadTimeout, httpx.ConnectTimeout)
     ):
