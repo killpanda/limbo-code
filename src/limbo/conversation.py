@@ -80,6 +80,7 @@ class Conversation:
         resume: Path | None = None,
         reporters: IntegrationReporter | None = None,
         client_factory: ClientFactory | None = None,
+        daily: bool = False,
     ) -> None:
         self.config = config
         self.workdir = workdir
@@ -91,7 +92,9 @@ class Conversation:
         # they share the main client — tests and fakes).
         self._client_factory = client_factory
         self._listeners: list[Callable[[BackgroundEvent], None]] = []
-        self._agent = self._build_agent(resume)
+        # `limbo daily`: the first new session starts in daily mode; /new
+        # then follows whatever mode the current session is in.
+        self._agent = self._build_agent(resume, daily=daily)
         self._pump = self._build_pump(self._agent)
         self._supervisor = self._build_supervisor(self._agent)
         # /goal proposal flow: a proposal round is in flight or just ended
@@ -115,13 +118,14 @@ class Conversation:
         """A turn, goal loop, follow-up or /compact owns the agent."""
         return self._pump.running
 
-    def _build_agent(self, resume: Path | None) -> Agent:
+    def _build_agent(self, resume: Path | None, *, daily: bool = False) -> Agent:
         return Agent(
             config=self.config,
             llm_client=self.llm_client,
             workdir=self.workdir,
             session_dir=self._session_dir,
             resume=resume,
+            meta_fields={"daily_mode": True} if daily and resume is None else None,
         )
 
     def _build_pump(self, agent: Agent) -> TurnPump:
@@ -185,7 +189,7 @@ class Conversation:
 
     def new(self) -> None:
         """Start a fresh session (``/new``)."""
-        self._replace(self._build_agent(None))
+        self._replace(self._build_agent(None, daily=self._agent.daily_mode))
 
     def switch(self, path: Path) -> None:
         """Resume the session at ``path``.

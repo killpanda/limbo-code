@@ -19,7 +19,7 @@ def _registry(workdir: Path, config: Config | None = None) -> ToolRegistry:
 
 
 def test_tools_section_lists_registered_tools(tmp_path, monkeypatch):
-    monkeypatch.setattr("limbo.prompt.discover_skills", lambda workdir: [])
+    monkeypatch.setattr("limbo.prompt.discover_skills", lambda workdir, **_: [])
     prompt = build_system_prompt(_registry(tmp_path), tmp_path)
     for name in ("read", "bash", "edit", "write", "grep", "find", "ls"):
         assert f"- {name}: " in prompt

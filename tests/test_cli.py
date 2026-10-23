@@ -63,3 +63,23 @@ def test_cli_resume_by_id_prefix_switches_workdir(
 # --- headless mode ------------------------------------------------------------
 
 
+
+
+# --- daily mode ------------------------------------------------------------------
+
+
+def test_cli_daily_subcommand_uses_daily_workdir_and_model(
+    fake_config, monkeypatch, tmp_path
+):
+    fake_config.daily.workdir = str(tmp_path / "daily")
+    fake_config.daily.model = "glm-4.7"
+    mock_app_class = MagicMock()
+    monkeypatch.setattr(ui_app_module, "LimboApp", mock_app_class)
+    monkeypatch.setattr(sys, "argv", ["limbo", "daily"])
+
+    assert main() == 0
+    kwargs = mock_app_class.call_args.kwargs
+    assert kwargs["daily"] is True
+    assert kwargs["workdir"] == tmp_path / "daily"
+    assert (tmp_path / "daily").is_dir()
+    assert fake_config.llm.model == "glm-4.7"

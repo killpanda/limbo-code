@@ -52,6 +52,10 @@ src/limbo/
 │                     # osc7501.py (terminal program status; TTY only, LIMBO_PROGRAM_STATUS=0
 │                     # opts out, tmux passthrough); create_reporters() fans out
 ├── skills.py         # SKILL.md discovery (user + project dirs)
+├── daily.py          # Daily mode notices (docs/daily-mode.md); the posture itself is
+│                     # ToolRegistry.daily_mode + prompt.py + SessionMeta.daily_mode
+├── memory.py         # Persistent memory (~/.limbo/memory/USER.md, NOTES.md): MemoryStore
+│                     # (capped, atomic batch ops, .bak), frozen per-session MemorySnapshot
 ├── subagents/        # Background subagents (docs/subagents.md): board.py (event-sourced
 │                     # task board + pure reconcile()), supervisor.py (scheduler, runners,
 │                     # notice delivery, user/main verbs), tools.py (main: plan_tasks/
@@ -67,7 +71,8 @@ src/limbo/
 │                     # code_mode flag filters definitions() to [run_code], all_definitions() feeds
 │                     # the SDK), hooks.py (before/after tool hook chain + plan mode), mutation_queue.py (per-file locks), ignore.py (.gitignore),
 │                     # read/bash/edit/write/grep/find/ls/run_code.py (the Code Mode transport),
-│                     # web_search.py (registered only when the search provider has a key)
+│                     # web_search.py (registered only when the search provider has a key),
+│                     # web_fetch.py + memory.py (daily mode only)
 ├── websearch/        # pluggable web-search backends: base.py (SearchProvider/SearchResult),
 │                     # deepseek.py (+ key inheritance from the deepseek model provider), PROVIDERS
 └── ui/               # app.py + app.tcss (ALL styles here; theme vars only, no bare hex),
@@ -104,21 +109,25 @@ Providers/models live in `llm/catalog.py`; unknown models get generic OpenAI-com
              # messages after an LLM-error turn; keep/withdraw end the task)
 [subagents]  # enabled, auto = "off"|"suggest"|"on", max_parallel = 3, max_tasks = 12,
              # task_token_budget, cheap_model, wake_main_on, on_dep_fail, on_resume
+[daily]      # workdir = "~/limbo-daily", model, memory, user_chars, notes_chars,
+             # inject_user_in_coding, fetch_max_chars, fetch_timeout
 [ui]         # theme, show_banner
 [providers.<id>]  # base_url / api_key / api_key_env / headers
 ```
 
 `/model` rebuilds the client mid-session (refused while busy) and persists via tomlkit. Sessions resume via `--continue` / `--resume` / `/sessions`; resume repairs dangling tool calls: each call commits a `tool_intent` record before it runs, so a crashed call is re-run on the next turn if its tool is `replay = "safe"` (read/grep/find/ls), otherwise marked "may have partially run" (intent committed) or "did not run" (no intent); legacy sessions without `meta.tool_intents` get the generic placeholder. Trace events: `session_start`, `user_message`, `llm_request` (full body), `llm_response`, `tool_call`, `tool_result`, `tool_recovery`, `compaction*`, `error`, `turn_end`. `/export [path]` merges meta + trace + message snapshot (Markdown if `.md`). `/fork [n]` copies the active history (first n user turns) into a new self-contained session, `/handoff <note>` starts a clean linked session from a note; both record `parent_session`/`fork_at` and leave the parent untouched. Code Mode sub-calls are traced as `tool_call`/`tool_result` with `parent_call_id`. `limbo --json` (implies `--headless`) prints every event as one JSON object per line.
 
-Skills: `~/.limbo/skills/<name>/SKILL.md` (user) and `<workdir>/.agents/skills/<name>/SKILL.md` (project, wins collisions) — injected as a `<available_skills>` catalog in the system prompt and invocable via `/<name> [args]`.
+Skills: `~/.limbo/skills/<name>/SKILL.md` (user) and `<workdir>/.agents/skills/<name>/SKILL.md` (project, wins collisions); daily sessions also see `~/.limbo/daily/skills/` (wins collisions there), coding sessions never do — injected as a `<available_skills>` catalog in the system prompt and invocable via `/<name> [args]`.
 
 ## UI
 
-Single column: status bar (state/elapsed/tokens/model/workdir/queued + rainbow 🎯GOAL badge while a goal loop runs + ⌨code badge while Code Mode is on) → scrolling chat flow (user `❯`, streaming Markdown, tool cards, errors) → input box (Enter submits, Shift+Enter newline, Alt+Enter queues a follow-up while busy (`ui/key_fixes.py` maps its modifyOtherKeys/kitty/ESC forms), paste markers, `ctrl+v` image attach) → hint line. Slash commands: `/sessions /new /fork /handoff /export /tracing-viewer /compact /model /code-mode /plan /help /2048 /goal /agents /task` + skill commands; `@<agent> text` messages a subagent. '/'-leading input that matches no command but looks like a path is sent as a normal message with existing files auto-attached (`ui/path_input.py`); a leading space forces plain text. After palette changes run `python scripts/check_contrast.py` (≥ 4.5:1).
+Single column: status bar (state/elapsed/tokens/model/workdir/queued + rainbow 🎯GOAL badge while a goal loop runs + ⌨code badge while Code Mode is on) → scrolling chat flow (user `❯`, streaming Markdown, tool cards, errors) → input box (Enter submits, Shift+Enter newline, Alt+Enter queues a follow-up while busy (`ui/key_fixes.py` maps its modifyOtherKeys/kitty/ESC forms), paste markers, `ctrl+v` image attach) → hint line. Slash commands: `/sessions /new /fork /handoff /export /tracing-viewer /compact /model /code-mode /plan /daily-mode /memory /help /2048 /goal /agents /task` + skill commands; `@<agent> text` messages a subagent. '/'-leading input that matches no command but looks like a path is sent as a normal message with existing files auto-attached (`ui/path_input.py`); a leading space forces plain text. After palette changes run `python scripts/check_contrast.py` (≥ 4.5:1).
 
 `/goal <text>` starts closed-loop mode (LIM-40): the first round is a proposal round — the model explores the repo and proposes acceptance command(s) in a `<verify_proposal>` block; the user confirms in a picker (accept / edit / skip), then the goal branch of the `TurnPump` (non-UI, shared by any frontend) runs each round as a complete `Agent.run()` turn and executes the verify command; exit 0 ends the loop, otherwise the failure output is fed back verbatim into the next round until `max_rounds`, when a no-tool wrap-up turn summarizes and any user message resumes with a fresh budget. Goal state persists on `SessionMeta.goal`. Esc during verify cancels the subprocess.
 
 Subagents (`subagents/`, docs/subagents.md): the main agent's `plan_tasks` creates tasks on the board (suggest mode: `PlanPicker` asks the user first); the `Supervisor` runs each as a child `Agent` with its own session file, gated by profile hooks. Child tools that end the turn (`need`, `ask_main`, `finish`) return `ToolResult(end_turn=True)`. Notices reach the main agent as one `source="subagent"` steer item; an idle main agent is woken through `MainWake` → `Conversation.take_wake_input()`. Board records live in the main session file (`type: "task"`), so the board survives restarts; tasks running at exit come back paused (`on_resume`).
+
+Daily mode (`limbo daily` / `--daily` / `/daily-mode on|off`, docs/daily-mode.md): a session posture like Code Mode — same loop, a general-assistant system prompt, plus `web_fetch` and `memory` tools; persisted as `SessionMeta.daily_mode`, `/new` keeps the current mode. Memory is a snapshot taken when the Agent is built: `USER.md` rides in every session's prompt (`[daily] inject_user_in_coding`), `NOTES.md` only in daily mode; `memory` tool writes reach disk at once but the prompt changes only next session (prefix cache stays intact).
 
 ## Key Decisions
 

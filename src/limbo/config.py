@@ -216,6 +216,36 @@ class WebSearchSettings(BaseModel):
         return value
 
 
+class DailySettings(BaseModel):
+    """[daily] section: the daily (non-coding) session posture."""
+
+    # Workdir of `limbo daily` sessions (notes, research output, downloads).
+    workdir: str = "~/limbo-daily"
+    # Model for `limbo daily` (empty = [llm] model).
+    model: str = ""
+    # Persistent memory (~/.limbo/memory/): the memory tool + prompt snapshot.
+    memory: bool = True
+    user_chars: int = 1500
+    notes_chars: int = 2500
+    # USER.md (who the user is) also rides in coding sessions' prompts.
+    inject_user_in_coding: bool = True
+    # web_fetch: characters per page chunk, request timeout.
+    fetch_max_chars: int = 20_000
+    fetch_timeout: float = 30.0
+
+    @field_validator("user_chars", "notes_chars", "fetch_max_chars")
+    @classmethod
+    def _positive_size(cls, value: int, info: ValidationInfo) -> int:
+        default = cls.model_fields[info.field_name or ""].default
+        if value < 100:
+            warnings.warn(
+                f"daily {info.field_name}={value} is too small; reset to {default}.",
+                stacklevel=2,
+            )
+            return int(default)
+        return value
+
+
 class CompactionSettings(BaseModel):
     """[compaction] section: auto context-window compaction (LIM-14)."""
 
@@ -308,6 +338,7 @@ class Config(BaseModel):
     goal: GoalSettings = Field(default_factory=GoalSettings)
     queue: QueueSettings = Field(default_factory=QueueSettings)
     subagents: SubagentSettings = Field(default_factory=SubagentSettings)
+    daily: DailySettings = Field(default_factory=DailySettings)
     # [providers.<id>] per-provider overrides, keyed by catalog provider id
     # (e.g. [providers.glm], [providers.codex]).
     providers: dict[str, ProviderOverride] = Field(default_factory=dict)

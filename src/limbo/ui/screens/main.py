@@ -5,13 +5,14 @@ from __future__ import annotations
 import asyncio
 import re
 import secrets
+import subprocess
 import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from textual import events
-from textual.app import ComposeResult
+from textual.app import ComposeResult, SuspendNotSupported
 from textual.binding import Binding
 from textual.containers import Horizontal, Vertical
 from textual.screen import Screen
@@ -33,6 +34,7 @@ from limbo.agent import (
 from limbo.compaction import is_summary_message
 from limbo.config import Config, save_thinking_to_config
 from limbo.conversation import Conversation, NoVerifyGate
+from limbo.daily import DAILY_USAGE, daily_toggle_notice, daily_unchanged_notice
 from limbo.goal import (
     STATUS_ACTIVE,
     GoalClear,
@@ -47,6 +49,7 @@ from limbo.integrations import (
 from limbo.llm.catalog import resolve_model, thinking_choices
 from limbo.llm.client import LLMClient
 from limbo.llm.factory import create_llm_client
+from limbo.memory import MEMORY_USAGE, describe, editor_command, parse_memory_command
 from limbo.model_switch import (
     prepare_model_switch,
     reload_llm_config,
@@ -143,6 +146,7 @@ class MainScreen(Screen[None]):
         session_dir: Path | None = None,
         resume: Path | None = None,
         *args,
+        daily: bool = False,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
@@ -165,6 +169,7 @@ class MainScreen(Screen[None]):
             # Subagents get clients of their own (per-session cache keys);
             # an injected client (tests) is shared instead.
             client_factory=None if llm_client is not None else create_llm_client,
+            daily=daily,
         )
         self._slash_menu_open = False
         # M2: the next submission is a verify command being edited (not a
@@ -322,6 +327,10 @@ class MainScreen(Screen[None]):
     def action_toggle_sidebar(self) -> None:
         self.toggle_class("-peek")
 
+    def _skills(self) -> list[Skill]:
+        """Skills visible to the current session (daily mode adds its own)."""
+        return discover_skills(self.workdir, daily=self.agent.daily_mode)
+
     def _sync_sidebar(self) -> None:
         """Push model / session / usage / mode state into the sidebar."""
         sidebar = self.query_one("#sidebar", Sidebar)
@@ -330,7 +339,7 @@ class MainScreen(Screen[None]):
         sidebar.set_model(self.config.llm.model, spec.provider.id, thinking)
         sidebar.set_title(self.agent.session_meta.title or "")
         sidebar.set_code_mode(self.agent.code_mode)
-        sidebar.set_skills([skill.name for skill in discover_skills(self.workdir)])
+        sidebar.set_skills([skill.name for skill in self._skills()])
         self._sync_usage()
 
     def _sync_usage(self, total_tokens: int | None = None) -> None:
@@ -382,7 +391,7 @@ class MainScreen(Screen[None]):
     def _slash_candidates(self) -> list:
         """Built-in commands plus discovered skills. Re-scanned on each menu
         update so skills added while Limbo is running appear immediately."""
-        return self._commands.candidates(discover_skills(self.workdir))
+        return self._commands.candidates(self._skills())
 
     def slash_menu_move(self, delta: int) -> None:
         menu = self.query_one("#slash-menu", SlashCommandMenu)
@@ -610,6 +619,22 @@ class MainScreen(Screen[None]):
         )
         self._commands.register(
             SlashCommand(
+                "/daily-mode",
+                "切换 Daily mode：日常非 coding 工作（读网页、长期记忆）[on|off]",
+                takes_args=True,
+                handler=lambda arg: self._daily_mode(arg),
+            )
+        )
+        self._commands.register(
+            SlashCommand(
+                "/memory",
+                "查看长期记忆；/memory edit [user|notes] 用编辑器打开",
+                takes_args=True,
+                handler=lambda arg: self._memory(arg),
+            )
+        )
+        self._commands.register(
+            SlashCommand(
                 "/help",
                 "显示帮助",
                 allow_when_busy=True,
@@ -686,7 +711,7 @@ class MainScreen(Screen[None]):
         name, _, arg = text.partition(" ")
         arg = arg.strip()
 
-        resolved = self._commands.resolve(name, discover_skills(self.workdir))
+        resolved = self._commands.resolve(name, self._skills())
         if isinstance(resolved, SlashCommand) and resolved.handler is not None:
             # Busy guard (RFC LIM-20): history-rewriting commands are
             # rejected mid-turn. Centralized here so both entry points
@@ -849,6 +874,45 @@ class MainScreen(Screen[None]):
         else:
             chat.add_info(f"计划模式已是{'开启' if enabled else '关闭'}状态")
 
+    # -- /daily-mode, /memory ----------------------------------------------
+
+    def _daily_mode(self, arg: str) -> None:
+        """Handle /daily-mode: swap the daily tools and prompt on/off."""
+        chat = self.query_one("#chat", ChatWidget)
+        enabled = parse_toggle(arg, self.agent.daily_mode)
+        if enabled is None:
+            chat.add_info(DAILY_USAGE)
+            return
+        if self.agent.set_daily_mode(enabled):
+            chat.add_info(daily_toggle_notice(enabled))
+            self._sync_mode_badges()
+            sidebar = self.query_one("#sidebar", Sidebar)
+            sidebar.set_skills([skill.name for skill in self._skills()])
+        else:
+            chat.add_info(daily_unchanged_notice(enabled))
+
+    def _memory(self, arg: str) -> None:
+        """Handle /memory: show the memory files, or open one in $EDITOR."""
+        chat = self.query_one("#chat", ChatWidget)
+        try:
+            target = parse_memory_command(arg)
+        except ValueError:
+            chat.add_info(MEMORY_USAGE)
+            return
+        store = self.agent.registry.memory_store
+        if target is None or store is None:
+            chat.add_info(describe(store, self.agent.memory_snapshot))
+            return
+        path = store.path(target)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with self.app.suspend():
+                subprocess.call(editor_command(path))
+        except (OSError, SuspendNotSupported) as e:
+            chat.add_info(f"无法打开编辑器（{e}），可以直接编辑 {path}")
+            return
+        chat.add_info(f"已保存 {path}，从下一个会话起生效")
+
     async def _swap_llm_client(self) -> None:
         """Swap the client for the *current* config model (converges on
         the latest model when /model fires rapidly — see model_switch)."""
@@ -900,7 +964,7 @@ class MainScreen(Screen[None]):
         palette = CommandPalette(
             self._commands.all(),
             list_sessions(self.session_dir, workdir=self.workdir),
-            discover_skills(self.workdir),
+            self._skills(),
             current_session=self.agent.session_id,
         )
         self.app.push_screen(palette, self._on_palette_choice)
@@ -1005,9 +1069,11 @@ class MainScreen(Screen[None]):
         status = self.query_one("#statusbar", StatusBar)
         status.set_code_mode(self.agent.code_mode)
         status.set_plan_mode(self.agent.plan_mode)
+        status.set_daily_mode(self.agent.daily_mode)
         sidebar = self.query_one("#sidebar", Sidebar)
         sidebar.set_code_mode(self.agent.code_mode)
         sidebar.set_plan_mode(self.agent.plan_mode)
+        sidebar.set_daily_mode(self.agent.daily_mode)
 
     def _render_history(self) -> None:
         """Render the agent's restored history into the chat flow.

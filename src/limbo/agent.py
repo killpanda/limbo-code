@@ -45,6 +45,7 @@ from limbo.llm.usage import (
     estimate_tokens,
     normalize_usage,
 )
+from limbo.memory import MemorySnapshot
 from limbo.models import (
     Attachment,
     CompletionMeta,
@@ -243,6 +244,10 @@ class Agent:
         # Extra system-prompt section and tools installed after
         # construction (subagent orchestration, see install()).
         self._prompt_extra = ""
+        # Frozen memory snapshot (limbo.memory): taken once per session so
+        # mid-session memory writes never change the prompt prefix.
+        store = self.registry.memory_store
+        self._memory = store.snapshot() if store is not None else None
         self._init_system_message()
 
         # Auto-compaction state (LIM-14). The estimator holds the real
@@ -280,6 +285,9 @@ class Agent:
             )
             self._session_file = resume
             self._journal = SessionJournal(resume)
+            # Before recovery: a crashed web_fetch is replay-safe only once
+            # the daily tools are registered.
+            self.registry.daily_mode = self._meta.daily_mode
             recovery = recover_history(
                 history,
                 started=(
@@ -325,9 +333,10 @@ class Agent:
             # Restore the presentation mode: recover_history dropped the
             # loaded system message, so rebuild the fresh one in code mode
             # when the session was saved with it on.
-            if self._meta.code_mode or self._meta.plan_mode:
+            if self._meta.code_mode or self._meta.plan_mode or self._meta.daily_mode:
                 self.registry.code_mode = self._meta.code_mode
                 self.registry.plan_mode = self._meta.plan_mode
+                self.registry.daily_mode = self._meta.daily_mode
                 self._init_system_message()
             # Restore the iterative-summary chain across sessions.
             self._previous_summary = next(
@@ -345,6 +354,9 @@ class Agent:
                 tool_intents=True,
                 **(meta_fields or {}),
             )
+            if self._meta.daily_mode:
+                self.registry.daily_mode = True
+                self._init_system_message()
 
         # Trace log: full-fidelity JSONL record of the run, kept separate from
         # the resumable session file. Created lazily-tolerant: tracing must
@@ -465,6 +477,7 @@ class Agent:
         meta.title = title
         meta.created_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
         meta.parent_session = self._meta.id
+        meta.daily_mode = self.daily_mode
         meta.fork_at = None
         meta.goal = None
         meta.usage = {}
@@ -627,7 +640,7 @@ class Agent:
         return self._end_turn_requested
 
     def _init_system_message(self) -> None:
-        prompt = build_system_prompt(self.registry, self.workdir)
+        prompt = build_system_prompt(self.registry, self.workdir, memory=self._memory)
         if self._prompt_extra:
             prompt += "\n\n" + self._prompt_extra
         if self.messages and self.messages[0].role == "system":
@@ -688,6 +701,31 @@ class Agent:
         self._init_system_message()
         self.trace.log("plan_mode", turn=self._turn_count, enabled=enabled)
         return True
+
+    # -- daily mode (non-coding posture) --------------------------------------
+
+    @property
+    def daily_mode(self) -> bool:
+        """Whether the daily posture (assistant prompt + daily tools) is on."""
+        return self.registry.daily_mode
+
+    def set_daily_mode(self, enabled: bool) -> bool:
+        """Toggle daily mode: swap the daily tools, rebuild the prompt.
+
+        Returns False when the mode did not change. The frontend owns the
+        busy guard, as for Code Mode.
+        """
+        if self.registry.daily_mode == enabled:
+            return False
+        self.registry.daily_mode = enabled
+        self._init_system_message()
+        self.trace.log("daily_mode", turn=self._turn_count, enabled=enabled)
+        return True
+
+    @property
+    def memory_snapshot(self) -> MemorySnapshot | None:
+        """The memory this session's prompt was built with (None: memory off)."""
+        return self._memory
 
     # -- steer queue (LIM-20) -------------------------------------------------
 
@@ -1871,6 +1909,7 @@ class Agent:
         # Keep the presentation mode in sync before snapshotting the meta.
         self._meta.code_mode = self.code_mode
         self._meta.plan_mode = self.plan_mode
+        self._meta.daily_mode = self.daily_mode
         if not self._meta.title:
             self._meta.title = derive_title(self.messages)
         with self._journal.lock:
@@ -1931,6 +1970,7 @@ class Agent:
         """
         self._meta.code_mode = self.code_mode
         self._meta.plan_mode = self.plan_mode
+        self._meta.daily_mode = self.daily_mode
         self._journal.patch_meta(self._meta)
 
 

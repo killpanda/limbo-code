@@ -67,7 +67,7 @@ def _deterministic_ui(monkeypatch):
 
     monkeypatch.setattr("limbo.ui.app.Path", _NoResolvePath)
     # The sidebar lists discovered skills, which include ~/.limbo/skills.
-    monkeypatch.setattr("limbo.ui.screens.main.discover_skills", lambda workdir: [])
+    monkeypatch.setattr("limbo.ui.screens.main.discover_skills", lambda workdir, **_: [])
 
 
 def make_app(tmp_path: Path) -> LimboApp:
