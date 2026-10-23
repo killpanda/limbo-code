@@ -44,7 +44,7 @@ from limbo.goal import (
     run_verify,
 )
 from limbo.models import Attachment
-from limbo.steer import STEER, SteerItem
+from limbo.steer import FOLLOW_UP, STEER, SteerItem, SteerMode
 
 # -- goal events (frontend renders these; headless prints them) ---------------
 
@@ -102,6 +102,15 @@ GoalEvent = (
 )
 
 PumpEvent = AgentEvent | GoalEvent
+
+
+@dataclass(frozen=True)
+class _SteerBatch:
+    """Drained queue items, joined into one turn's input."""
+
+    events: list[SteerEvent]
+    text: str
+    attachments: list[Attachment] | None
 
 
 class TurnPump:
@@ -274,18 +283,12 @@ class TurnPump:
                 if self._holds_queue_after_failure():
                     return
 
-                leftovers = self._agent.drain_steer()
-                if not leftovers:
+                batch = self._drain()
+                if batch is None:
                     return
-                # E1: one SteerEvent per item so the frontend flips the
-                # queued cards by id. Attachments ride along (the old
-                # frontend-side drain preserved them too).
-                for item in leftovers:
-                    yield SteerEvent(id=item.id, text=item.text)
-                next_input = "\n\n".join(item.text for item in leftovers)
-                next_attachments = [
-                    a for item in leftovers for a in item.attachments
-                ]
+                for event in batch.events:
+                    yield event
+                next_input, next_attachments = batch.text, batch.attachments
         finally:
             self._running = False
 
@@ -340,11 +343,11 @@ class TurnPump:
             # exits) outrank goal continuation. E1: yield one SteerEvent
             # per item so the frontend flips the queued cards by id.
             # Follow-ups wait for the whole task (the supervisor's drain).
-            leftovers = self._agent.drain_steer((STEER,))
-            if leftovers:
-                for item in leftovers:
-                    yield SteerEvent(id=item.id, text=item.text)
-                next_input = "\n\n".join(item.text for item in leftovers)
+            batch = self._drain((STEER,))
+            if batch is not None:
+                for event in batch.events:
+                    yield event
+                next_input, next_attachments = batch.text, batch.attachments
                 continue
 
             state = self.status()
@@ -401,6 +404,25 @@ class TurnPump:
                 "goal_round", next_round=state.rounds_completed + 1
             )
             next_input = build_goal_prompt(state, result)
+
+    def _drain(
+        self, modes: tuple[SteerMode, ...] = (STEER, FOLLOW_UP)
+    ) -> _SteerBatch | None:
+        """Drain queued messages into the next turn's input, or None.
+
+        The one drain both boundaries share (round boundary: steers only;
+        supervisor: everything), so text and attachments always travel
+        together. E1: one SteerEvent per item so the frontend flips the
+        queued cards by id.
+        """
+        items = self._agent.drain_steer(modes)
+        if not items:
+            return None
+        return _SteerBatch(
+            events=[SteerEvent(id=item.id, text=item.text) for item in items],
+            text="\n\n".join(item.text for item in items),
+            attachments=[a for item in items for a in item.attachments] or None,
+        )
 
     def _holds_queue_after_failure(self) -> bool:
         return self._agent.last_run_failed and self._after_failed_run in (
