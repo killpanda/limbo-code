@@ -269,7 +269,41 @@ class Conversation:
             raise
         finally:
             self._reporters.report(outcome.state, message=outcome.message)
+        every = self.config.daily.learn_after_tool_calls
+        if every > 0 and self._agent.registry.calls_since_skill >= every:
+            self.learn(auto=True)
         return outcome
+
+    # -- /learn: background skill review (daily mode) -------------------------
+
+    def learn(self, *, auto: bool = False) -> str:
+        """Start a skill-reviewer subagent over the conversation so far.
+
+        Returns what to tell the user. ``auto`` (after a busy turn) stays
+        quiet when there is nothing to do.
+        """
+        if not self._agent.daily_mode:
+            return "" if auto else "/learn 只在 daily 模式下可用"
+        if self._supervisor is None:
+            return "" if auto else "/learn 需要子代理（[subagents] enabled = true）"
+        if any(t.profile == "skill-reviewer" for t in self._supervisor.board.live()):
+            return "" if auto else "已有一个复盘在进行中"
+        self._agent.registry.calls_since_skill = 0
+        result = self._supervisor.plan(
+            [{
+                "title": "复盘：把这次对话的经验写进 skill",
+                "brief": (
+                    "Review the conversation above and update the daily skills "
+                    "as your instructions say."
+                ),
+                "profile": "skill-reviewer",
+                "context": "fork",
+            }],
+            created_by="user",
+        )
+        if not result.ids:
+            return "" if auto else f"复盘没能开始：{result.message}"
+        return f"已在后台开始复盘（{result.ids[0]}），有改动会告诉你"
 
     # -- /goal: proposal round → confirmation ---------------------------------
 

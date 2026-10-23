@@ -45,7 +45,7 @@ from limbo.llm.usage import (
     estimate_tokens,
     normalize_usage,
 )
-from limbo.memory import MemorySnapshot
+from limbo.memory import MEMORY_NUDGE, MemorySnapshot
 from limbo.models import (
     Attachment,
     CompletionMeta,
@@ -248,6 +248,7 @@ class Agent:
         # mid-session memory writes never change the prompt prefix.
         store = self.registry.memory_store
         self._memory = store.snapshot() if store is not None else None
+        self._turns_since_memory = 0
         self._init_system_message()
 
         # Auto-compaction state (LIM-14). The estimator holds the real
@@ -270,6 +271,7 @@ class Agent:
         self._auto_compact_noop_notified = False
 
         self._session_dir = session_dir or Path.home() / ".limbo" / "sessions"
+        self.registry.session_dir = self._session_dir
         # Read-only tool calls interrupted by a crash, re-run at the start
         # of the next turn (their placeholder result is then replaced).
         self._pending_reruns: list[dict[str, Any]] = []
@@ -722,6 +724,20 @@ class Agent:
         self.trace.log("daily_mode", turn=self._turn_count, enabled=enabled)
         return True
 
+    def _memory_nudge(self) -> str:
+        """Daily mode: a reminder to consider memory every N quiet turns."""
+        if self.registry.memory_written:
+            self.registry.memory_written = False
+            self._turns_since_memory = 0
+        self._turns_since_memory += 1
+        every = self.config.daily.memory_nudge_turns
+        if not (self.daily_mode and every > 0 and self.registry.get("memory") is not None):
+            return ""
+        if self._turns_since_memory <= every:
+            return ""
+        self._turns_since_memory = 0
+        return MEMORY_NUDGE
+
     @property
     def memory_snapshot(self) -> MemorySnapshot | None:
         """The memory this session's prompt was built with (None: memory off)."""
@@ -962,6 +978,7 @@ class Agent:
             yield event
 
         content, images = self._build_user_content(user_input, attachments or [])
+        content += self._memory_nudge()
         self.messages.append(
             Message(role="user", content=content, attachments=images or None)
         )

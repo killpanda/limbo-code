@@ -16,6 +16,10 @@ dependencies = [
     "pygments>=2.17",
 ]
 
+[project.optional-dependencies]
+# Daily mode: web_fetch reads PDF links when pypdf is present.
+daily = ["pypdf>=4.0"]
+
 [dependency-groups]
 # Dev tools live in a PEP 735 dependency group (not an extra) so `uv sync`
 # installs them by default — no `--extra`/`--group` flag needed. Always run
@@ -29,6 +33,7 @@ dev = [
     "ruff>=0.4",
     "mypy>=1.10",
     "types-Pygments>=2.17",
+    "pypdf>=4.0",
 ]
 
 [project.scripts]
@@ -50,6 +55,9 @@ packages = ["src/limbo"]
 [tool.ruff]
 line-length = 100
 src = ["src", "tests"]
+# Bundled daily-mode skills ported from hermes-agent: third-party scripts
+# kept as upstream wrote them.
+extend-exclude = ["src/limbo/daily_skills"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
@@ -59,3 +67,4 @@ python_version = "3.11"
 strict = false
 warn_return_any = true
 warn_unused_ignores = true
+exclude = ["src/limbo/daily_skills/"]

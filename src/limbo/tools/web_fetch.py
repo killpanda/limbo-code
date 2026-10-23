@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import io
 import re
 from html.parser import HTMLParser
 from pathlib import Path
@@ -160,8 +162,10 @@ class WebFetchTool(BaseTool):
         self.description = (
             "Open a web page and return its readable text as Markdown (title, "
             "headings, lists, links; navigation and scripts stripped). Use it to "
-            "read search results or links the user gives you. Long pages come in "
-            f"chunks of {max_chars} characters; pass offset to read further."
+            "read search results or links the user gives you; PDF links work too "
+            "(text only). Long pages come in chunks of "
+            f"{max_chars} characters and their full text is saved to a file you "
+            "can read; pass offset to continue."
         )
 
     def run(self, arguments: dict[str, Any]) -> ToolResult:
@@ -176,17 +180,22 @@ class WebFetchTool(BaseTool):
             raise ToolError("offset must be a non-negative integer")
 
         final_url, content_type, body = self._download(url)
-        if content_type == "application/pdf" or body[:5] == b"%PDF-":
-            raise ToolError(
-                "This URL is a PDF, which web_fetch cannot read yet. Download it "
-                "with bash (e.g. curl -L -o file.pdf URL) and convert it locally."
-            )
-        text = body.decode(_charset(content_type, body), errors="replace")
         title = ""
-        if "html" in content_type or (not content_type and "<html" in text[:2000].lower()):
-            title, text = html_to_text(text, final_url)
-        elif content_type and not content_type.startswith(_TEXT_TYPES):
-            raise ToolError(f"Unsupported content type: {content_type}")
+        if content_type.startswith("application/pdf") or body[:5] == b"%PDF-":
+            pdf = _pdf_text(body)
+            if pdf is None:
+                raise ToolError(
+                    "This URL is a PDF and the pypdf package is not installed "
+                    "(pip install pypdf). Or download it with bash (curl -L -o "
+                    "file.pdf URL) and use the pdf skill."
+                )
+            text = pdf
+        else:
+            text = body.decode(_charset(content_type, body), errors="replace")
+            if "html" in content_type or (not content_type and "<html" in text[:2000].lower()):
+                title, text = html_to_text(text, final_url)
+            elif content_type and not content_type.startswith(_TEXT_TYPES):
+                raise ToolError(f"Unsupported content type: {content_type}")
         return ToolResult(success=True, output=self._page(final_url, title, text, offset))
 
     def _download(self, url: str) -> tuple[str, str, bytes]:
@@ -223,7 +232,38 @@ class WebFetchTool(BaseTool):
         if offset or end < total:
             out += f"\n\n[Characters {offset}-{end} of {total}."
             out += f" Call again with offset={end} for more.]" if end < total else "]"
+        if not offset and end < total:
+            saved = self._save(url, title, text)
+            if saved is not None:
+                out += f"\n[Full text saved to {saved}; read it with the read tool.]"
         return out
+
+    def _save(self, url: str, title: str, text: str) -> Path | None:
+        """Keep a long page's full text in <workdir>/fetched/ (best effort)."""
+        host = re.sub(r"[^\w.-]", "_", urlparse(url).netloc) or "page"
+        digest = hashlib.sha1(url.encode()).hexdigest()[:8]
+        path = self.workdir / "fetched" / f"{host}-{digest}.md"
+        header = f"<!-- {url} -->\n" + (f"# {title}\n\n" if title else "\n")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(header + text, encoding="utf-8")
+        except OSError:
+            return None
+        return path
+
+
+def _pdf_text(body: bytes) -> str | None:
+    """A PDF's text, page by page (None when pypdf is not installed)."""
+    try:
+        from pypdf import PdfReader  # noqa: PLC0415 - optional dependency
+    except ImportError:
+        return None
+    try:
+        reader = PdfReader(io.BytesIO(body))
+        pages = [page.extract_text() or "" for page in reader.pages]
+    except Exception as e:  # noqa: BLE001 - malformed PDFs raise many types
+        raise ToolError(f"Could not read the PDF: {e}") from e
+    return "\n\n".join(f"## Page {i}\n\n{t.strip()}" for i, t in enumerate(pages, 1))
 
 
 def _charset(content_type: str, body: bytes) -> str:

@@ -37,6 +37,7 @@ description: Test-driven development workflow.
 
 | 来源 | 路径 |
 |------|------|
+| 内置 daily 起步包（仅 daily 会话） | `src/limbo/daily_skills/`（随包分发，从 Hermes 移植） |
 | 用户级 | `~/.limbo/skills/<name>/SKILL.md` |
 | 项目级 | `<workdir>/.agents/skills/<name>/SKILL.md` |
 | Daily（仅 daily 会话） | `~/.limbo/daily/skills/<name>/SKILL.md` |

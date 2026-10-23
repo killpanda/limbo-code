@@ -82,6 +82,22 @@ def _guidelines(registry: ToolRegistry) -> str:
             "- When the user tells you something durable about themselves or "
             "how they like things done, save it with memory"
         )
+    if registry.daily_mode and registry.get("session_search") is not None:
+        lines.append(
+            "- When the user refers to earlier conversations, look them up with "
+            "session_search instead of asking them to repeat"
+        )
+    if registry.daily_mode and registry.get("ask_user") is not None:
+        lines.append(
+            "- When a decision is the user's to make, ask with ask_user (offer "
+            "options) instead of guessing"
+        )
+    if registry.daily_mode and registry.get("skill_manage") is not None:
+        lines.append(
+            "- When you work out a reusable way to do a kind of task, or the user "
+            "corrects how a task should be done, record it in a skill with "
+            "skill_manage (patch the skill you used before creating a new one)"
+        )
     lines.append(_DAILY_GUIDELINES_TAIL if registry.daily_mode else _GUIDELINES_TAIL)
     return "\n".join(lines)
 

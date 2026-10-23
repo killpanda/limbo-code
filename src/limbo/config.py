@@ -227,6 +227,12 @@ class DailySettings(BaseModel):
     memory: bool = True
     user_chars: int = 1500
     notes_chars: int = 2500
+    # Remind the model to consider memory after this many user turns
+    # without a memory write (0 = never).
+    memory_nudge_turns: int = 10
+    # Start a background skill review (/learn) after a turn once this many
+    # tool calls ran since the last skill update (0 = only /learn).
+    learn_after_tool_calls: int = 10
     # web_fetch: characters per page chunk, request timeout.
     fetch_max_chars: int = 20_000
     fetch_timeout: float = 30.0

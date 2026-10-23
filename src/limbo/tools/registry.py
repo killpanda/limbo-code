@@ -11,9 +11,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import limbo.skills as skills_module
 from limbo.config import Config
 from limbo.memory import MemoryStore, memory_dir
 from limbo.models import ToolResult
+from limbo.tools.ask_user import AskUserTool
 from limbo.tools.base import BaseTool, ReplayPolicy
 from limbo.tools.bash import BashTool
 from limbo.tools.edit import EditTool
@@ -24,6 +26,8 @@ from limbo.tools.ls import LsTool
 from limbo.tools.memory import MemoryTool
 from limbo.tools.read import ReadTool
 from limbo.tools.run_code import RunCodeTool
+from limbo.tools.session_search import SessionSearchTool
+from limbo.tools.skill_manage import SkillManageTool
 from limbo.tools.web_fetch import WebFetchTool
 from limbo.tools.web_search import WebSearchTool
 from limbo.tools.write import WriteTool
@@ -39,7 +43,7 @@ _CURRENT_CALL: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 
 
 # Tools only daily mode registers.
-DAILY_TOOLS = ("web_fetch", "memory")
+DAILY_TOOLS = ("web_fetch", "memory", "session_search", "ask_user", "skill_manage")
 
 
 @dataclass(frozen=True)
@@ -86,6 +90,13 @@ class ToolRegistry:
         run_code = RunCodeTool(workdir=workdir)
         run_code.registry = self
         self._tools["run_code"] = run_code
+        # Where session_search looks (the agent sets its own session dir).
+        self.session_dir = Path.home() / ".limbo" / "sessions"
+        # Daily-mode bookkeeping read by the agent/frontends: tool calls
+        # since the last skill_manage (auto skill review), and whether
+        # memory was written (memory nudge).
+        self.calls_since_skill = 0
+        self.memory_written = False
         daily = self.config.daily
         # None when [daily] memory is off: no memory tool, no prompt block.
         self.memory_store: MemoryStore | None = (
@@ -104,7 +115,7 @@ class ToolRegistry:
 
     @daily_mode.setter
     def daily_mode(self, enabled: bool) -> None:
-        """Add/remove the daily tools (web_fetch, memory)."""
+        """Add/remove the daily tools (DAILY_TOOLS)."""
         if enabled == self.daily_mode:
             return
         if not enabled:
@@ -117,6 +128,13 @@ class ToolRegistry:
         )
         if self.memory_store is not None:
             self._tools["memory"] = MemoryTool(self.workdir, self.memory_store)
+        self._tools["session_search"] = SessionSearchTool(
+            self.workdir, lambda: self.session_dir
+        )
+        self._tools["ask_user"] = AskUserTool(self.workdir)
+        self._tools["skill_manage"] = SkillManageTool(
+            self.workdir, lambda: skills_module.DEFAULT_DAILY_SKILLS_DIR
+        )
 
     def register(self, tool_class: type[BaseTool]) -> None:
         tool = tool_class(workdir=self.workdir)
@@ -167,6 +185,9 @@ class ToolRegistry:
     async def run(self, call: Admitted, call_id: str | None = None) -> ToolResult:
         """Execute an admitted call, then the ``after_tool`` chain."""
         tool = self._tools[call.name]
+        self.calls_since_skill = 0 if call.name == "skill_manage" else self.calls_since_skill + 1
+        if call.name == "memory":
+            self.memory_written = True
         token = _CURRENT_CALL.set(call_id) if call_id is not None else None
         try:
             if getattr(tool, "is_async", False):

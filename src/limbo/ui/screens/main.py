@@ -83,6 +83,7 @@ from limbo.subagents.events import (
     TaskChanged,
 )
 from limbo.toggles import parse_toggle
+from limbo.tools.ask_user import format_question
 from limbo.tools.bash import BashTool
 from limbo.tracing.command import TracingViewerCommand
 from limbo.ui import recent_models
@@ -627,6 +628,13 @@ class MainScreen(Screen[None]):
         )
         self._commands.register(
             SlashCommand(
+                "/learn",
+                "复盘这次对话，把经验写进 daily skill（后台子代理）",
+                handler=lambda arg: self._learn(),
+            )
+        )
+        self._commands.register(
+            SlashCommand(
                 "/memory",
                 "查看长期记忆；/memory edit [user|notes] 用编辑器打开",
                 takes_args=True,
@@ -890,6 +898,9 @@ class MainScreen(Screen[None]):
             sidebar.set_skills([skill.name for skill in self._skills()])
         else:
             chat.add_info(daily_unchanged_notice(enabled))
+
+    def _learn(self) -> None:
+        self.query_one("#chat", ChatWidget).add_info(self.conversation.learn())
 
     def _memory(self, arg: str) -> None:
         """Handle /memory: show the memory files, or open one in $EDITOR."""
@@ -1666,6 +1677,8 @@ class MainScreen(Screen[None]):
             card = chat.add_tool_card(event.id, event.name, event.arguments)
             if result.success:
                 card.set_success(result.output or "")
+                if event.name == "ask_user":
+                    chat.add_info(format_question(event.arguments))
                 self.query_one("#sidebar", Sidebar).record_tool_result(
                     event.name, event.arguments
                 )

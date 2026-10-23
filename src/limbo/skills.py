@@ -32,6 +32,9 @@ PROJECT_SKILLS_DIR = ".agents/skills"
 # Daily mode's own skills: seen only by daily sessions (which also see the
 # user and project skills above); coding sessions never list them.
 DEFAULT_DAILY_SKILLS_DIR = Path.home() / ".limbo" / "daily" / "skills"
+# The starter pack shipped with limbo (daily sessions only; lowest priority,
+# so any user, project or daily skill of the same name replaces it).
+BUNDLED_DAILY_SKILLS_DIR = Path(__file__).parent / "daily_skills"
 
 # Validation limits per the Agent Skills spec (agentskills.io).
 MAX_NAME_LENGTH = 64
@@ -174,18 +177,22 @@ def discover_skills(
 ) -> list[Skill]:
     """Discover skills from the user dir and the project (.agents/skills).
 
-    ``daily`` adds the daily-mode dir (``~/.limbo/daily/skills``) on top.
-    Later sources override earlier ones with the same name — user, then
-    project, then daily — with a warning logged for each collision.
+    ``daily`` adds the bundled starter pack underneath and the daily-mode
+    dir (``~/.limbo/daily/skills``) on top. Later sources override earlier
+    ones with the same name — bundled, user, project, daily — with a
+    warning logged for each collision (the bundled pack is replaced
+    silently).
     Sorted by name.
     """
     user_dir = user_dir if user_dir is not None else DEFAULT_USER_SKILLS_DIR
     sources = [user_dir, workdir / PROJECT_SKILLS_DIR]
     if daily:
-        sources.append(DEFAULT_DAILY_SKILLS_DIR)
+        sources = [BUNDLED_DAILY_SKILLS_DIR, *sources, DEFAULT_DAILY_SKILLS_DIR]
     by_name: dict[str, Skill] = {}
     for skill in [s for d in sources for s in _load_skills_from(d)]:
-        if skill.name in by_name:
+        if skill.name in by_name and not by_name[skill.name].path.is_relative_to(
+            BUNDLED_DAILY_SKILLS_DIR
+        ):
             logger.warning(
                 "Skill name collision: %r from %s overrides %s",
                 skill.name,
