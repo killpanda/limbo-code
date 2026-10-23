@@ -23,6 +23,9 @@ class SlashCommand:
     # (RFC LIM-20): they are rejected while the agent is busy. Read-only
     # commands opt in to busy availability here.
     allow_when_busy: bool = False
+    # Daily-mode commands (/memory, /learn) are hidden from the menu, the
+    # palette and /help in coding sessions, and refused there.
+    daily_only: bool = False
     handler: Callable[[str], None] | None = field(
         default=None, compare=False, repr=False
     )
@@ -31,8 +34,9 @@ class SlashCommand:
 class SlashCommandRegistry:
     """Holds the built-in commands; merges skills for display and lookup."""
 
-    def __init__(self) -> None:
+    def __init__(self, daily: Callable[[], bool] = lambda: False) -> None:
         self._commands: dict[str, SlashCommand] = {}
+        self._daily = daily
 
     def register(self, command: SlashCommand) -> None:
         self._commands[command.name] = command
@@ -42,7 +46,9 @@ class SlashCommandRegistry:
         return self._commands.get(name.lower())
 
     def all(self) -> list[SlashCommand]:
-        return list(self._commands.values())
+        """The commands available now (daily-only ones only in daily mode)."""
+        daily = self._daily()
+        return [c for c in self._commands.values() if daily or not c.daily_only]
 
     def resolve(self, name: str, skills: list[Skill]) -> SlashCommand | Skill | None:
         """Resolve '/'-leading input to a built-in command or a skill.
