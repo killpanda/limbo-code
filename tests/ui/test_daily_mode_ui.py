@@ -46,6 +46,12 @@ async def test_daily_app_starts_in_daily_mode_and_toggles(tmp_path):
         assert screen.query_one("#statusbar", StatusBar).daily_badge
         assert str(screen.query_one("#input", InputWidget).border_title) == DAILY_BADGE
         assert pilot.app.theme == "limbo-dusk+daily"
+        names = {c.name for c in screen._commands.candidates(screen._skills())}
+        assert {"/memory", "/learn", "/pdf"} <= names
+
+        screen._handle_command("/memory")
+        await pilot.pause()
+        assert "USER.md" in _chat_text(screen)
 
         screen._handle_command("/daily-mode off")
         await pilot.pause()
@@ -54,6 +60,10 @@ async def test_daily_app_starts_in_daily_mode_and_toggles(tmp_path):
         assert not screen.query_one("#input", InputWidget).border_title
         assert pilot.app.theme == "limbo-dusk"
 
-        screen._handle_command("/memory")
+        # /memory and /learn are daily-only: hidden and refused in coding sessions.
+        names = {c.name for c in screen._commands.candidates(screen._skills())}
+        assert not names & {"/memory", "/learn", "/pdf"}
+        assert "/memory" not in screen._commands.help_text()
+        screen._handle_command("/memory edit")
         await pilot.pause()
-        assert "USER.md" in _chat_text(screen)
+        assert "/memory 只在 daily 模式可用" in _chat_text(screen)

@@ -52,7 +52,12 @@ from limbo.agent import (
 )
 from limbo.config import Config
 from limbo.conversation import Conversation, NoVerifyGate
-from limbo.daily import DAILY_USAGE, daily_toggle_notice, daily_unchanged_notice
+from limbo.daily import (
+    DAILY_USAGE,
+    daily_only_notice,
+    daily_toggle_notice,
+    daily_unchanged_notice,
+)
 from limbo.goal import (
     GoalClear,
     GoalQuery,
@@ -540,6 +545,11 @@ def _terminal_mode(fd: int) -> Iterator[None]:
 
 # -- the frontend -----------------------------------------------------------------
 
+# Listed by /help only in daily mode (refused in coding sessions).
+DAILY_HELP_TEXT = """
+  /learn         复盘这次对话，把经验写进 daily skill（后台子代理）
+  /memory        查看长期记忆（/memory edit [user|notes] 显示文件路径）"""
+
 HELP_TEXT = """可用命令：
   /goal <目标>   设定目标并进入闭环（首轮提议验收命令）
   /goal clear    退出 goal 模式
@@ -551,8 +561,6 @@ HELP_TEXT = """可用命令：
   /handoff <说明> 带交接说明开新会话（干净上下文，关联原会话）
   /plan [on|off] 计划模式：只读探索并给出方案，写类工具被拦下
   /daily-mode [on|off]  Daily mode：日常非 coding 工作（读网页、长期记忆）
-  /learn         复盘这次对话，把经验写进 daily skill（后台子代理）
-  /memory        查看长期记忆（/memory edit [user|notes] 显示文件路径）
   /tracing-viewer [id|off]  在浏览器查看 trace（打印本地链接）
   /agents [scan|init]  子代理任务板 · 项目画像 · 生成项目角色
   /task [id]     查看任务；/task <pause|resume|cancel|retry|approve|reject> <id|all> [说明]
@@ -740,12 +748,15 @@ class HeadlessFrontend:
             self._cmd_plan(command.arg)
         elif isinstance(command, SlashDaily):
             self._cmd_daily(command.arg)
+        elif isinstance(command, SlashMemory | SlashLearn) and not self._agent.daily_mode:
+            self._line(daily_only_notice("/memory" if isinstance(command, SlashMemory)
+                                         else "/learn"))
         elif isinstance(command, SlashMemory):
             self._cmd_memory(command.arg)
         elif isinstance(command, SlashLearn):
             self._line(self._conv.learn())
         elif isinstance(command, SlashHelp):
-            self._line(HELP_TEXT)
+            self._line(HELP_TEXT + (DAILY_HELP_TEXT if self._agent.daily_mode else ""))
         elif isinstance(command, SlashQuit):
             self._quit = True
         elif isinstance(command, SlashTracingViewer):

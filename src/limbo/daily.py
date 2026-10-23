@@ -10,17 +10,21 @@ from __future__ import annotations
 DAILY_USAGE = "用法：/daily-mode on|off（无参则切换）"
 
 # Chat divider labels for a manual switch (TUI, Limbo Dawn).
-DAILY_DIVIDER_ON = "☀ Daily mode · 通用助理口吻 · web_fetch 和 memory 已就绪"
+DAILY_DIVIDER_ON = "☀ Daily mode · 通用助理口吻 · 读网页、长期记忆、翻历史会话已就绪"
 DAILY_DIVIDER_OFF = "⌨ 回到 coding · 网页和记忆工具已收起"
 
 
 def daily_toggle_notice(enabled: bool) -> str:
     if enabled:
         return (
-            "Daily mode 已开启：通用助理口吻，新增 web_fetch（读网页）和 memory（长期记忆）；"
-            "/memory 查看记忆"
+            "Daily mode 已开启：通用助理口吻，新增读网页、长期记忆、翻历史会话等工具；"
+            "/memory 查看记忆，/learn 把经验写进 skill"
         )
     return "Daily mode 已关闭：回到 coding 模式"
+
+
+def daily_only_notice(command: str) -> str:
+    return f"{command} 只在 daily 模式可用（/daily-mode on 开启）"
 
 
 def daily_unchanged_notice(enabled: bool) -> str:

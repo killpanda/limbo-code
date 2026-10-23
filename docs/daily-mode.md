@@ -32,6 +32,7 @@ limbo daily --continue   # 接上一个 daily 会话
 - 模型用 `memory` 工具写入（add / patch / remove，一次调用可批量、原子执行），超过字符上限时整批拒绝。
 - 写入立刻落盘（上一版留在 `*.bak`），但本会话的提示词不变，从下一个会话起生效。
 - `/memory` 查看内容和用量；`/memory edit [user|notes]` 用 `$VISUAL`/`$EDITOR` 打开（headless 下只显示路径）。
+- `/memory` 和 `/learn` 只在 daily 会话里出现；coding 会话的命令菜单、命令面板和 `/help` 里都没有，直接输入会提示先 `/daily-mode on`。
 
 - 每 `memory_nudge_turns` 轮（默认 10）没写过记忆时，会在你的消息后附一句提醒，让模型考虑要不要存。
 

@@ -38,6 +38,7 @@ from limbo.daily import (
     DAILY_DIVIDER_OFF,
     DAILY_DIVIDER_ON,
     DAILY_USAGE,
+    daily_only_notice,
     daily_unchanged_notice,
 )
 from limbo.goal import (
@@ -182,7 +183,7 @@ class MainScreen(Screen[None]):
         # message) after the picker's "edit" choice.
         self._editing_verify = False
         self._tracing_viewer = TracingViewerCommand(lambda: self.agent)
-        self._commands = SlashCommandRegistry()
+        self._commands = SlashCommandRegistry(daily=lambda: self.agent.daily_mode)
         self._register_builtin_commands()
         # Private bash executor for user '!' bang commands (RFC
         # design/rfc-bang-command.md). Deliberately NOT the agent registry's
@@ -647,6 +648,7 @@ class MainScreen(Screen[None]):
             SlashCommand(
                 "/learn",
                 "复盘这次对话，把经验写进 daily skill（后台子代理）",
+                daily_only=True,
                 handler=lambda arg: self._learn(),
             )
         )
@@ -655,6 +657,7 @@ class MainScreen(Screen[None]):
                 "/memory",
                 "查看长期记忆；/memory edit [user|notes] 用编辑器打开",
                 takes_args=True,
+                daily_only=True,
                 handler=lambda arg: self._memory(arg),
             )
         )
@@ -738,6 +741,9 @@ class MainScreen(Screen[None]):
 
         resolved = self._commands.resolve(name, self._skills())
         if isinstance(resolved, SlashCommand) and resolved.handler is not None:
+            if resolved.daily_only and not self.agent.daily_mode:
+                chat.add_info(daily_only_notice(resolved.name))
+                return True
             # Busy guard (RFC LIM-20): history-rewriting commands are
             # rejected mid-turn. Centralized here so both entry points
             # (on_user_submitted and slash_menu_complete) are covered.
