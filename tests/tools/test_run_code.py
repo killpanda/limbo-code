@@ -47,3 +47,21 @@ def test_gather_parallel_calls(workdir, tool):
     assert "aaa|bbb" in (result.output or "")
 
 
+
+
+def test_cpu_bound_program_is_stopped_by_the_watchdog(tool):
+    """asyncio.wait_for cannot cancel code that never awaits; the watchdog can."""
+    import time
+
+    start = time.monotonic()
+    result = tool.run(
+        {"code": "while True:\n    pass", "description": "spin", "timeout": 0.3}
+    )
+
+    assert result.success is False
+    assert "timeout" in (result.error or "")
+    assert time.monotonic() - start < 5
+    # The worker thread is not poisoned: the next program runs normally.
+    ok = tool.run({"code": "return 1 + 1", "description": "add"})
+    assert ok.success is True
+    assert ok.output == "2"

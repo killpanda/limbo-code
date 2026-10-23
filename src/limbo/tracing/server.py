@@ -43,6 +43,12 @@ from limbo.tracing.index import TraceIndex
 from limbo.tracing.model import build_tree, request_diff
 
 _COOKIE = "limbo_trace"
+# The page is a single self-contained file: inline script/style, same-origin
+# API only. Lock everything else down.
+_CSP = (
+    "default-src 'none'; script-src 'unsafe-inline'; "
+    "style-src 'unsafe-inline'; connect-src 'self'; img-src 'self' data:"
+)
 _SESSION_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
 _TREE = re.compile(r"^/api/sessions/([^/]+)/tree$")
 _RECORD = re.compile(r"^/api/sessions/([^/]+)/records/(\d+)$")
@@ -198,6 +204,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "no-referrer")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Content-Security-Policy", _CSP)
         for key, value in (extra or {}).items():
             self.send_header(key, value)
         self.end_headers()
@@ -233,10 +241,24 @@ class _Handler(BaseHTTPRequestHandler):
     def _route(self, path: str, query: dict[str, list[str]], token: str | None) -> None:
         viewer = self.viewer
         if path == "/":
-            extra = {}
             if token:
-                extra["Set-Cookie"] = f"{_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/"
-            self._send(HTTPStatus.OK, _load_page(), "text/html; charset=utf-8", extra)
+                # Swap the token for the HttpOnly cookie and redirect, so
+                # the token does not stay in the address bar or history.
+                # The fragment (#session) survives a redirect with no
+                # fragment of its own.
+                self._send(
+                    HTTPStatus.FOUND,
+                    b"",
+                    "text/plain; charset=utf-8",
+                    {
+                        "Set-Cookie": (
+                            f"{_COOKIE}={token}; HttpOnly; SameSite=Strict; Path=/"
+                        ),
+                        "Location": "/",
+                    },
+                )
+                return
+            self._send(HTTPStatus.OK, _load_page(), "text/html; charset=utf-8")
             return
         if path == "/api/state":
             self._json({"current": viewer.current_session()})

@@ -408,12 +408,17 @@ class Agent:
 
     # -- lineage: /fork and /handoff -------------------------------------------
 
+    def _user_turn_indices(self) -> list[int]:
+        """Indices of the messages that start a turn (fork points)."""
+        return [
+            i
+            for i, m in enumerate(self.messages)
+            if i > 0 and m.role == "user" and not is_summary_message(m)
+        ]
+
     def user_turns(self) -> list[Message]:
         """The user messages that start a turn (fork points), oldest first."""
-        return [
-            m for m in self.messages[1:]
-            if m.role == "user" and not is_summary_message(m)
-        ]
+        return [self.messages[i] for i in self._user_turn_indices()]
 
     def fork(self, keep_turns: int | None = None) -> Path:
         """Branch this session into a new file; this one is left untouched.
@@ -424,10 +429,12 @@ class Agent:
         Returns the child's path (resume it to continue there).
         """
         self._save_session_sync()
-        turns = self.user_turns()
+        turn_indices = self._user_turn_indices()
         cut = len(self.messages)
-        if keep_turns is not None and keep_turns < len(turns):
-            cut = self.messages.index(turns[keep_turns])
+        if keep_turns is not None and keep_turns < len(turn_indices):
+            # Index-based: a value lookup on Message would silently pick an
+            # earlier duplicate if ids were ever dropped from equality.
+            cut = turn_indices[keep_turns]
         messages = self.messages[:cut]
         kept_ids = {m.id for m in messages}
         compactions = [
@@ -932,8 +939,11 @@ class Agent:
         name: str,
         arguments: dict[str, Any],
     ) -> ToolResult:
-        """Execute a tool with full trace logging. Re-raises on crash."""
-        await self._commit_intent(call_id, name)
+        """Execute a tool with full trace logging. Re-raises on crash.
+
+        Journaling the intent is the caller's job (``_commit_intents``):
+        a parallel batch declares every call in one append before any runs.
+        """
         self.trace.log(
             "tool_call",
             turn=self._turn_count,
@@ -975,20 +985,32 @@ class Agent:
         )
         return result
 
-    async def _commit_intent(self, call_id: str, name: str) -> None:
-        """Journal a tool call before it runs (pi-durable's effect sandwich).
+    async def _commit_intents(self, tool_calls: list[dict[str, Any]]) -> None:
+        """Journal tool calls before they run (pi-durable's effect sandwich).
 
         On resume, a dangling call with a committed intent may have
         partially run, one without never started. Best effort: a failed
-        write is reported like a failed checkpoint and the tool still runs.
+        write is reported like a failed checkpoint and the tools still run.
+
+        One append (and one lock acquisition) per batch instead of per
+        call: a ten-call batch used to serialize ten writes before any
+        tool could start.
         """
-        record = tool_intent_record(
-            call_id, name, self.registry.replay_policy(name)
-        )
+        records = [
+            tool_intent_record(
+                tc["id"],
+                tc["function"]["name"],
+                self.registry.replay_policy(tc["function"]["name"]),
+            )
+            for tc in tool_calls
+            if tc.get("id")
+        ]
+        if not records:
+            return
 
         def _sync() -> None:
             with self._session_io_lock:
-                append_session_records(self._session_file, [record])
+                append_session_records(self._session_file, records)
 
         try:
             await asyncio.to_thread(_sync)
@@ -1015,6 +1037,7 @@ class Agent:
             name = tc["function"]["name"]
             arguments = tc["function"]["arguments"]
             yield ToolCallRequest(id=tc["id"], name=name, arguments=arguments)
+            await self._commit_intents([tc])
             result = await self._execute_tool_safe(tc["id"], name, arguments)
             yield ToolResultEvent(
                 id=tc["id"], name=name, result=result, arguments=arguments
@@ -1237,7 +1260,9 @@ class Agent:
 
             async def run_one(tc: dict[str, Any]) -> tuple[dict[str, Any], ToolResult]:
                 result = await self._execute_tool_safe(
-                    tc["id"], tc["function"]["name"], tc["function"]["arguments"]
+                    tc["id"],
+                    tc["function"]["name"],
+                    tc["function"]["arguments"],
                 )
                 return tc, result
 
@@ -1257,6 +1282,9 @@ class Agent:
                         arguments=tc["function"]["arguments"],
                     )
             else:
+                # Declare the whole batch before any call runs: one append,
+                # and every side effect is covered by an intent.
+                await self._commit_intents(tool_calls)
                 futures = [asyncio.ensure_future(run_one(tc)) for tc in tool_calls]
                 for future in asyncio.as_completed(futures):
                     tc, result = await future
@@ -1277,6 +1305,7 @@ class Agent:
                     result = ToolResult(success=False, error=_NOT_EXECUTED_MESSAGE)
                     unexecuted.append(tc["id"])
                 else:
+                    await self._commit_intents([tc])
                     result = await self._execute_tool_safe(
                         tc["id"], tc["function"]["name"], tc["function"]["arguments"]
                     )
@@ -1875,7 +1904,10 @@ class Agent:
                 self._session_saved_count = len(self.messages)
             if self._pending_dequeued:
                 # After the messages: an injected item must never vanish
-                # from the queue before its message is on disk.
+                # from the queue before its message is on disk. The cost is
+                # at-least-once delivery: a crash between the message
+                # append and this record re-queues an already-injected
+                # message on resume (duplicate prompt, never a lost one).
                 append_session_records(
                     self._session_file, [dequeued_record(self._pending_dequeued)]
                 )

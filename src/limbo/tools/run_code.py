@@ -32,6 +32,7 @@ from __future__ import annotations
 import ast
 import asyncio
 import contextlib
+import ctypes
 import io
 import json
 import threading
@@ -67,6 +68,61 @@ class ToolCallError(Exception):
 
 class _ProgramFailed(Exception):
     """Internal: the program raised; its message is the model-facing error."""
+
+
+class _ProgramTimeout(BaseException):
+    """Injected into the program's thread when its wall-clock budget ends.
+
+    A ``BaseException`` so a program's own ``except Exception`` cannot
+    swallow the timeout. Deliberately not an ``Exception``: the program
+    must not be able to keep running.
+    """
+
+
+def _raise_in_thread(thread_ident: int, exc_type: type[BaseException] | None) -> None:
+    """Raise ``exc_type`` inside another thread (CPython, best effort).
+
+    ``asyncio.wait_for`` only cancels coroutines that yield; a CPU-bound
+    program (``while True: pass``) never does. The watchdog thread injects
+    the timeout asynchronously instead. Passing ``None`` clears a pending
+    injection, so a late timer cannot fire into the next task that reuses
+    the worker thread.
+    """
+    ctypes.pythonapi.PyThreadState_SetAsyncExc(
+        ctypes.c_ulong(thread_ident),
+        ctypes.py_object(exc_type) if exc_type is not None else None,
+    )
+
+
+class _Watchdog:
+    """Hard wall-clock bound for one program run (see ``_raise_in_thread``)."""
+
+    def __init__(self, timeout: float) -> None:
+        self._ident = threading.get_ident()
+        # Serializes _fire against cancel: without it the timer thread can
+        # pass its check, lose the CPU, and inject after cancel() returned,
+        # into whatever the worker thread runs next.
+        self._lock = threading.Lock()
+        self._done = False
+        self._timer = threading.Timer(timeout, self._fire)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def _fire(self) -> None:
+        with self._lock:
+            if self._done:
+                return
+            self._done = True
+            _raise_in_thread(self._ident, _ProgramTimeout)
+
+    def cancel(self) -> None:
+        self._timer.cancel()
+        with self._lock:
+            if self._done:
+                # Clear an injection that has not been delivered yet (the
+                # program finished in the same instant the timer fired).
+                _raise_in_thread(self._ident, None)
+            self._done = True
 
 
 def _graft_into_async_def(code: str) -> ast.Module:
@@ -280,6 +336,13 @@ class RunCodeTool(BaseTool):
             return ToolResult(
                 success=False, error="run_code: program interrupted (ESC)"
             )
+        except _ProgramTimeout:
+            # The watchdog fired during asyncio.run teardown (the program
+            # finished in the same instant); still a timeout, not a crash.
+            return ToolResult(
+                success=False,
+                error=f"code run failed (timeout): program exceeded {timeout:g}s",
+            )
         except _ProgramFailed as e:
             return ToolResult(success=False, error=str(e))
         except Exception as e:  # noqa: BLE001 - compile errors etc.
@@ -318,6 +381,7 @@ class RunCodeTool(BaseTool):
         wrapped = _graft_into_async_def(code)
         stdout = io.StringIO()
         stderr = io.StringIO()
+        watchdog = _Watchdog(timeout)
         try:
             with contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(
                 stderr
@@ -327,7 +391,7 @@ class RunCodeTool(BaseTool):
                 return await asyncio.wait_for(coro, timeout=timeout)
         except asyncio.CancelledError:
             raise
-        except asyncio.TimeoutError as e:
+        except (_ProgramTimeout, asyncio.TimeoutError) as e:
             raise _ProgramFailed(
                 f"code run failed (timeout): program exceeded {timeout:g}s"
                 f"{self._captured(stdout, stderr)}"
@@ -339,6 +403,7 @@ class RunCodeTool(BaseTool):
                 f"\nTraceback:\n{traceback.format_exc()}"
             ) from e
         finally:
+            watchdog.cancel()
             out = stdout.getvalue()
             err = stderr.getvalue()
             if out:

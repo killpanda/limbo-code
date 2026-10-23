@@ -54,3 +54,32 @@ async def test_plan_mode_blocks_a_write_call_in_a_turn(tmp_path):
     assert "Plan mode" in (tool_msgs[0].content or "")
 
 
+
+
+@pytest.mark.asyncio
+async def test_plan_mode_blocks_run_code_in_a_turn(tmp_path):
+    """Code Mode's transport runs arbitrary Python: plan mode must refuse it."""
+    agent = _make_agent(
+        tmp_path,
+        [
+            [
+                ToolCallEvent(
+                    id="c1",
+                    name="run_code",
+                    arguments={
+                        "code": "open('x.txt', 'w').write('a')",
+                        "description": "write x",
+                    },
+                ),
+                CompletionMeta(),
+            ],
+            [TextChunk(text="here is the plan"), CompletionMeta()],
+        ],
+    )
+    agent.set_plan_mode(True)
+    await _collect(agent.run("change x"))
+
+    assert not (tmp_path / "x.txt").exists()
+    tool_msgs = [m for m in agent.messages if m.role == "tool"]
+    assert len(tool_msgs) == 1
+    assert "Plan mode" in (tool_msgs[0].content or "")

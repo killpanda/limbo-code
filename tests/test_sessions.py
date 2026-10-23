@@ -129,3 +129,15 @@ def test_load_drops_messages_before_boundary(tmp_path: Path):
 # -- durable-session records (tool_intent / meta_patch) -----------------------
 
 
+
+
+def test_full_rewrite_keeps_the_session_file_private(tmp_path: Path):
+    """A later rewrite must not widen 0600 to the umask default (0644)."""
+    import stat
+
+    path = tmp_path / "s.jsonl"
+    save_session(path, make_meta(), make_messages())
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+    save_session(path, make_meta(title="changed"), make_messages())
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
