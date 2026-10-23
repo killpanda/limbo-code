@@ -938,12 +938,12 @@ class Agent:
         call_id: str,
         name: str,
         arguments: dict[str, Any],
-        *,
-        commit: bool = True,
     ) -> ToolResult:
-        """Execute a tool with full trace logging. Re-raises on crash."""
-        if commit:
-            await self._commit_intent(call_id, name)
+        """Execute a tool with full trace logging. Re-raises on crash.
+
+        Journaling the intent is the caller's job (``_commit_intents``):
+        a parallel batch declares every call in one append before any runs.
+        """
         self.trace.log(
             "tool_call",
             turn=self._turn_count,
@@ -985,12 +985,8 @@ class Agent:
         )
         return result
 
-    async def _commit_intent(self, call_id: str, name: str) -> None:
-        """Journal one tool call before it runs (pi-durable's sandwich)."""
-        await self._commit_intents([{"id": call_id, "function": {"name": name}}])
-
     async def _commit_intents(self, tool_calls: list[dict[str, Any]]) -> None:
-        """Journal a whole batch's intents in one append, before dispatch.
+        """Journal tool calls before they run (pi-durable's effect sandwich).
 
         On resume, a dangling call with a committed intent may have
         partially run, one without never started. Best effort: a failed
@@ -1041,6 +1037,7 @@ class Agent:
             name = tc["function"]["name"]
             arguments = tc["function"]["arguments"]
             yield ToolCallRequest(id=tc["id"], name=name, arguments=arguments)
+            await self._commit_intents([tc])
             result = await self._execute_tool_safe(tc["id"], name, arguments)
             yield ToolResultEvent(
                 id=tc["id"], name=name, result=result, arguments=arguments
@@ -1266,7 +1263,6 @@ class Agent:
                     tc["id"],
                     tc["function"]["name"],
                     tc["function"]["arguments"],
-                    commit=False,
                 )
                 return tc, result
 
@@ -1309,6 +1305,7 @@ class Agent:
                     result = ToolResult(success=False, error=_NOT_EXECUTED_MESSAGE)
                     unexecuted.append(tc["id"])
                 else:
+                    await self._commit_intents([tc])
                     result = await self._execute_tool_safe(
                         tc["id"], tc["function"]["name"], tc["function"]["arguments"]
                     )
@@ -1366,14 +1363,10 @@ class Agent:
         call_id: str,
         name: str,
         arguments: dict[str, Any],
-        *,
-        commit: bool = True,
     ) -> ToolResult:
         """Execute one tool, converting crashes into error results."""
         try:
-            return await self._execute_tool(
-                call_id, name, arguments, commit=commit
-            )
+            return await self._execute_tool(call_id, name, arguments)
         except Exception as e:  # noqa: BLE001
             return ToolResult(success=False, error=f"Tool error: {e}")
 

@@ -99,21 +99,30 @@ class _Watchdog:
 
     def __init__(self, timeout: float) -> None:
         self._ident = threading.get_ident()
-        self._fired = threading.Event()
+        # Serializes _fire against cancel: without it the timer thread can
+        # pass its check, lose the CPU, and inject after cancel() returned,
+        # into whatever the worker thread runs next.
+        self._lock = threading.Lock()
+        self._done = False
         self._timer = threading.Timer(timeout, self._fire)
         self._timer.daemon = True
         self._timer.start()
 
     def _fire(self) -> None:
-        self._fired.set()
-        _raise_in_thread(self._ident, _ProgramTimeout)
+        with self._lock:
+            if self._done:
+                return
+            self._done = True
+            _raise_in_thread(self._ident, _ProgramTimeout)
 
     def cancel(self) -> None:
         self._timer.cancel()
-        if self._fired.is_set():
-            # Clear an injection that has not been delivered yet (the
-            # program finished in the same instant the timer fired).
-            _raise_in_thread(self._ident, None)
+        with self._lock:
+            if self._done:
+                # Clear an injection that has not been delivered yet (the
+                # program finished in the same instant the timer fired).
+                _raise_in_thread(self._ident, None)
+            self._done = True
 
 
 def _graft_into_async_def(code: str) -> ast.Module:

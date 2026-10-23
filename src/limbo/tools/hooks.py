@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import re
 import shlex
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -56,7 +57,7 @@ class ToolHook:
 # Commands plan mode lets bash run: read-only inspection only. Anything
 # else (or any output redirection) is blocked while planning. This is a
 # best-effort guard, not a security boundary: shell verbs are open-ended
-# and flags can hide writes (see _flag_writes_file for the ones we know).
+# and flags can hide writes (see _ARG_CHECKS for the ones we know).
 _READ_ONLY_COMMANDS = frozenset(
     {
         "cat", "head", "tail", "less", "wc", "ls", "tree", "pwd", "file",
@@ -91,10 +92,12 @@ _SEGMENT_SPLIT = re.compile(r"\|\||&&|[|;\n]")
 _QUOTED = re.compile(r"'[^']*'|\"[^\"]*\"")
 _HARMLESS_REDIRECT = re.compile(r"\d?>>?\s*/dev/null|\d?>&\d")
 _WRITE_REDIRECT = re.compile(r"(?<![0-9&])>|[0-9]>(?!&)|&>")
-# Flags that turn an otherwise read-only command into a writer, or into an
-# arbitrary-command runner. Explicit list: the allowlist never claimed to
-# be exhaustive, but these are the common footguns.
-_GIT_WRITE_ARGS = ("--ext-diff", "--textconv", "--open-files-in-pager")
+# Per-command argument checks. A verb on the allowlist can still write
+# (or run arbitrary commands) through a flag; each checker below says
+# whether its command's arguments keep it read-only. Explicit lists: the
+# allowlist never claimed to be exhaustive, but these are the common
+# footguns.
+_GIT_WRITE_ARGS = frozenset({"--ext-diff", "--textconv", "-O"})
 _SED_WRITE_COMMAND = re.compile(
     r"(?:^|[;\n}])\s*(?:[0-9$]+|/[^/]*/)?\s*[wWe](?:\s|$)"
 )
@@ -102,39 +105,73 @@ _SED_WRITE_COMMAND = re.compile(
 _SED_SUBST_WRITE = re.compile(r"(?:^|[;\n}])\s*s(.).*?\1.*?\1[^;}\n]*\bw\b")
 
 
-def _flag_writes_file(head: str, words: list[str]) -> bool:
-    """Whether an allowlisted command carries a flag that writes a file.
+def _git_args_read_only(args: list[str]) -> bool:
+    # Skip global options; -C/-c take a separate value.
+    while args and args[0].startswith("-"):
+        args = args[2:] if args[0] in ("-C", "-c") else args[1:]
+    if not args:
+        return False
+    if any(
+        a in _GIT_WRITE_ARGS
+        or a.startswith("--output")
+        or a.startswith("--open-files-in-pager")
+        for a in args
+    ):
+        return False
+    sub, rest = args[0], args[1:]
+    if sub in _GIT_LIST_ONLY:
+        return not any(
+            not a.startswith("-") or a in _GIT_LIST_WRITE_FLAGS for a in rest
+        )
+    return sub in _READ_ONLY_GIT
 
-    Only the commands where such a flag exists are checked; unknown flags
-    stay allowed (best-effort, see the allowlist comment).
-    """
-    args = words[1:]
-    if head == "sort":
-        # -o/--output writes the sort result; --compress-program runs it.
-        return any(
-            a in ("-o", "--output", "--compress-program")
-            or a.startswith("--output=")
-            or a.startswith("--compress-program=")
-            or (a.startswith("-o") and not a.startswith("--"))
-            for a in args
-        )
-    if head == "date":
-        # -s/--set changes the system clock.
-        return any(a in ("-s", "--set") or a.startswith("--set=") for a in args)
-    if head == "xxd":
-        # -r reverses a hex dump into a file when given an output path.
-        return any(
-            a == "-r" or (a.startswith("-") and not a.startswith("--") and "r" in a[1:])
-            for a in args
-        )
-    if head == "sed":
-        # -i is handled at the call site; a script can also write (w/W)
-        # or execute (e) as a command.
-        return any(
-            _SED_WRITE_COMMAND.search(a) or _SED_SUBST_WRITE.search(a)
-            for a in args
-        )
-    return False
+
+def _find_args_read_only(args: list[str]) -> bool:
+    return not any(a in _FIND_WRITE_ACTIONS for a in args)
+
+
+def _sed_args_read_only(args: list[str]) -> bool:
+    # -i edits in place; a script can also write (w/W) or execute (e).
+    return not any(
+        a.startswith("-i")
+        or _SED_WRITE_COMMAND.search(a)
+        or _SED_SUBST_WRITE.search(a)
+        for a in args
+    )
+
+
+def _sort_args_read_only(args: list[str]) -> bool:
+    # -o/--output writes the sort result; --compress-program runs one.
+    return not any(
+        a in ("--output", "--compress-program")
+        or a.startswith("--output=")
+        or a.startswith("--compress-program=")
+        or (a.startswith("-o") and not a.startswith("--"))
+        for a in args
+    )
+
+
+def _date_args_read_only(args: list[str]) -> bool:
+    # -s/--set changes the system clock.
+    return not any(a in ("-s", "--set") or a.startswith("--set=") for a in args)
+
+
+def _xxd_args_read_only(args: list[str]) -> bool:
+    # -r reverses a hex dump into a file when given an output path.
+    return not any(
+        a.startswith("-") and not a.startswith("--") and "r" in a[1:]
+        for a in args
+    )
+
+
+_ARG_CHECKS: dict[str, Callable[[list[str]], bool]] = {
+    "git": _git_args_read_only,
+    "find": _find_args_read_only,
+    "sed": _sed_args_read_only,
+    "sort": _sort_args_read_only,
+    "date": _date_args_read_only,
+    "xxd": _xxd_args_read_only,
+}
 
 
 def is_read_only_command(command: str) -> bool:
@@ -155,38 +192,10 @@ def is_read_only_command(command: str) -> bool:
             return False
         if not words:
             continue
-        head = words[0]
-        if _flag_writes_file(head, words):
-            return False
-        if head == "git":
-            rest = words[1:]
-            # Skip global options; -C/-c take a separate value.
-            while rest and rest[0].startswith("-"):
-                rest = rest[2:] if rest[0] in ("-C", "-c") else rest[1:]
-            if not rest:
-                return False
-            if any(
-                a.startswith("--output")
-                or a in _GIT_WRITE_ARGS
-                or a.startswith("--open-files-in-pager")
-                or a == "-O"
-                for a in rest
-            ):
-                return False
-            sub, args = rest[0], rest[1:]
-            if sub in _GIT_LIST_ONLY:
-                if any(
-                    not a.startswith("-") or a in _GIT_LIST_WRITE_FLAGS
-                    for a in args
-                ):
-                    return False
-            elif sub not in _READ_ONLY_GIT:
-                return False
-        elif head == "find":
-            if any(w in _FIND_WRITE_ACTIONS for w in words[1:]):
-                return False
-        elif head == "sed":
-            if any(w == "-i" or w.startswith("-i") for w in words[1:]):
+        head, args = words[0], words[1:]
+        check = _ARG_CHECKS.get(head)
+        if check is not None:
+            if not check(args):
                 return False
         elif head not in _READ_ONLY_COMMANDS:
             return False
