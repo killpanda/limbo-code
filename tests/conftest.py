@@ -77,3 +77,9 @@ def isolated_auth_file(tmp_path, monkeypatch):
     import limbo.auth as auth_module
 
     monkeypatch.setattr(auth_module, "DEFAULT_AUTH_PATH", tmp_path / "auth.json")
+
+
+@pytest.fixture(autouse=True)
+def isolated_deepseek_key(monkeypatch):
+    """A developer's $DEEPSEEK_API_KEY must not add web_search to every registry."""
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)

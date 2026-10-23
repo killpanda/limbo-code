@@ -183,6 +183,39 @@ class ToolsConfig(BaseModel):
     parallel: bool = True
 
 
+class WebSearchSettings(BaseModel):
+    """[web_search] section: the ``web_search`` tool (limbo.websearch)."""
+
+    enabled: bool = True
+    # Backend id from limbo.websearch.PROVIDERS (only "deepseek" for now).
+    provider: str = "deepseek"
+    # Key for the search provider. Unset: inherit the matching model
+    # provider's key (DeepSeek: [providers.deepseek] / auth login /
+    # $DEEPSEEK_API_KEY). With no key at all the tool is not offered.
+    api_key: str | None = None
+    # Endpoint override (None = the provider's default).
+    base_url: str | None = None
+    # Results per search when the model does not ask for a count.
+    count: int = 10
+    timeout: float = 30.0
+
+    @field_validator("count")
+    @classmethod
+    def _count_clamped(cls, value: int) -> int:
+        if value < 1:
+            warnings.warn(f"web_search count={value} is invalid; reset to 10.", stacklevel=2)
+            return 10
+        return value
+
+    @field_validator("timeout")
+    @classmethod
+    def _timeout_clamped(cls, value: float) -> float:
+        if value <= 0:
+            warnings.warn(f"web_search timeout={value} is invalid; reset to 30.0.", stacklevel=2)
+            return 30.0
+        return value
+
+
 class CompactionSettings(BaseModel):
     """[compaction] section: auto context-window compaction (LIM-14)."""
 
@@ -270,6 +303,7 @@ class Config(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    web_search: WebSearchSettings = Field(default_factory=WebSearchSettings)
     compaction: CompactionSettings = Field(default_factory=CompactionSettings)
     goal: GoalSettings = Field(default_factory=GoalSettings)
     queue: QueueSettings = Field(default_factory=QueueSettings)

@@ -66,7 +66,10 @@ src/limbo/
 ├── tools/            # base.py (BaseTool + path resolution + truncation), registry.py (dispatch;
 │                     # code_mode flag filters definitions() to [run_code], all_definitions() feeds
 │                     # the SDK), hooks.py (before/after tool hook chain + plan mode), mutation_queue.py (per-file locks), ignore.py (.gitignore),
-│                     # read/bash/edit/write/grep/find/ls/run_code.py (the Code Mode transport)
+│                     # read/bash/edit/write/grep/find/ls/run_code.py (the Code Mode transport),
+│                     # web_search.py (registered only when the search provider has a key)
+├── websearch/        # pluggable web-search backends: base.py (SearchProvider/SearchResult),
+│                     # deepseek.py (+ key inheritance from the deepseek model provider), PROVIDERS
 └── ui/               # app.py + app.tcss (ALL styles here; theme vars only, no bare hex),
                       # theme.py (limbo-dark/-light, RFC LIM-16), commands.py (slash registry
                       # + resolve(): the single builtin-vs-skill collision site), path_input.py
@@ -148,4 +151,5 @@ uv run python -m pytest --snapshot-update  # after intentional visual changes; r
 ## Adding Things
 
 - **Tool**: subclass `BaseTool` in `tools/<name>.py` (`name`/`description`/`parameters` + `run()`; use `resolve_existing()`/`resolve_creatable()`, raise `ToolError`), register in `ToolRegistry.__init__()`, wrap mutations in `mutation_lock_for(path)`, add `tests/tools/test_<name>.py`
+- **Web-search backend**: subclass `SearchProvider` in `websearch/<id>.py` with a `build(config)` factory (None when it has no key), add it to `websearch.PROVIDERS`; users pick it with `[web_search] provider`
 - **Provider/model**: add specs in `llm/catalog.py`; new wire format → implement `LLMClient` + `register_client()` in `llm/factory.py`. User-specific endpoint/key tweaks belong in `[providers.<id>]` config, not the catalog
