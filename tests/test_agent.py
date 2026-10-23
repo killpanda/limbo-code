@@ -226,13 +226,8 @@ async def test_agent_resume_continues_same_file_and_history(workdir):
 @pytest.mark.asyncio
 async def test_agent_resume_reruns_safe_calls_and_flags_unsafe_ones(workdir):
     from limbo.history import NOT_STARTED_CONTENT, PARTIAL_CONTENT
-    from limbo.sessions import (
-        SessionMeta,
-        append_session_records,
-        load_session_full,
-        save_session,
-        tool_intent_record,
-    )
+    from limbo.journal import SessionJournal
+    from limbo.sessions import SessionMeta, load_session_full, save_session
 
     (workdir / "notes.txt").write_text("hello from disk\n")
     session_dir = workdir / "sessions"
@@ -263,10 +258,7 @@ async def test_agent_resume_reruns_safe_calls_and_flags_unsafe_ones(workdir):
         ],
     )
     # The process died after read and bash started, before write did.
-    append_session_records(
-        path,
-        [tool_intent_record("r1", "read", "safe"), tool_intent_record("b1", "bash", "unsafe")],
-    )
+    SessionJournal(path).record_intents([("r1", "read", "safe"), ("b1", "bash", "unsafe")])
 
     agent = Agent(
         config=Config(),
@@ -617,7 +609,7 @@ async def test_two_appended_compactions_then_resume(workdir):
     assert "SECOND SUMMARY" in (resumed.messages[1].content or "")
     assert [m.content for m in resumed.messages[2:]] == expected
     # A clean resume keeps the journal: no rewrite is scheduled.
-    assert resumed._session_full_rewrite_needed is False
+    assert resumed._journal.rewrite_pending is False
 
 
 def _make_agent(workdir, model: str):

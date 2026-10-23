@@ -3,11 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import platform
 import secrets
-import threading
 import time
 import traceback
 import warnings
@@ -30,6 +28,7 @@ from limbo.compaction import (
 from limbo.config import Config
 from limbo.history import ToolHistory
 from limbo.history import recover as recover_history
+from limbo.journal import SessionJournal
 from limbo.llm.catalog import resolve_base_url, resolve_model
 from limbo.llm.client import LLMClient, RequestHook
 from limbo.llm.retry import (
@@ -61,17 +60,9 @@ from limbo.sessions import (
     QueuedMessageRecord,
     SessionMeta,
     UsageEntry,
-    append_session_messages,
-    append_session_records,
-    compaction_record,
-    dequeued_record,
     derive_title,
     load_session_full,
-    meta_patch_record,
-    queued_record,
-    rewrite_meta_line,
     save_session,
-    tool_intent_record,
 )
 from limbo.steer import FOLLOW_UP, STEER, SteerItem, SteerMode, SteerQueue
 from limbo.tools.registry import ToolRegistry
@@ -257,27 +248,6 @@ class Agent:
         self._prompt_estimator = PromptSizeEstimator()
         self._compactions: list[CompactionRecord] = []
         self._previous_summary: str | None = None
-        # Incremental session persistence: how many messages are already on
-        # disk (append-only fast path), and whether the next save must do a
-        # full rewrite instead (history reshaped by compaction, or a resume
-        # whose repair() inserted placeholder tool messages).
-        self._session_saved_count = 0
-        self._session_saved_meta: str | None = None
-        # The title on the file's meta line (listing reads only that line).
-        self._session_saved_title: str | None = None
-        self._session_full_rewrite_needed = False
-        # Compaction records not yet appended (non-destructive compaction:
-        # the record goes into the journal, the summarized messages stay).
-        self._pending_compactions: list[CompactionRecord] = []
-        # Messages summarized away before they reached disk: written ahead
-        # of the compaction record so the journal still holds them.
-        self._pending_summarized: list[Message] = []
-        # Queue items injected or cancelled since the last save; their
-        # "dequeued" record is written after the messages that carry them.
-        self._pending_dequeued: list[str] = []
-        # Serializes session-file writes: checkpoints run in a worker thread
-        # while meta patches (goal changes) are written from the loop.
-        self._session_io_lock = threading.Lock()
         self._checkpoint_failed_this_turn = False
         self._overflow_recovered_this_turn = False
         self._last_run_failed = False
@@ -296,6 +266,7 @@ class Agent:
                 loaded.compactions,
             )
             self._session_file = resume
+            self._journal = SessionJournal(resume)
             recovery = recover_history(
                 history,
                 started=(
@@ -321,20 +292,20 @@ class Agent:
                         for q in loaded.queue
                     ]
                 )
-            self._session_saved_meta = self._meta_snapshot()
-            # From here on every call is journaled, so a later crash can be
-            # recovered precisely even if this session predates intents
-            # (the flag reaches the file as a meta patch on the next save).
-            self._meta.tool_intents = True
-            self._session_saved_count = len(self.messages)
-            self._session_saved_title = self._meta.title
             # Only a repaired history (placeholders inserted) must be
             # rewritten; otherwise the journal stays as it is and the next
             # save appends. The in-memory system message is regenerated and
             # the summary is rebuilt on load, so neither is ever appended.
-            self._session_full_rewrite_needed = len(recovery.messages) != len(
-                history
-            ) - (1 if history and history[0].role == "system" else 0)
+            self._journal.mark_synced(
+                len(self.messages),
+                self._meta,
+                rewrite=len(recovery.messages)
+                != len(history) - (1 if history and history[0].role == "system" else 0),
+            )
+            # From here on every call is journaled, so a later crash can be
+            # recovered precisely even if this session predates intents
+            # (the flag reaches the file as a meta patch on the next save).
+            self._meta.tool_intents = True
             # Restore the presentation mode: recover_history dropped the
             # loaded system message, so rebuild the fresh one in code mode
             # when the session was saved with it on.
@@ -349,6 +320,7 @@ class Agent:
             )
         else:
             self._session_file = self._new_session_file()
+            self._journal = SessionJournal(self._session_file)
             self._meta = SessionMeta(
                 id=self._session_file.stem,
                 workdir=str(workdir.resolve()),
@@ -682,28 +654,23 @@ class Agent:
         call from the UI at any time. Returns the queued item's id (the UI
         binds its queued card to it).
         """
-        with self._session_io_lock:
+        with self._journal.lock:
             item = self._steer_queue.offer(text, attachments, mode)
-            if self._session_file.exists() and not self._session_full_rewrite_needed:
-                try:
-                    append_session_records(
-                        self._session_file, [queued_record(_queue_record(item))]
-                    )
-                except OSError as e:
-                    # The next full rewrite journals the whole queue.
-                    self._session_full_rewrite_needed = True
-                    self.trace.log(
-                        "session_save_error",
-                        turn=self._turn_count,
-                        phase="queue",
-                        error=str(e),
-                    )
-            # Otherwise the first (full) save journals the queue.
+            try:
+                self._journal.queued(_queue_record(item))
+            except OSError as e:
+                # The next full rewrite journals the whole queue.
+                self.trace.log(
+                    "session_save_error",
+                    turn=self._turn_count,
+                    phase="queue",
+                    error=str(e),
+                )
         return item.id
 
     def _dequeue(self, items: list[SteerItem]) -> list[SteerItem]:
         """Note items that left the queue; journaled with the next save."""
-        self._pending_dequeued.extend(item.id for item in items)
+        self._journal.dequeued(item.id for item in items)
         return items
 
     def cancel_steer(self, item_id: str) -> bool:
@@ -713,7 +680,7 @@ class Agent:
         injected — past the boundary it is part of history and cannot be
         retracted) or the id is unknown.
         """
-        with self._session_io_lock:
+        with self._journal.lock:
             item = self._steer_queue.cancel(item_id)
             if item is None:
                 return False
@@ -728,7 +695,7 @@ class Agent:
 
     def cancel_latest_steer(self) -> str | None:
         """Cancel the newest queued steer message (Esc path)."""
-        with self._session_io_lock:
+        with self._journal.lock:
             item = self._steer_queue.cancel_latest()
             if item is None:
                 return None
@@ -746,7 +713,7 @@ class Agent:
         The agent's own drains (loop top, turn end, run head) take steers
         only; follow-ups wait for the pump's end-of-task drain.
         """
-        with self._session_io_lock:
+        with self._journal.lock:
             return self._dequeue(self._steer_queue.drain(modes))
 
     @property
@@ -996,8 +963,8 @@ class Agent:
         call: a ten-call batch used to serialize ten writes before any
         tool could start.
         """
-        records = [
-            tool_intent_record(
+        calls = [
+            (
                 tc["id"],
                 tc["function"]["name"],
                 self.registry.replay_policy(tc["function"]["name"]),
@@ -1005,15 +972,10 @@ class Agent:
             for tc in tool_calls
             if tc.get("id")
         ]
-        if not records:
+        if not calls:
             return
-
-        def _sync() -> None:
-            with self._session_io_lock:
-                append_session_records(self._session_file, records)
-
         try:
-            await asyncio.to_thread(_sync)
+            await asyncio.to_thread(self._journal.record_intents, calls)
         except Exception as e:  # noqa: BLE001
             self._report_save_error("intent", e)
 
@@ -1045,7 +1007,7 @@ class Agent:
             content, attachments = self._gate_tool_attachments(result)
             self._history.record_result(tc["id"], content, attachments)
         # Results replaced messages that may already be on disk.
-        self._session_full_rewrite_needed = True
+        self._journal.invalidate()
 
     async def _conversation_loop(self) -> AsyncIterator[AgentEvent]:
         while self._iteration_count < self.config.llm.max_iterations:
@@ -1755,13 +1717,9 @@ class Agent:
             )
             return
 
-        system_msg = self.messages[0]
-        kept = self.messages[split:]
-        summarized_unsaved = self.messages[self._session_saved_count : split]
-        # Kept messages not yet on disk (e.g. this turn's user input): the
-        # append path must still write them after the compaction.
-        unsaved = min(len(self.messages) - self._session_saved_count, len(kept))
-        self.messages = [system_msg, make_summary_message(summary), *kept]
+        before_messages = self.messages
+        kept = before_messages[split:]
+        self.messages = [before_messages[0], make_summary_message(summary), *kept]
         after = estimate_tokens(self.messages)
         record = CompactionRecord(
             id=secrets.token_hex(8),
@@ -1773,18 +1731,9 @@ class Agent:
             trigger=trigger,
         )
         self._compactions.append(record)
-        if is_summary_message(kept[0]):
-            # The boundary is an earlier summary, which lives only in memory
-            # on the append path: the record could not be resolved on load,
-            # so this one compaction falls back to a full rewrite.
-            self._session_full_rewrite_needed = True
-        else:
-            # Non-destructive compaction (pi-durable): append the record;
-            # the summarized messages stay in the journal and loading picks
-            # the active range from the record's boundary.
-            self._pending_summarized.extend(summarized_unsaved)
-            self._pending_compactions.append(record)
-            self._session_saved_count = len(self.messages) - max(unsaved, 0)
+        # Non-destructive compaction (pi-durable): the journal appends the
+        # record; the summarized messages stay in the file.
+        self._journal.compacted(record, before_messages, split, len(self.messages))
         self._previous_summary = summary.strip()
         # Usage figures predate the rewrite; fall back to full estimation
         # until the next response reports real prompt tokens.
@@ -1836,93 +1785,13 @@ class Agent:
         self._meta.plan_mode = self.plan_mode
         if not self._meta.title:
             self._meta.title = derive_title(self.messages)
-        meta_snapshot = self._meta_snapshot()
-        with self._session_io_lock:
-            self._write_session_locked(meta_snapshot)
-
-    def _meta_snapshot(self) -> str:
-        """The meta content compared against what is on disk.
-
-        updated_at is stamped by save_session (full rewrite) and refreshed
-        in-memory on the append path; it is excluded so the comparison
-        sees real meta content, not the always-moving timestamp.
-        """
-        return json.dumps(
-            self._meta.model_dump(exclude={"path", "updated_at"}),
-            ensure_ascii=False,
-            sort_keys=True,
-        )
-
-    def _write_session_locked(self, meta_snapshot: str) -> None:
-        if self._session_full_rewrite_needed or not self._session_file.exists():
-            save_session(
-                self._session_file,
+        with self._journal.lock:
+            self._journal.checkpoint(
                 self._meta,
                 self.messages,
                 self._compactions,
+                [_queue_record(item) for item in self._steer_queue],
             )
-            self._session_saved_count = len(self.messages)
-            self._session_saved_meta = meta_snapshot
-            self._session_saved_title = self._meta.title
-            self._session_full_rewrite_needed = False
-            self._pending_compactions.clear()
-            self._pending_summarized.clear()
-            # The rewrite dropped the queue journal: re-journal what is
-            # still queued (everything else has left the queue).
-            self._pending_dequeued.clear()
-            queued = [queued_record(_queue_record(i)) for i in self._steer_queue]
-            if queued:
-                try:
-                    append_session_records(self._session_file, queued)
-                except OSError:
-                    # The file holds no queue journal: rebuild it next save.
-                    self._session_full_rewrite_needed = True
-                    raise
-            return
-        try:
-            if self._meta.title != self._session_saved_title:
-                # Listing reads only the meta line: rewrite it in place
-                # (every other record is kept).
-                rewrite_meta_line(self._session_file, self._meta)
-                self._session_saved_title = self._meta.title
-                self._session_saved_meta = meta_snapshot
-            elif meta_snapshot != self._session_saved_meta:
-                append_session_records(
-                    self._session_file, [meta_patch_record(self._meta)]
-                )
-                self._session_saved_meta = meta_snapshot
-            records = [compaction_record(c) for c in self._pending_compactions]
-            new_messages = self.messages[self._session_saved_count :]
-            if self._pending_summarized:
-                append_session_messages(self._session_file, self._pending_summarized)
-                self._pending_summarized.clear()
-            if records:
-                append_session_records(self._session_file, records)
-                self._pending_compactions.clear()
-            if new_messages:
-                append_session_messages(self._session_file, new_messages)
-                self._session_saved_count = len(self.messages)
-            if self._pending_dequeued:
-                # After the messages: an injected item must never vanish
-                # from the queue before its message is on disk. The cost is
-                # at-least-once delivery: a crash between the message
-                # append and this record re-queues an already-injected
-                # message on resume (duplicate prompt, never a lost one).
-                append_session_records(
-                    self._session_file, [dequeued_record(self._pending_dequeued)]
-                )
-                self._pending_dequeued.clear()
-        except OSError:
-            # Partial or failed append: some records may already be on disk,
-            # and re-appending next time would duplicate them. Force a full
-            # rewrite on the next save, which rebuilds the file from memory.
-            self._session_full_rewrite_needed = True
-            raise
-        # Keep the in-memory timestamp fresh even though the meta line
-        # is not rewritten (export headers read it).
-        self._meta.updated_at = datetime.now(timezone.utc).isoformat(
-            timespec="seconds"
-        )
 
     async def _save_session(self) -> None:
         # Trace and session are separate files written independently; the
@@ -1972,18 +1841,9 @@ class Agent:
         full rewrite; loading merges patches over the meta line. Before the
         first save there is no file yet — the first save writes the meta.
         """
-        if not self._session_file.exists():
-            return
         self._meta.code_mode = self.code_mode
         self._meta.plan_mode = self.plan_mode
-        snapshot = self._meta_snapshot()
-        with self._session_io_lock:
-            if snapshot == self._session_saved_meta:
-                return
-            append_session_records(
-                self._session_file, [meta_patch_record(self._meta)]
-            )
-            self._session_saved_meta = snapshot
+        self._journal.patch_meta(self._meta)
 
 
 def _queue_record(item: SteerItem) -> QueuedMessageRecord:

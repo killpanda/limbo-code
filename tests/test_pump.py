@@ -172,9 +172,8 @@ async def test_leftover_steer_outranks_goal_and_yields_steer_events(
 
     # Queue a steer that surfaces as a turn-boundary leftover: patch drain
     # to return it after the first turn.
-    from limbo.steer import SteerItem
-
     from limbo.models import Attachment
+    from limbo.steer import SteerItem
 
     image = Attachment(kind="image", path="/tmp/shot.png", name="shot.png")
     leftover = SteerItem(id="steer123", text="用户插入的消息", attachments=[image])
