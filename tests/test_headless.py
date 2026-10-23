@@ -136,7 +136,7 @@ async def test_single_turn_echoes_streams_and_reports(workdir):
     assert "hello world" in out  # streamed assistant text
     assert "── limbo idle ·" in out  # turn-end marker
     # Lifecycle: session -> idle -> working -> idle, released at the end.
-    assert reporter.states == ["idle", "working", "idle"]
+    assert reporter.states == ["idle", "working", "done"]
     assert reporter.calls[0][0] == "session"
     assert reporter.calls[-1] == ("release",)
 

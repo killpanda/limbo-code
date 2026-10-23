@@ -70,6 +70,9 @@ class HerdrReporter:
         session_path: str | None = None,
     ) -> None:
         """Report lifecycle state (optionally with session identity)."""
+        # Herdr only knows working/idle/blocked: a finished turn is idle.
+        if state in ("done", "error"):
+            state = "idle"
         cmd = [
             self._bin_path,
             "pane",
