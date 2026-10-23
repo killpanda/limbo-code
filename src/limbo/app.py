@@ -29,13 +29,18 @@ def _apply_kitty_keyboard_workaround(config) -> None:
 
     Textual reads TEXTUAL_DISABLE_KITTY_KEY at import time, so this must run
     before the first `textual` import. See KittyKeyboardMode for why typing
-    Chinese inside the herdr multiplexer turns into spaces when the kitty
-    keyboard protocol is enabled.
+    Chinese inside the herdr multiplexer turns into spaces under the full
+    kitty keyboard protocol, and why herdr still needs the disambiguate flag.
     """
-    if config.ui.kitty_keyboard.disable_textual_kitty_key(
-        in_herdr=bool(os.environ.get("HERDR_ENV"))
-    ):
+    mode = config.ui.kitty_keyboard
+    if mode.disable_textual_kitty_key():
         os.environ["TEXTUAL_DISABLE_KITTY_KEY"] = "1"
+    elif mode.disambiguate_only(in_herdr=bool(os.environ.get("HERDR_ENV"))):
+        from limbo.ui.key_fixes import (  # noqa: PLC0415 - imports textual; must follow the env check above
+            request_kitty_disambiguate_only,
+        )
+
+        request_kitty_disambiguate_only()
 
 
 def _first_run_login(spec, config) -> bool:  # noqa: ANN001
