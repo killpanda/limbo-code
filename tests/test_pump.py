@@ -122,6 +122,7 @@ class FakeAgent:
 
     def __init__(self, workdir: Path):
         self.inputs: list[str] = []
+        self.attachments: list[list | None] = []
         self.session_meta = SessionMeta(id="fake")
         self.trace = TraceLogger(workdir / "trace.jsonl")
         self.was_interrupted = False
@@ -134,6 +135,7 @@ class FakeAgent:
 
     async def run(self, user_input, attachments=None):
         self.inputs.append(user_input)
+        self.attachments.append(attachments)
         self.last_run_failed = user_input in self.failing_inputs
         yield TextDelta(text=f"turn:{user_input[:20]}")
 
@@ -170,9 +172,11 @@ async def test_leftover_steer_outranks_goal_and_yields_steer_events(
 
     # Queue a steer that surfaces as a turn-boundary leftover: patch drain
     # to return it after the first turn.
+    from limbo.models import Attachment
     from limbo.steer import SteerItem
 
-    leftover = SteerItem(id="steer123", text="用户插入的消息", attachments=[])
+    image = Attachment(kind="image", path="/tmp/shot.png", name="shot.png")
+    leftover = SteerItem(id="steer123", text="用户插入的消息", attachments=[image])
     original_drain = agent.drain_steer
     drained_once = {"done": False}
 
@@ -205,6 +209,8 @@ async def test_leftover_steer_outranks_goal_and_yields_steer_events(
     assert [e.id for e in steer_events] == ["steer123"]
     # The steered message became the next turn's input, before any verify.
     assert agent.inputs[1] == "用户插入的消息"
+    # Its attachments ride along (the round-boundary drain used to drop them).
+    assert agent.attachments[1] == [image]
 
 
 # -- compact: same single-flight flag -------------------------------------------

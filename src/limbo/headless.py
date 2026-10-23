@@ -16,9 +16,10 @@ control surface:
   frontend reports through the existing integrations layer.
 
 Non-UI layer: this module must never import textual. All orchestration
-(single-flight, steer drain, goal loop) stays in ``TurnPump``/``Agent`` —
-the frontend only translates stdin into pump calls and pump events into
-stdout text.
+(single-flight, steer drain, goal loop) stays in ``TurnPump``/``Agent``,
+and session switching plus the /goal proposal flow in ``Conversation`` —
+the frontend only translates stdin into conversation calls and pump
+events into stdout text.
 """
 
 from __future__ import annotations
@@ -50,19 +51,15 @@ from limbo.agent import (
     UsageUpdate,
 )
 from limbo.config import Config
+from limbo.conversation import Conversation, NoVerifyGate
 from limbo.goal import (
-    STATUS_ACTIVE,
     GoalClear,
     GoalQuery,
     GoalSet,
-    build_initial_prompt,
-    build_proposer_prompt,
     parse_goal_args,
-    parse_verify_proposal,
 )
 from limbo.integrations import create_reporters, install_exit_hooks
-from limbo.integrations.base import AgentState, IntegrationReporter, TurnOutcome
-from limbo.llm.client import LLMClient
+from limbo.integrations.base import IntegrationReporter
 from limbo.llm.factory import create_llm_client
 from limbo.model_switch import (
     prepare_model_switch,
@@ -116,6 +113,7 @@ class _TurnDone:
     """Internal queue event: the turn/compact worker task finished."""
 
     error: BaseException | None = None
+    task: asyncio.Task[None] | None = None
 
 
 # -- submission parsing (plain text vs /commands) ------------------------------
@@ -502,7 +500,7 @@ def _indent(text: str, prefix: str = "  ") -> str:
 
 
 class HeadlessFrontend:
-    """Drives one session's TurnPump from a stream of InputEvents.
+    """Drives one ``Conversation`` from a stream of InputEvents.
 
     Everything is serialized through one asyncio queue: the stdin reader
     (or a test's async iterator) feeds ``Submit``/``Interrupt``/``Eof``,
@@ -513,52 +511,44 @@ class HeadlessFrontend:
     def __init__(
         self,
         *,
-        config: Config,
-        agent: Agent,
-        pump: TurnPump,
-        llm_client: LLMClient,
+        conversation: Conversation,
         reporters: IntegrationReporter,
         out: Callable[[str], None],
-        # (client, resume path or None) -> Agent
-        agent_factory: Callable[[LLMClient, Path | None], Agent],
-        pump_factory: Callable[[Agent], TurnPump],
         echo_input: bool = False,
         max_tool_lines: int = 60,
         json_mode: bool = False,
     ) -> None:
-        self._config = config
+        self._conv = conversation
+        self._config = conversation.config
         # --json: every output line is one JSON object (events + info).
         self._json = json_mode
-        self._agent = agent
-        self._pump = pump
-        self._llm_client = llm_client
         self._reporters = reporters
         self._out = out
-        self._agent_factory = agent_factory
-        self._pump_factory = pump_factory
         self._echo_input = echo_input
         self._max_tool_lines = max_tool_lines
 
         self._queue: asyncio.Queue[InputEvent | _TurnDone] = asyncio.Queue()
         self._turn_task: asyncio.Task[None] | None = None
-        # Goal proposal state: _proposal_pending = a proposer round is in
-        # flight or just ended (parse its output); _awaiting_verify = the
-        # proposals are on screen and the next submission is the answer.
-        self._proposal_pending = False
-        self._awaiting_verify = False
-        self._pending_proposals: list[str] = []
         self._eof = False
         self._quit = False
         # Restored from the session's usage ledger on resume.
-        self._last_tokens = agent.session_total_tokens
-        self._tracing_viewer = TracingViewerCommand(lambda: self._agent)
+        self._last_tokens = conversation.agent.session_total_tokens
+        self._tracing_viewer = TracingViewerCommand(lambda: self._conv.agent)
+
+    @property
+    def _agent(self) -> Agent:
+        return self._conv.agent
+
+    @property
+    def _pump(self) -> TurnPump:
+        return self._conv.pump
 
     # -- main loop ------------------------------------------------------------
 
     async def run(self, inputs: AsyncIterator[InputEvent]) -> int:
         forwarder = asyncio.create_task(self._forward(inputs))
-        self._report_session()
-        self._report("idle")
+        self._conv.report_session()
+        self._conv.report_idle()
         if self._json:
             self._emit(
                 {
@@ -592,7 +582,7 @@ class HeadlessFrontend:
                 self._turn_task.cancel()
             self._reporters.release()
             self._tracing_viewer.close()
-            self._agent.close()
+            self._conv.close()
         return 0
 
     async def _forward(self, inputs: AsyncIterator[InputEvent]) -> None:
@@ -607,12 +597,15 @@ class HeadlessFrontend:
     async def _on_submit(self, text: str) -> None:
         if self._echo_input:
             self._line(f"❯ {text}")
-        if self._awaiting_verify:
+        if self._conv.awaiting_verify:
             self._answer_verify(text)
             return
         command = parse_submission(text)
-        busy = self._turn_task is not None
-        if busy:
+        # The pump's own flag (not "a worker task exists"): it is released
+        # in the same await-free section as the pump's last drain, so a
+        # submission in the teardown window starts a turn instead of being
+        # steered into a queue nobody drains any more.
+        if self._conv.busy:
             # Same discipline as the TUI (RFC LIM-20): plain text steers,
             # history-shaping commands are refused while a turn owns the
             # agent; /help stays available.
@@ -677,13 +670,12 @@ class HeadlessFrontend:
             self._line(f"计划模式已是{'开启' if enabled else '关闭'}状态")
 
     def _on_interrupt(self, event: Interrupt) -> None:
-        if self._awaiting_verify:
+        if self._conv.awaiting_verify:
             # Esc/Ctrl+C on the proposal prompt = decline (picker cancel).
-            self._awaiting_verify = False
+            self._conv.skip_verify()
             self._line("已跳过自动验收（单轮模式）；/goal clear 可退出 goal")
-            self._report("idle")
             return
-        if self._turn_task is not None:
+        if self._conv.busy:
             self._agent.interrupt()
             self._pump.cancel_verify()
             return
@@ -692,10 +684,8 @@ class HeadlessFrontend:
 
     def _on_eof(self) -> None:
         self._eof = True
-        if self._awaiting_verify:
-            self._awaiting_verify = False
-            self._line("输入已关闭，跳过验收确认（保持单轮模式）")
-            self._report("idle")
+        if self._conv.awaiting_verify:
+            self._skip_verify_on_eof()
             self._quit = True
             return
         if self._turn_task is not None:
@@ -703,45 +693,44 @@ class HeadlessFrontend:
             return
         self._quit = True
 
+    def _skip_verify_on_eof(self) -> None:
+        self._conv.skip_verify()
+        self._line("输入已关闭，跳过验收确认（保持单轮模式）")
+
     # -- turn worker ----------------------------------------------------------
 
     def _start(self, events: AsyncIterator[PumpEvent]) -> None:
         # pump.run()/compact() set the busy flag eagerly at call time, so
         # single-flight holds even before the task first runs.
-        self._turn_task = asyncio.create_task(self._pump_events(events))
-        self._turn_task.add_done_callback(self._turn_finished)
+        task = asyncio.create_task(self._pump_events(events))
+        self._turn_task = task
+        task.add_done_callback(
+            lambda t: self._queue.put_nowait(
+                _TurnDone(None if t.cancelled() else t.exception(), t)
+            )
+        )
 
     async def _pump_events(self, events: AsyncIterator[PumpEvent]) -> None:
-        self._report("working")
-        outcome = TurnOutcome()
         try:
-            async for event in events:
-                outcome.observe(event)
-                self._render(event)
+            await self._conv.drive(events, self._render)
         except Exception as e:  # noqa: BLE001 - mirror the TUI: surface it
-            outcome.fail(f"内部错误：{e}")
             self._line(f"✗ 内部错误：{e}")
         finally:
             if self._json:
                 self._emit({"type": "idle", "total_tokens": self._last_tokens})
             else:
                 self._line(f"── limbo idle · 累计 tokens {self._last_tokens} ──")
-            self._report(outcome.state, message=outcome.message)
-
-    def _turn_finished(self, task: asyncio.Task[None]) -> None:
-        error = None if task.cancelled() else task.exception()
-        self._queue.put_nowait(_TurnDone(error))
 
     def _on_turn_done(self, done: _TurnDone) -> None:
+        if done.task is not self._turn_task:
+            return  # a newer turn started in the teardown window
         self._turn_task = None
         if done.error is not None:
             self._line(f"✗ 内部错误：{done.error}")
         self._maybe_confirm_verify_proposal()
         if self._eof:
-            if self._awaiting_verify:
-                self._awaiting_verify = False
-                self._line("输入已关闭，跳过验收确认（保持单轮模式）")
-                self._report("idle")
+            if self._conv.awaiting_verify:
+                self._skip_verify_on_eof()
             self._quit = True
 
     # -- /goal & the verify-proposal blocked state ----------------------------
@@ -761,80 +750,54 @@ class HeadlessFrontend:
                 )
             return
         if isinstance(command, GoalClear):
-            if self._pump.status() is None:
+            if self._conv.clear_goal():
+                self._line("已退出 goal 模式")
+            else:
                 self._line("当前没有 goal")
-                return
-            self._pump.clear()
-            self._proposal_pending = False
-            self._awaiting_verify = False
-            self._line("已退出 goal 模式")
             return
         # GoalSet: the first round is a proposal round; the confirmation
         # happens when that turn ends (see _maybe_confirm_verify_proposal).
         assert isinstance(command, GoalSet)
-        state = self._pump.set_goal(command.text)
-        self._proposal_pending = True
-        self._start(self._pump.run(build_proposer_prompt(state)))
+        self._start(self._pump.run(self._conv.start_goal(command.text)))
 
     def _maybe_confirm_verify_proposal(self) -> None:
         """After a proposal round, present the model's verify command(s).
 
-        Mirrors the TUI's picker: parse the last assistant message for
-        <verify_proposal> at a quiet turn boundary, then block on the next
-        submission as the answer. ``blocked`` is what
-        ``herdr agent wait --until blocked`` syncs on.
+        The conversation parses the proposal and reports ``blocked``, which
+        is what ``herdr agent wait --until blocked`` syncs on; the next
+        submission is the answer.
         """
-        if not self._proposal_pending:
+        proposal = self._conv.take_verify_proposal()
+        if proposal is None:
             return
-        self._proposal_pending = False
-        state = self._pump.status()
-        if state is None or state.status != STATUS_ACTIVE or state.verify_command:
-            return
-        text = ""
-        for message in reversed(self._agent.messages):
-            if message.role == "assistant" and message.content:
-                text = message.content
-                break
-        parsed = parse_verify_proposal(text)
-        if parsed is not None and len(parsed) == 0:
-            # Explicit <none/>: no objective gate exists for this goal.
+        if isinstance(proposal, NoVerifyGate):
             self._line(
                 "模型认为该目标没有客观可判定的验收方式，保持单轮模式；"
                 "/goal clear 退出"
             )
             return
-        self._pending_proposals = parsed or []
-        if self._pending_proposals:
+        if proposal.commands:
             self._line("模型提议的验收命令：")
-            for index, proposal in enumerate(self._pending_proposals, 1):
-                self._line(f"  {index}. {proposal}")
+            for index, command in enumerate(proposal.commands, 1):
+                self._line(f"  {index}. {command}")
         else:
             self._line("未能解析模型的验收提议。")
         self._line("回复序号采纳；或直接输入一行作为验收命令；/skip 跳过自动验收")
-        self._awaiting_verify = True
-        self._report("blocked", message="等待确认 /goal 验收命令")
 
     def _answer_verify(self, text: str) -> None:
-        answer = parse_verify_answer(text, self._pending_proposals)
+        answer = parse_verify_answer(text, self._conv.proposals)
         if isinstance(answer, InvalidVerifyAnswer):
             self._line(answer.reason)
             return
-        self._awaiting_verify = False
-        self._pending_proposals = []
-        state = self._pump.status()
-        if state is None or state.status != STATUS_ACTIVE:
-            self._report("idle")
-            return
         if isinstance(answer, SkipVerify):
+            self._conv.skip_verify()
             self._line("已跳过自动验收（单轮模式）；/goal clear 可退出 goal")
-            self._report("idle")
             return
-        new_state = self._pump.set_verify(answer.command)
-        if new_state is None:
-            self._report("idle")
+        prompt = self._conv.accept_verify(answer.command)
+        if prompt is None:
             return
         self._line(f"验收方式已确认：{answer.command}")
-        self._start(self._pump.run(build_initial_prompt(new_state)))
+        self._start(self._pump.run(prompt))
 
     # -- other commands -------------------------------------------------------
 
@@ -848,8 +811,8 @@ class HeadlessFrontend:
             self._line(notice)
         if not verdict.switched:
             return
-        self._llm_client, notices = await swap_llm_client(
-            self._config, self._llm_client, self._agent
+        self._conv.llm_client, notices = await swap_llm_client(
+            self._config, self._conv.llm_client, self._agent
         )
         for notice in notices:
             self._line(notice)
@@ -858,39 +821,26 @@ class HeadlessFrontend:
         self._line(await asyncio.to_thread(self._tracing_viewer.run, arg))
 
     def _cmd_new(self) -> None:
-        self._agent.close()  # release the old session's trace file handle
-        self._agent = self._agent_factory(self._llm_client, None)
-        self._pump = self._pump_factory(self._agent)
+        self._conv.new()
         self._last_tokens = 0
-        self._report_session()
         self._line("已开始新会话")
 
     def _cmd_fork(self, arg: str) -> None:
         if arg and not arg.isdigit():
             self._line("用法：/fork [n]（n = 保留前 n 轮对话，省略则全部保留）")
             return
-        parent = self._agent.session_id
-        self._switch_to(self._agent.fork(int(arg) if arg else None))
+        parent = self._conv.fork(int(arg) if arg else None)
+        self._last_tokens = self._agent.session_total_tokens
         self._line(f"已从会话 {parent} 分叉，新会话 {self._agent.session_id}")
 
     def _cmd_handoff(self, note: str) -> None:
         if not note:
             self._line("用法：/handoff <交接说明>")
             return
-        prompt = self._agent.handoff_prompt(note)
-        parent = self._agent.session_id
-        self._switch_to(self._agent.handoff(note))
+        parent, prompt = self._conv.handoff(note)
+        self._last_tokens = self._agent.session_total_tokens
         self._line(f"已交接：新会话 {self._agent.session_id}，关联原会话 {parent}")
         self._start(self._pump.run(prompt))
-
-    def _switch_to(self, path: Path) -> None:
-        # Build the new agent first: if loading fails, the current one stays.
-        agent = self._agent_factory(self._llm_client, path)
-        self._agent.close()
-        self._agent = agent
-        self._pump = self._pump_factory(self._agent)
-        self._last_tokens = self._agent.session_total_tokens
-        self._report_session()
 
     # -- rendering ------------------------------------------------------------
 
@@ -1000,16 +950,6 @@ class HeadlessFrontend:
             else:
                 self._line(f"上一轮出错，{count} 条排队消息保留，下次发送时一起处理")
 
-    # -- integration reporting ------------------------------------------------
-
-    def _report(self, state: AgentState, *, message: str | None = None) -> None:
-        self._reporters.report(state, message=message)
-
-    def _report_session(self) -> None:
-        self._reporters.report_session(
-            self._agent.session_id, str(self._agent.session_path)
-        )
-
 
 # -- --json event stream ------------------------------------------------------------
 
@@ -1070,32 +1010,13 @@ async def _run(
     terminal = out if not json_mode and sys.stdout.isatty() else None
     reporters = create_reporters(terminal=terminal)
     install_exit_hooks(reporters)
-    llm_client = create_llm_client(config)
-
-    def make_agent(client: LLMClient, resume: Path | None = None) -> Agent:
-        return Agent(
-            config=config,
-            llm_client=client,
-            workdir=workdir,
-            session_dir=session_dir,
-            resume=resume,
-        )
-
-    def make_pump(agent: Agent) -> TurnPump:
-        return TurnPump(
-            agent,
-            workdir,
-            max_rounds=config.goal.max_rounds,
-            verify_timeout_ms=config.goal.verify_timeout_ms,
-            after_failed_run=config.queue.after_failed_run,
-        )
-
-    agent = Agent(
+    conversation = Conversation(
         config=config,
-        llm_client=llm_client,
         workdir=workdir,
+        llm_client=create_llm_client(config),
         session_dir=session_dir,
         resume=resume,
+        reporters=reporters,
     )
 
     # --json is for scripts: plain line reads, no raw-mode echo.
@@ -1104,14 +1025,9 @@ async def _run(
         read_tty(sys.stdin.fileno(), out) if use_tty else read_pipe(sys.stdin)
     )
     frontend = HeadlessFrontend(
-        config=config,
-        agent=agent,
-        pump=make_pump(agent),
-        llm_client=llm_client,
+        conversation=conversation,
         reporters=reporters,
         out=out,
-        agent_factory=make_agent,
-        pump_factory=make_pump,
         echo_input=not use_tty and not json_mode,
         json_mode=json_mode,
     )

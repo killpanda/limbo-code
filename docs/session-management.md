@@ -34,7 +34,7 @@ JSONL，首行为 meta，后续为消息行。**向后兼容**：无 meta 行的
 ```
 
 - `id` 即文件名 stem（不含 `.jsonl`），`--resume` 支持 id 前缀匹配
-- 每次保存原子重写全量（沿用原有策略），并刷新 `updated_at`
+- 增量追加：一轮内每个一致性点追加新消息和类型化记录（`meta_patch`、`tool_intent`、`queue`、`compaction`）；只有首次保存、追加失败后或恢复时修复了悬空调用才原子重写全量（写入顺序与回退规则见 `journal.py` 的 `SessionJournal`）
 - `title` 取首条 user 消息（折叠空白、截断 50 字符）
 - `list_sessions` 只读每个文件的首行，O(1)/文件；旧文件回退用 mtime 排序、标题为空
 
