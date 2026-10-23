@@ -1756,6 +1756,12 @@ class Agent:
         # Usage figures predate the rewrite; fall back to full estimation
         # until the next response reports real prompt tokens.
         self._prompt_estimator.reset(len(self.messages))
+        if trigger == "manual":
+            # /compact runs outside a turn, so no later checkpoint would
+            # save it before the user quits: persist the record now.
+            # (Auto and overflow compactions run inside a turn, whose next
+            # checkpoint follows right away.)
+            await self._checkpoint()
         warning = None
         if should_compact(after, self._context_window, cfg):
             # No re-loop: one warning, the turn continues.

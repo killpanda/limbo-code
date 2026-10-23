@@ -590,6 +590,9 @@ async def test_two_appended_compactions_then_resume(workdir):
     await _collect(agent.compact(trigger="manual"))
     await _collect(agent.run("x" * 3000))
     await _collect(agent.compact(trigger="manual"))
+    # A manual /compact is persisted at once (quitting right after it must
+    # not lose the record), as an append.
+    assert agent.session_path.read_text().count('"type": "compaction"') == 2
     await agent._save_session()
     expected = [m.content for m in agent.messages[2:]]
     # Both compactions were appended to the journal, not rewritten into it.
