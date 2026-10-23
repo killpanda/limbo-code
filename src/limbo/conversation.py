@@ -46,6 +46,7 @@ from limbo.goal import (
     parse_verify_proposal,
 )
 from limbo.integrations.base import CompositeReporter, IntegrationReporter, TurnOutcome
+from limbo.learn_trigger import LearnTrigger, user_texts
 from limbo.llm.client import LLMClient
 from limbo.pump import PumpEvent, TurnPump
 from limbo.subagents.events import BackgroundEvent
@@ -102,6 +103,10 @@ class Conversation:
         # out and the next answer decides the gate.
         self._proposal_round = False
         self._proposals: list[str] | None = None
+        self._learn = self._build_learn_trigger()
+        # Frontends turn this off when nobody stays for a background review
+        # (headless after stdin closed).
+        self.auto_learn = True
 
     # -- the live pair --------------------------------------------------------
 
@@ -127,6 +132,10 @@ class Conversation:
             resume=resume,
             meta_fields={"daily_mode": True} if daily and resume is None else None,
         )
+
+    def _build_learn_trigger(self) -> LearnTrigger:
+        daily = self.config.daily
+        return LearnTrigger(daily.learn_after_rounds, daily.learn_cooldown_turns)
 
     def _build_pump(self, agent: Agent) -> TurnPump:
         return TurnPump(
@@ -228,6 +237,7 @@ class Conversation:
         # it would keep pumping the old history.
         self._pump = self._build_pump(agent)
         self._supervisor = self._build_supervisor(agent)
+        self._learn = self._build_learn_trigger()
         self.start_background()
         self._proposal_round = False
         self._proposals = None
@@ -258,9 +268,11 @@ class Conversation:
         """
         self._reporters.report("working")
         outcome = TurnOutcome()
+        seen = len(self._agent.messages)
         try:
             async for event in events:
                 outcome.observe(event)
+                self._learn.observe(event)
                 result = on_event(event)
                 if inspect.isawaitable(result):
                     await result
@@ -269,12 +281,25 @@ class Conversation:
             raise
         finally:
             self._reporters.report(outcome.state, message=outcome.message)
-        every = self.config.daily.learn_after_tool_calls
-        if every > 0 and self._agent.registry.calls_since_skill >= every:
-            self.learn(auto=True)
+        self._maybe_learn(outcome.state, seen)
         return outcome
 
     # -- /learn: background skill review (daily mode) -------------------------
+
+    def _maybe_learn(self, state: str, seen: int) -> None:
+        """After a turn: start an automatic review when the trigger says so."""
+        if not self._agent.daily_mode:
+            return
+        messages = self._agent.messages
+        # Compaction shrinks the history mid-turn: then only the last
+        # message the user wrote is certain to be this turn's.
+        new = messages[seen:] if len(messages) >= seen else messages[-1:]
+        for text in user_texts(new):
+            self._learn.observe_user_text(text)
+        if self._supervisor is not None:
+            self._learn.settle(self._supervisor.board.tasks)
+        if self._learn.end_turn(state) and self.auto_learn:
+            self.learn(auto=True)
 
     def learn(self, *, auto: bool = False) -> str:
         """Start a skill-reviewer subagent over the conversation so far.
@@ -288,7 +313,6 @@ class Conversation:
             return "" if auto else "/learn 需要子代理（[subagents] enabled = true）"
         if any(t.profile == "skill-reviewer" for t in self._supervisor.board.live()):
             return "" if auto else "已有一个复盘在进行中"
-        self._agent.registry.calls_since_skill = 0
         result = self._supervisor.plan(
             [{
                 "title": "复盘：把这次对话的经验写进 skill",
@@ -303,6 +327,7 @@ class Conversation:
         )
         if not result.ids:
             return "" if auto else f"复盘没能开始：{result.message}"
+        self._learn.review_started(result.ids[0])
         return f"已在后台开始复盘（{result.ids[0]}），有改动会告诉你"
 
     # -- /goal: proposal round → confirmation ---------------------------------

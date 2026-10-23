@@ -15,6 +15,7 @@ from pydantic import (
     ValidationError,
     ValidationInfo,
     field_validator,
+    model_validator,
 )
 from toml import TomlDecodeError
 
@@ -241,15 +242,29 @@ class DailySettings(BaseModel):
     # Remind the model to consider memory after this many user turns
     # without a memory write (0 = never).
     memory_nudge_turns: int = 10
-    # Start a background skill review (/learn) after a turn once this many
-    # tool calls ran since the last skill update (0 = only /learn).
-    learn_after_tool_calls: int = 10
+    # Automatic skill review (/learn) after a clean turn once this many tool
+    # rounds ran since the last skill update or review, and the session
+    # showed a signal worth learning from (0 = only /learn). Reviews that
+    # save nothing double it, up to 8×; see limbo/learn_trigger.py.
+    learn_after_rounds: int = 10
+    # At least this many turns between two automatic reviews.
+    learn_cooldown_turns: int = 3
     # web_fetch: characters per page chunk, request timeout.
     fetch_max_chars: int = 20_000
     fetch_timeout: float = 30.0
     # TUI look while daily mode is on: "dawn" = warm variant of the current
     # theme + ☀ badges, "badge" = badges only (colours stay as they are).
     look: str = "dawn"
+
+    @model_validator(mode="before")
+    @classmethod
+    def _renamed_learn_key(cls, data: Any) -> Any:
+        # learn_after_tool_calls (single calls) became learn_after_rounds.
+        if isinstance(data, dict) and "learn_after_tool_calls" in data:
+            data = dict(data)
+            old = data.pop("learn_after_tool_calls")
+            data.setdefault("learn_after_rounds", old)
+        return data
 
     @field_validator("look")
     @classmethod

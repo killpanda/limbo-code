@@ -207,9 +207,7 @@ def test_learn_plans_a_skill_review_in_daily_mode_only(tmp_path):
                         session_dir=tmp_path / "sessions")
     assert "daily" in conv.learn()
     conv.agent.set_daily_mode(True)
-    conv.agent.registry.calls_since_skill = 12
     assert "复盘" in conv.learn()
-    assert conv.agent.registry.calls_since_skill == 0
     assert conv.supervisor is not None
     live = conv.supervisor.board.live()
     assert [t.profile for t in live] == ["skill-reviewer"]

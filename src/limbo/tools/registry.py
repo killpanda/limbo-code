@@ -95,10 +95,8 @@ class ToolRegistry:
         self._tools["run_code"] = run_code
         # Where session_search looks (the agent sets its own session dir).
         self.session_dir = Path.home() / ".limbo" / "sessions"
-        # Daily-mode bookkeeping read by the agent/frontends: tool calls
-        # since the last skill_manage (auto skill review), and whether
-        # memory was written (memory nudge).
-        self.calls_since_skill = 0
+        # Daily-mode bookkeeping read by the agent: whether memory was
+        # written (memory nudge).
         self.memory_written = False
         daily = self.config.daily
         # None when [daily] memory is off: no memory tool, no prompt block.
@@ -189,7 +187,6 @@ class ToolRegistry:
     async def run(self, call: Admitted, call_id: str | None = None) -> ToolResult:
         """Execute an admitted call, then the ``after_tool`` chain."""
         tool = self._tools[call.name]
-        self.calls_since_skill = 0 if call.name == "skill_manage" else self.calls_since_skill + 1
         if call.name == "memory":
             self.memory_written = True
         token = _CURRENT_CALL.set(call_id) if call_id is not None else None
