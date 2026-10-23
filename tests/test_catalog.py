@@ -29,3 +29,8 @@ def test_provider_override_api_key_beats_llm_and_env(monkeypatch):
     assert resolve_api_key(spec, cfg) == "override-key"
 
 
+def test_deepseek_flash_has_1m_context():
+    spec = resolve_model("deepseek-flash")
+    assert spec.provider.id == "deepseek"
+    assert spec.context_window == 1_000_000
+    assert spec.vision

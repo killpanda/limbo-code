@@ -255,6 +255,18 @@ CATALOG: dict[str, ModelSpec] = {
     # 64K default output cap is deliberately conservative — thinking
     # tokens count toward the output limit, so a near-max cap would let a
     # long chain of thought starve the visible answer.
+    # deepseek-flash is the official Flash name (DeepSeek-V4.1-Flash, per
+    # the pricing page 2026-10): 1M context, 384K max output, image input.
+    # deepseek-v4-flash / -vision-exp are legacy aliases served by it.
+    "deepseek-flash": ModelSpec(
+        id="deepseek-flash",
+        provider=DEEPSEEK,
+        context_window=1_000_000,
+        max_tokens=65_536,
+        reasoning=True,
+        vision=True,
+        thinking_format="deepseek",
+    ),
     "deepseek-v4-pro": ModelSpec(
         id="deepseek-v4-pro",
         provider=DEEPSEEK,
