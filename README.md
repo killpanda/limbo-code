@@ -63,6 +63,8 @@ you can branch, hand off, or replay any session.
   responses) behind one catalog, with per-provider overrides for relays,
   renamed key variables, and extra headers.
 
+![The Ctrl+L model picker](docs/assets/limbo-models.png)
+
 ### Fast turns
 
 - Tool calls issued together run concurrently; edits to the same file are
