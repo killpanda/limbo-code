@@ -47,3 +47,60 @@ jobs:
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
+
+  aur:
+    name: Update AUR package (limbo-code)
+    needs: publish
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    env:
+      AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+    steps:
+      - name: Install packaging tools and build deps
+        run: |
+          pacman -Syu --noconfirm --needed git openssh jq \
+            python python-build python-installer python-hatchling python-hatch-vcs python-wheel \
+            python-textual python-rich python-openai python-httpx python-pydantic \
+            python-toml python-tomlkit python-pygments
+
+      - uses: actions/checkout@v4
+
+      - name: Bump PKGBUILD to the released sdist
+        working-directory: packaging/aur/limbo-code
+        run: |
+          ver="${GITHUB_REF_NAME#v}"
+          # PyPI's JSON API can lag the upload by a little; retry briefly.
+          for i in 1 2 3 4 5 6; do
+            sha=$(curl -fsSL "https://pypi.org/pypi/limbo-code/$ver/json" \
+              | jq -r '.urls[] | select(.packagetype=="sdist") | .digests.sha256') && [ -n "$sha" ] && break
+            sleep 20
+          done
+          [ -n "$sha" ] || { echo "sdist for $ver not found on PyPI"; exit 1; }
+          sed -i "s/^pkgver=.*/pkgver=$ver/; s/^pkgrel=.*/pkgrel=1/; s/^sha256sums=.*/sha256sums=('$sha')/" PKGBUILD
+
+      - name: Build package and regenerate .SRCINFO
+        working-directory: packaging/aur/limbo-code
+        run: |
+          # makepkg refuses to run as root.
+          useradd -m builder
+          chown -R builder .
+          su builder -c "makepkg -f --noconfirm && makepkg --printsrcinfo > .SRCINFO"
+          cat .SRCINFO
+
+      - name: Push to aur.archlinux.org
+        if: env.AUR_SSH_PRIVATE_KEY != ''
+        working-directory: packaging/aur/limbo-code
+        run: |
+          install -dm700 ~/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur && chmod 600 ~/.ssh/aur
+          ssh-keyscan -t ed25519 aur.archlinux.org >> ~/.ssh/known_hosts
+          export GIT_SSH_COMMAND="ssh -i ~/.ssh/aur -o IdentitiesOnly=yes"
+          git clone ssh://aur@aur.archlinux.org/limbo-code.git /tmp/aur
+          cp PKGBUILD .SRCINFO /tmp/aur/
+          cd /tmp/aur
+          git config user.name "killpanda"
+          git config user.email "217538+killpanda@users.noreply.github.com"
+          git add PKGBUILD .SRCINFO
+          git diff --cached --quiet && { echo "AUR already up to date"; exit 0; }
+          git commit -m "Update to ${GITHUB_REF_NAME#v}"
+          git push origin HEAD:master

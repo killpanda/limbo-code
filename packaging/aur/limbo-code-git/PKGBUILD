@@ -1,0 +1,58 @@
+# Maintainer: killpanda <217538+killpanda at users dot noreply dot github dot com>
+#
+# VCS package: always builds the latest commit on main. Users update it with
+# `yay -Syu --devel`. pkgver is computed by makepkg, so this file rarely needs
+# a new push to the AUR.
+
+pkgname=limbo-code-git
+pkgver=0.2.2.r0.g0000000
+pkgrel=1
+pkgdesc="A minimal terminal AI coding agent (git main)"
+arch=('any')
+url="https://github.com/killpanda/limbo-code"
+# TODO: see limbo-code/PKGBUILD — replace once a LICENSE file exists upstream.
+license=('LicenseRef-unknown')
+depends=(
+  'python>=3.11'
+  'python-textual'
+  'python-rich'
+  'python-openai'
+  'python-httpx'
+  'python-pydantic'
+  'python-toml'
+  'python-tomlkit'
+  'python-pygments'
+)
+makedepends=(
+  'git'
+  'python-build'
+  'python-installer'
+  'python-hatchling'
+  'python-hatch-vcs'
+  'python-wheel'
+)
+optdepends=(
+  'wl-clipboard: clipboard copy/paste on Wayland (Omarchy/Hyprland)'
+  'xclip: clipboard copy/paste on X11'
+)
+provides=('limbo-code' 'limbo')
+conflicts=('limbo-code')
+source=("$pkgname::git+https://github.com/killpanda/limbo-code.git")
+sha256sums=('SKIP')
+
+pkgver() {
+  cd "$pkgname"
+  # v0.2.2-5-gabc1234 -> 0.2.2.r5.gabc1234
+  git describe --long --tags --abbrev=7 | sed 's/^v//;s/\([^-]*-g\)/r\1/;s/-/./g'
+}
+
+build() {
+  cd "$pkgname"
+  python -m build --wheel --no-isolation
+}
+
+package() {
+  cd "$pkgname"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}

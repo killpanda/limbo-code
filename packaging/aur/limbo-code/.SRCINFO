@@ -1,0 +1,29 @@
+pkgbase = limbo-code
+	pkgdesc = A minimal terminal AI coding agent
+	pkgver = 0.2.2
+	pkgrel = 1
+	url = https://github.com/killpanda/limbo-code
+	arch = any
+	license = LicenseRef-unknown
+	makedepends = python-build
+	makedepends = python-installer
+	makedepends = python-hatchling
+	makedepends = python-hatch-vcs
+	makedepends = python-wheel
+	depends = python>=3.11
+	depends = python-textual
+	depends = python-rich
+	depends = python-openai
+	depends = python-httpx
+	depends = python-pydantic
+	depends = python-toml
+	depends = python-tomlkit
+	depends = python-pygments
+	optdepends = wl-clipboard: clipboard copy/paste on Wayland (Omarchy/Hyprland)
+	optdepends = xclip: clipboard copy/paste on X11
+	provides = limbo
+	conflicts = limbo-code-git
+	source = https://files.pythonhosted.org/packages/source/l/limbo_code/limbo_code-0.2.2.tar.gz
+	sha256sums = a690da7ab09ad56cb9a344a56dd4608b99f8a7f925d21d1753ab83245f1c1286
+
+pkgname = limbo-code

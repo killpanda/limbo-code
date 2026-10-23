@@ -1,0 +1,53 @@
+# Maintainer: killpanda <217538+killpanda at users dot noreply dot github dot com>
+#
+# Release package: builds from the PyPI sdist of a tagged release.
+# Kept in sync by .github/workflows/aur.yml on every `v*` tag — edit the
+# template here, not on aur.archlinux.org.
+
+pkgname=limbo-code
+_pyname=limbo_code
+pkgver=0.2.2
+pkgrel=1
+pkgdesc="A minimal terminal AI coding agent"
+arch=('any')
+url="https://github.com/killpanda/limbo-code"
+# TODO: the repository has no LICENSE file yet. Add one upstream and put its
+# SPDX identifier here (e.g. 'MIT'); AUR packages must declare a license.
+license=('LicenseRef-unknown')
+depends=(
+  'python>=3.11'
+  'python-textual'
+  'python-rich'
+  'python-openai'
+  'python-httpx'
+  'python-pydantic'
+  'python-toml'
+  'python-tomlkit'
+  'python-pygments'
+)
+makedepends=(
+  'python-build'
+  'python-installer'
+  'python-hatchling'
+  'python-hatch-vcs'
+  'python-wheel'
+)
+optdepends=(
+  'wl-clipboard: clipboard copy/paste on Wayland (Omarchy/Hyprland)'
+  'xclip: clipboard copy/paste on X11'
+)
+provides=('limbo')
+conflicts=('limbo-code-git')
+source=("https://files.pythonhosted.org/packages/source/${_pyname::1}/${_pyname}/${_pyname}-${pkgver}.tar.gz")
+sha256sums=('a690da7ab09ad56cb9a344a56dd4608b99f8a7f925d21d1753ab83245f1c1286')
+
+build() {
+  cd "${_pyname}-${pkgver}"
+  python -m build --wheel --no-isolation
+}
+
+package() {
+  cd "${_pyname}-${pkgver}"
+  python -m installer --destdir="$pkgdir" dist/*.whl
+  install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+}
