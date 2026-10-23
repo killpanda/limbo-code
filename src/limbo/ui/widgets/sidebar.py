@@ -13,7 +13,9 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
+from rich.cells import cell_len
 from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import VerticalScroll
@@ -28,6 +30,8 @@ SIDEBAR_WIDTH = 36
 INNER_WIDTH = SIDEBAR_WIDTH - 6
 _METER_CELLS = 10
 _MAX_FILES = 8
+_MAX_PAGES = 6
+_MAX_MEMORIES = 4
 
 
 def git_branch(workdir: Path) -> str | None:
@@ -63,6 +67,41 @@ def format_tokens(total: int) -> str:
 
 def _clip(value: str, width: int) -> str:
     return value if len(value) <= width else "…" + value[-(width - 1):]
+
+
+def _clip_end(value: str, width: int) -> str:
+    """Keep the start (memory entries read left to right); counts cells."""
+    if cell_len(value) <= width:
+        return value
+    out = ""
+    for ch in value:
+        if cell_len(out + ch) > width - 1:
+            break
+        out += ch
+    return out + "…"
+
+
+def page_label(url: str) -> tuple[str, str] | None:
+    """``https://www.a.com/help/returns?x`` → (``a.com``, ``/help/returns``)."""
+    parts = urlsplit(url.strip())
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return None
+    return parts.hostname.removeprefix("www."), parts.path.rstrip("/")
+
+
+def memory_writes(arguments: dict[str, Any]) -> list[str]:
+    """Entries a successful memory call added or rewrote (removals skipped)."""
+    ops = arguments.get("operations")
+    if not isinstance(ops, list):
+        return []
+    return [
+        op["content"].strip()
+        for op in ops
+        if isinstance(op, dict)
+        and op.get("action") in ("add", "patch")
+        and isinstance(op.get("content"), str)
+        and op["content"].strip()
+    ]
 
 
 @dataclass
@@ -112,12 +151,18 @@ class Sidebar(VerticalScroll):
         self._plan_mode = False
         self._daily_mode = False
         self._skills: list[str] = []
+        # Daily mode groups: pages web_fetch read, memory written this session.
+        self._pages: dict[str, tuple[str, str]] = {}
+        self._memories: list[str] = []
+        self._memory_count: int | None = None
 
     def compose(self) -> ComposeResult:
         yield Static(id="sb-logo", markup=False)
         yield Static(id="sb-session", classes="sb-group", markup=False)
         yield Static(id="sb-model", classes="sb-group", markup=False)
         yield Static(id="sb-files", classes="sb-group", markup=False)
+        yield Static(id="sb-pages", classes="sb-group", markup=False)
+        yield Static(id="sb-memory", classes="sb-group", markup=False)
         yield Static(id="sb-goal", classes="sb-group", markup=False)
         yield Static(id="sb-extra", classes="sb-group", markup=False)
 
@@ -149,6 +194,21 @@ class Sidebar(VerticalScroll):
         return min(100, round(100 * self._context_tokens / self._context_window))
 
     def record_tool_result(self, tool: str, arguments: dict[str, Any]) -> None:
+        if tool == "web_fetch":
+            url = arguments.get("url")
+            label = page_label(url) if isinstance(url, str) else None
+            if label is not None:
+                key = "".join(label)
+                self._pages.pop(key, None)
+                self._pages[key] = label  # most recent last
+                self._render_pages()
+            return
+        if tool == "memory":
+            written = memory_writes(arguments)
+            if written:
+                self._memories.extend(written)
+                self._render_memory()
+            return
         delta = count_changes(tool, arguments)
         if delta is None:
             return
@@ -183,7 +243,12 @@ class Sidebar(VerticalScroll):
 
     def set_daily_mode(self, enabled: bool) -> None:
         self._daily_mode = enabled
-        self._render_extra()
+        self.refresh_all()
+
+    def set_memory_count(self, count: int | None) -> None:
+        if count != self._memory_count:
+            self._memory_count = count
+            self._render_memory()
 
     def set_skills(self, names: list[str]) -> None:
         self._skills = names
@@ -194,6 +259,8 @@ class Sidebar(VerticalScroll):
         self._title = ""
         self._tokens = self._context_tokens = 0
         self._files.clear()
+        self._pages.clear()
+        self._memories.clear()
         self.refresh_all()
 
     # -- rendering -------------------------------------------------------------
@@ -224,6 +291,8 @@ class Sidebar(VerticalScroll):
         self._render_session()
         self._render_model()
         self._render_files()
+        self._render_pages()
+        self._render_memory()
         self._render_goal()
         self._render_extra()
 
@@ -235,6 +304,8 @@ class Sidebar(VerticalScroll):
         stops = theme_gradient(self.app.current_theme)
         text = Text("Limbo™ ", style=c["dim"])
         text.append_text(gradient_text("LIMBO", stops, True))
+        if self._daily_mode:
+            text.append(" ☀", style=f"bold {c['primary']}")
         text.append(" " + "╱" * (INNER_WIDTH - text.cell_len - 1), style=c["diag"])
         self._update("sb-logo", text)
 
@@ -288,6 +359,12 @@ class Sidebar(VerticalScroll):
         return stops
 
     def _render_files(self) -> None:
+        try:
+            widget = self.query_one("#sb-files", Static)
+        except Exception:  # noqa: BLE001 - not composed yet
+            return
+        # Daily sessions rarely edit files: the group only shows once they do.
+        widget.display = not self._daily_mode or bool(self._files)
         c = self._colors()
         text = self._heading("修改的文件")
         if not self._files:
@@ -311,6 +388,53 @@ class Sidebar(VerticalScroll):
         text.rstrip()
         self._update("sb-files", text)
 
+    def _render_pages(self) -> None:
+        try:
+            widget = self.query_one("#sb-pages", Static)
+        except Exception:  # noqa: BLE001 - not composed yet
+            return
+        widget.display = self._daily_mode
+        if not self._daily_mode:
+            return
+        c = self._colors()
+        text = self._heading("读过的网页")
+        if not self._pages:
+            text.append("  还没有读网页", style=c["dim"])
+        pages = list(self._pages.values())[::-1]
+        for host, path in pages[:_MAX_PAGES]:
+            host = _clip(host, INNER_WIDTH - 2)
+            text.append("◦ ", style=c["primary"])
+            text.append(host, style=c["fg"])
+            room = INNER_WIDTH - 2 - len(host) - 2
+            if path and room > 4:
+                shown = path if len(path) <= room else "…" + path[-(room - 1):]
+                text.append("  " + shown, style=c["dim"])
+            text.append("\n")
+        if len(pages) > _MAX_PAGES:
+            text.append(f"  另有 {len(pages) - _MAX_PAGES} 个网页", style=c["dim"])
+        text.rstrip()
+        widget.update(text)
+
+    def _render_memory(self) -> None:
+        try:
+            widget = self.query_one("#sb-memory", Static)
+        except Exception:  # noqa: BLE001 - not composed yet
+            return
+        widget.display = self._daily_mode and (
+            self._memory_count is not None or bool(self._memories)
+        )
+        if not widget.display:
+            return
+        c = self._colors()
+        text = self._heading("记忆")
+        for entry in self._memories[-_MAX_MEMORIES:]:
+            text.append("+ ", style=c["success"])
+            text.append(_clip_end(entry.splitlines()[0], INNER_WIDTH - 2) + "\n", style=c["fg"])
+        if self._memory_count is not None:
+            text.append(f"  共 {self._memory_count} 条 · /memory", style=c["dim"])
+        text.rstrip()
+        widget.update(text)
+
     def _render_goal(self) -> None:
         widget_id = "sb-goal"
         try:
@@ -332,6 +456,9 @@ class Sidebar(VerticalScroll):
     def _render_extra(self) -> None:
         c = self._colors()
         text = self._heading("模式 · 技能")
+        if self._daily_mode:
+            text.append("☀ Daily", style=f"bold {c['primary']}")
+            text.append(" · ", style=c["dim"])
         text.append("Code Mode ", style=c["mid"])
         if self._code_mode:
             text.append("on", style=c["accent"])
@@ -339,9 +466,6 @@ class Sidebar(VerticalScroll):
             text.append("off", style=c["dim"])
         if self._plan_mode:
             text.append(" · 计划模式 ", style=c["mid"])
-            text.append("on", style=c["accent"])
-        if self._daily_mode:
-            text.append(" · Daily ", style=c["mid"])
             text.append("on", style=c["accent"])
         if self._skills:
             shown = ", ".join(self._skills[:4])

@@ -79,7 +79,8 @@ src/limbo/
 ├── websearch/        # pluggable web-search backends: base.py (SearchProvider/SearchResult),
 │                     # deepseek.py (+ key inheritance from the deepseek model provider), PROVIDERS
 └── ui/               # app.py + app.tcss (ALL styles here; theme vars only, no bare hex),
-                      # theme.py (limbo-dark/-light, RFC LIM-16), commands.py (slash registry
+                      # theme.py (limbo-dark/-light, RFC LIM-16), daily_look.py (daily mode
+                      # "Limbo Dawn": <theme>+daily warm variant, app.set_daily_look), commands.py (slash registry
                       # + resolve(): the single builtin-vs-skill collision site), path_input.py
                       # ('/'-path fallback), paste_store.py (pure paste/attachment marker
                       # state machine; the input widget is its adapter),

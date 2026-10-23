@@ -187,8 +187,13 @@ def sweep_lines(
     *,
     total: int = 24,
     mode: str = FULL,
+    reverse: bool = False,
 ) -> Text:
-    """Wordmark lit by a band of light moving left to right (Dusk Sweep)."""
+    """Wordmark lit by a band of light moving left to right (Dusk Sweep).
+
+    ``reverse`` sweeps right to left (the daily mode divider on the way
+    back to coding); colours stay anchored left to right either way.
+    """
     width = max((len(line) for line in lines), default=1)
     span = max(1, width - 1)
     front = (min(frame, total) / total) * (width + 12) - 6 if mode == FULL else width + 12
@@ -201,10 +206,11 @@ def sweep_lines(
                 text.append(ch)
                 continue
             base = ramp(stops, col / span)
-            if col > front + 3:
+            pos = width - 1 - col if reverse else col
+            if pos > front + 3:
                 color = mix(dim, base, 0.15)
-            elif col > front - 3:
-                color = mix(base, "#FFFFFF", 0.45 * (1 - abs(col - front) / 3))
+            elif pos > front - 3:
+                color = mix(base, "#FFFFFF", 0.45 * (1 - abs(pos - front) / 3))
             else:
                 color = base
             text.append(ch, Style(color=color, bold=True))

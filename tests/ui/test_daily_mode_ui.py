@@ -9,6 +9,7 @@ import pytest
 from limbo.config import Config
 from limbo.ui.app import LimboApp
 from limbo.ui.widgets.chat import ChatWidget
+from limbo.ui.widgets.input import DAILY_BADGE, InputWidget
 from limbo.ui.widgets.status_bar import StatusBar
 
 
@@ -42,7 +43,9 @@ async def test_daily_app_starts_in_daily_mode_and_toggles(tmp_path):
         await pilot.pause()
         screen = pilot.app.screen
         assert screen.agent.daily_mode
-        assert "☀daily" in screen.query_one("#statusbar", StatusBar)._context_text()
+        assert screen.query_one("#statusbar", StatusBar).daily_badge
+        assert str(screen.query_one("#input", InputWidget).border_title) == DAILY_BADGE
+        assert pilot.app.theme == "limbo-dusk+daily"
         names = {c.name for c in screen._commands.candidates(screen._skills())}
         assert {"/memory", "/learn", "/pdf"} <= names
 
@@ -53,7 +56,9 @@ async def test_daily_app_starts_in_daily_mode_and_toggles(tmp_path):
         screen._handle_command("/daily-mode off")
         await pilot.pause()
         assert not screen.agent.daily_mode
-        assert "☀daily" not in screen.query_one("#statusbar", StatusBar)._context_text()
+        assert not screen.query_one("#statusbar", StatusBar).daily_badge
+        assert not screen.query_one("#input", InputWidget).border_title
+        assert pilot.app.theme == "limbo-dusk"
 
         # /memory and /learn are daily-only: hidden and refused in coding sessions.
         names = {c.name for c in screen._commands.candidates(screen._skills())}
