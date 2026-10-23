@@ -814,6 +814,8 @@ class HeadlessFrontend:
 
     def _on_eof(self) -> None:
         self._eof = True
+        # Nobody stays for a background skill review (/learn still works).
+        self._conv.auto_learn = False
         if self._conv.awaiting_verify:
             self._skip_verify_on_eof()
             self._quit = True

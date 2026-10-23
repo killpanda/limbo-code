@@ -54,7 +54,13 @@ coding 会话只看 2，看不到起步包和 daily skill。
   所有写入都落在 `~/.limbo/daily/skills`：改内置或用户 skill 时先把它复制过来再改，原文件不动；改前留 `.bak`。
 - `/learn` 在后台开一个 `skill-reviewer` 子代理（带上当前对话、只能读 skill 和调 `skill_manage`、用 cheap_model），
   把这次对话里的纠正、偏好和新技巧写进 skill，结果作为子代理通知回到对话里。
-- 自动触发：一轮结束时，如果距上次改 skill 已经有 `learn_after_tool_calls`（默认 10）次工具调用，就自动开一次复盘；设 0 关掉。
+- 自动触发（`limbo/learn_trigger.py`）：一轮正常结束（没被中断、没报错）时，同时满足下面几条才自动开一次复盘：
+  - 距上次改 skill 或上次复盘，已经有 `learn_after_rounds`（默认 10）个工具轮次（模型的一次回复算一轮，一批并行调用也只算一轮）；
+  - 距上次复盘至少隔了 `learn_cooldown_turns`（默认 3）轮对话；
+  - 出现了值得学的信号：用户纠正过（“不要…”“太长了”“以后…”等）、工具失败后又成功、或读过某个 SKILL.md。
+    没有信号时，攒到 3 倍门槛也会兜底复盘一次。
+  - 复盘结论是 “Nothing to save” 时门槛翻倍（最多 8 倍），写了 skill 就恢复。
+  `learn_after_rounds = 0` 关掉自动触发；headless 在输入结束后不自动复盘。旧配置 `learn_after_tool_calls` 会按 `learn_after_rounds` 读取。
 - 需要子代理开着（`[subagents] enabled = true`）。
 
 ## 其他工具
@@ -96,7 +102,8 @@ memory = true
 user_chars = 1500
 notes_chars = 2500
 memory_nudge_turns = 10
-learn_after_tool_calls = 10
+learn_after_rounds = 10
+learn_cooldown_turns = 3
 fetch_max_chars = 20000
 fetch_timeout = 30.0
 look = "dawn"                 # "badge"：只显示 ☀ 徽标，不换暖色主题
