@@ -22,8 +22,10 @@ from limbo.tools.hooks import Block, PlanModeHook, Rewrite, ToolHook
 from limbo.tools.ls import LsTool
 from limbo.tools.read import ReadTool
 from limbo.tools.run_code import RunCodeTool
+from limbo.tools.web_search import WebSearchTool
 from limbo.tools.write import WriteTool
 from limbo.trace import utc_now_iso
+from limbo.websearch import build_provider
 
 # The tool call currently executing in this context. asyncio.to_thread and
 # run_code's private event loop both copy the context, so a Code Mode
@@ -64,6 +66,13 @@ class ToolRegistry:
             self.register(tool_class)  # type: ignore[type-abstract]
         if self.config.tools.bash_enabled:
             self._tools["bash"] = BashTool(workdir=workdir)
+        # Offered only when the configured provider has a key: a tool the
+        # model cannot use successfully is noise in every prompt.
+        search = build_provider(self.config)
+        if search is not None:
+            self._tools["web_search"] = WebSearchTool(
+                workdir, search, self.config.web_search.count
+            )
         # The run_code transport is always registered — under code mode it
         # is the ONLY model-facing tool; under native mode it is hidden
         # from definitions() so nothing changes.

@@ -186,6 +186,23 @@ theme = "auto"                      # Omarchy if installed, else limbo-dusk
 motion = "full"                     # full | reduced | off
 ```
 
+### Web search
+
+The `web_search` tool is offered whenever its provider has a key. The only
+provider today is DeepSeek
+([search API](https://api-docs.deepseek.com/guides/search)); without its own
+key it reuses the DeepSeek model key (`[providers.deepseek]`, `limbo auth
+login`, `$DEEPSEEK_API_KEY`, or `[llm] api_key` while a DeepSeek model is
+active).
+
+```toml
+[web_search]
+provider = "deepseek"    # backends live in limbo.websearch.PROVIDERS
+api_key = "sk-..."       # optional: a separate key just for search
+count = 10               # default results per search
+enabled = true
+```
+
 ## Make it yours
 
 - **Project instructions.** Limbo reads `AGENTS.md` from the working directory
