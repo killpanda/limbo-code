@@ -1,12 +1,12 @@
 """Shared contract for terminal multiplexer / agent orchestrator integrations.
 
-Every integration (Herdr, future *mux tools, ...) implements
+Every integration (Herdr, OSC 7501, future *mux tools, ...) implements
 ``IntegrationReporter``: it receives semantic lifecycle state
-(``working``/``idle``/``blocked``) plus session identity, and maps that onto
-whatever the specific tool understands. Call sites (UI, agent loop) only
-ever talk to ``CompositeReporter`` — adding a new integration means writing
-one module here and registering it in ``create_reporters()``, with zero
-changes at call sites.
+(``working``/``idle``/``blocked``/``done``/``error``) plus session
+identity, and maps that onto whatever the specific tool understands.
+Call sites (UI, agent loop) only ever talk to ``CompositeReporter`` —
+adding a new integration means writing one module here and registering it
+in ``create_reporters()``, with zero changes at call sites.
 """
 
 from __future__ import annotations
@@ -14,9 +14,34 @@ from __future__ import annotations
 from collections.abc import Iterable
 from typing import Literal, Protocol
 
+from limbo.agent import ErrorEvent, InterruptEvent
+
 # Semantic lifecycle states every integration must be able to represent.
-# ``blocked`` means the agent is waiting on a user decision.
-AgentState = Literal["working", "idle", "blocked"]
+# ``blocked`` means the agent is waiting on a user decision; ``done`` and
+# ``error`` are how a turn ended (a tool without them maps both to idle).
+AgentState = Literal["working", "idle", "blocked", "done", "error"]
+
+
+class TurnOutcome:
+    """Folds one pump run's events into the state reported when it ends.
+
+    A clean finish is ``done``, an ``ErrorEvent`` (always turn-ending) or a
+    crash is ``error``, and a user interrupt is plain ``idle`` — the user
+    already knows, so there is no unseen result to flag.
+    """
+
+    def __init__(self) -> None:  # noqa: D107
+        self.state: AgentState = "done"
+        self.message: str | None = None
+
+    def observe(self, event: object) -> None:
+        if isinstance(event, InterruptEvent):
+            self.state, self.message = "idle", None
+        elif isinstance(event, ErrorEvent) and self.state != "idle":
+            self.fail(event.message)
+
+    def fail(self, message: str) -> None:
+        self.state, self.message = "error", message
 
 
 class IntegrationReporter(Protocol):

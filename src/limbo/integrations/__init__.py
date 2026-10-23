@@ -20,21 +20,33 @@ from limbo.integrations.base import (
     AgentState,
     CompositeReporter,
     IntegrationReporter,
+    TurnOutcome,
 )
 from limbo.integrations.herdr import HerdrReporter
+from limbo.integrations.osc7501 import OscStatusReporter, TerminalWriter
 
 __all__ = [
     "AgentState",
     "CompositeReporter",
     "HerdrReporter",
     "IntegrationReporter",
+    "OscStatusReporter",
+    "TurnOutcome",
     "create_reporters",
     "install_exit_hooks",
 ]
 
 
-def create_reporters(env: Mapping[str, str] | None = None) -> CompositeReporter:
+def create_reporters(
+    env: Mapping[str, str] | None = None,
+    *,
+    terminal: TerminalWriter | None = None,
+) -> CompositeReporter:
     """Detect active integrations from the environment.
+
+    ``terminal`` writes raw escape sequences to the user's terminal; the
+    frontend passes it only when its output is a real TTY (not ``--json``),
+    and it enables OSC 7501 program-status reports.
 
     Register new integrations here: append ``XReporter.from_env(env)`` when
     it returns a reporter. Order is irrelevant; each reporter is
@@ -44,6 +56,8 @@ def create_reporters(env: Mapping[str, str] | None = None) -> CompositeReporter:
     reporters: list[IntegrationReporter] = []
     if (herdr := HerdrReporter.from_env(env)) is not None:
         reporters.append(herdr)
+    if (osc := OscStatusReporter.from_env(env, terminal)) is not None:
+        reporters.append(osc)
     return CompositeReporter(reporters)
 
 

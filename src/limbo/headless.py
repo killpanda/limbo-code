@@ -61,7 +61,7 @@ from limbo.goal import (
     parse_verify_proposal,
 )
 from limbo.integrations import create_reporters, install_exit_hooks
-from limbo.integrations.base import AgentState, IntegrationReporter
+from limbo.integrations.base import AgentState, IntegrationReporter, TurnOutcome
 from limbo.llm.client import LLMClient
 from limbo.llm.factory import create_llm_client
 from limbo.model_switch import (
@@ -713,17 +713,20 @@ class HeadlessFrontend:
 
     async def _pump_events(self, events: AsyncIterator[PumpEvent]) -> None:
         self._report("working")
+        outcome = TurnOutcome()
         try:
             async for event in events:
+                outcome.observe(event)
                 self._render(event)
         except Exception as e:  # noqa: BLE001 - mirror the TUI: surface it
+            outcome.fail(f"内部错误：{e}")
             self._line(f"✗ 内部错误：{e}")
         finally:
             if self._json:
                 self._emit({"type": "idle", "total_tokens": self._last_tokens})
             else:
                 self._line(f"── limbo idle · 累计 tokens {self._last_tokens} ──")
-            self._report("idle")
+            self._report(outcome.state, message=outcome.message)
 
     def _turn_finished(self, task: asyncio.Task[None]) -> None:
         error = None if task.cancelled() else task.exception()
@@ -1058,7 +1061,14 @@ async def _run(
     json_mode: bool = False,
 ) -> int:
     workdir = workdir.resolve()
-    reporters = create_reporters()
+    def out(text: str) -> None:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+
+    # OSC 7501 program status shares stdout with the transcript, so never
+    # in --json mode (it would corrupt the JSON lines) or into a pipe.
+    terminal = out if not json_mode and sys.stdout.isatty() else None
+    reporters = create_reporters(terminal=terminal)
     install_exit_hooks(reporters)
     llm_client = create_llm_client(config)
 
@@ -1087,10 +1097,6 @@ async def _run(
         session_dir=session_dir,
         resume=resume,
     )
-
-    def out(text: str) -> None:
-        sys.stdout.write(text)
-        sys.stdout.flush()
 
     # --json is for scripts: plain line reads, no raw-mode echo.
     use_tty = not json_mode and os.name != "nt" and sys.stdin.isatty()

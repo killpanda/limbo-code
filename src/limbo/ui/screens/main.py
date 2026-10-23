@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 import secrets
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -39,7 +40,12 @@ from limbo.goal import (
     parse_goal_args,
     parse_verify_proposal,
 )
-from limbo.integrations import AgentState, create_reporters, install_exit_hooks
+from limbo.integrations import (
+    AgentState,
+    TurnOutcome,
+    create_reporters,
+    install_exit_hooks,
+)
 from limbo.llm.catalog import resolve_model, thinking_choices
 from limbo.llm.client import LLMClient
 from limbo.llm.factory import create_llm_client
@@ -152,7 +158,7 @@ class MainScreen(Screen[None]):
         self._bang_tool = BashTool(workdir=self.workdir)
         # External tool integrations (Herdr, ...): an empty composite
         # outside any integrated environment, so all calls are no-ops.
-        self._integrations = create_reporters()
+        self._integrations = create_reporters(terminal=self._write_terminal)
         install_exit_hooks(self._integrations)
 
     @property
@@ -190,6 +196,26 @@ class MainScreen(Screen[None]):
     ) -> None:
         """Report semantic lifecycle state to active integrations."""
         self._integrations.report(state, message=message)
+
+    def _write_terminal(self, data: str) -> None:
+        """Raw escape output for OSC 7501 reports.
+
+        Goes through Textual's driver (like its own OSC 52 copy) so it is
+        ordered with screen frames instead of racing the writer thread;
+        after the app has exited (atexit/signal release) it falls back to
+        the real terminal directly.
+        """
+        try:
+            driver = self.app._driver
+        except Exception:  # noqa: BLE001 - no active app any more
+            driver = None
+        if driver is not None:
+            driver.write(data)
+            return
+        stream = sys.__stderr__
+        if stream is not None and stream.isatty():
+            stream.write(data)
+            stream.flush()
 
     def _set_hint(self, hints: tuple[tuple[str, str], ...]) -> None:
         self.query_one("#hint", KeyHints).set_hints(hints)
@@ -691,8 +717,10 @@ class MainScreen(Screen[None]):
         input_widget.disabled = True
         statusbar.set_state("compacting…", "thinking")
         self._report_state("working")
+        outcome = TurnOutcome()
         try:
             async for event in self.pump.compact():
+                outcome.observe(event)
                 await self._process_agent_event(event)
         finally:
             input_widget.disabled = False
@@ -702,7 +730,7 @@ class MainScreen(Screen[None]):
                 self.agent.session_meta.title or ""
             )
             self._sync_usage()
-            self._report_state("idle")
+            self._report_state(outcome.state, message=outcome.message)
 
     def _show_help(self) -> None:
         self.query_one("#chat", ChatWidget).add_info(self._commands.help_text())
@@ -1322,13 +1350,16 @@ class MainScreen(Screen[None]):
         # refresh below already sees the loop as executing (rainbow on).
         events = self.pump.run(user_input, attachments)
         self._refresh_goal_indicator()
+        outcome = TurnOutcome()
         try:
             async for event in events:
+                outcome.observe(event)
                 await self._process_agent_event(event)
         except Exception as e:  # noqa: BLE001
             # A pump crash is a bug (the agent loop converts LLM/tool
             # failures into error events). Surface it instead of silently
             # swallowing it the way the old finally-drain did.
+            outcome.fail(f"内部错误：{e}")
             self.query_one("#chat", ChatWidget).add_error(f"内部错误：{e}")
         finally:
             # Flush any buffered streamed text (assistant/thinking) so the
@@ -1345,7 +1376,7 @@ class MainScreen(Screen[None]):
                 self.agent.session_meta.title or ""
             )
             self._sync_usage()
-            self._report_state("idle")
+            self._report_state(outcome.state, message=outcome.message)
             self._set_hint(_HINT_IDLE)
             self._refresh_goal_indicator()
             # M2: a proposal round that ends without leftover steers pops

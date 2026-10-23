@@ -42,7 +42,9 @@ src/limbo/
 ├── tracing/          # /tracing-viewer: loopback web viewer over trace files (stdlib
 │                     # http.server; index.py offsets, model.py tree, static/index.html)
 ├── integrations/     # External mux/orchestrator lifecycle reporters: base.py (protocol
-│                     # + CompositeReporter + AgentState), herdr.py; create_reporters() fans out
+│                     # + CompositeReporter + AgentState + TurnOutcome), herdr.py,
+│                     # osc7501.py (terminal program status; TTY only, LIMBO_PROGRAM_STATUS=0
+│                     # opts out, tmux passthrough); create_reporters() fans out
 ├── skills.py         # SKILL.md discovery (user + project dirs)
 ├── llm/              # catalog.py (provider/model specs), factory.py (dialect→client),
 │                     # openai_client.py, anthropic_client.py, responses_client.py, retry.py, sse.py,
