@@ -6,6 +6,7 @@ import asyncio
 import re
 import secrets
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -31,18 +32,15 @@ from limbo.agent import (
 )
 from limbo.compaction import is_summary_message
 from limbo.config import Config, save_thinking_to_config
+from limbo.conversation import Conversation, NoVerifyGate
 from limbo.goal import (
     STATUS_ACTIVE,
     GoalClear,
     GoalQuery,
-    build_initial_prompt,
-    build_proposer_prompt,
     parse_goal_args,
-    parse_verify_proposal,
 )
 from limbo.integrations import (
     AgentState,
-    TurnOutcome,
     create_reporters,
     install_exit_hooks,
 )
@@ -136,18 +134,25 @@ class MainScreen(Screen[None]):
         super().__init__(*args, **kwargs)
         self.workdir = workdir
         self.config = config or Config()
-        self.llm_client = llm_client or create_llm_client(self.config)
         self.session_dir = session_dir or Path.home() / ".limbo" / "sessions"
-        self.agent = self._new_agent(resume=resume)
-        self.pump = self._new_pump(self.agent)
+        # External tool integrations (Herdr, ...): an empty composite
+        # outside any integrated environment, so all calls are no-ops.
+        self._integrations = create_reporters(terminal=self._write_terminal)
+        install_exit_hooks(self._integrations)
+        # The live session (agent + pump pair, switching, /goal proposal
+        # flow) — shared with the headless frontend; this screen adapts it.
+        self.conversation = Conversation(
+            config=self.config,
+            workdir=self.workdir,
+            llm_client=llm_client or create_llm_client(self.config),
+            session_dir=self.session_dir,
+            resume=resume,
+            reporters=self._integrations,
+        )
         self._slash_menu_open = False
-        # M2: proposal-round bookkeeping. _awaiting_verify_proposal is set
-        # when /goal starts a proposal round; the confirmation picker pops
-        # at the next quiet turn boundary. _editing_verify marks that the
-        # next submission is a verify command being edited (not a message).
-        self._awaiting_verify_proposal = False
+        # M2: the next submission is a verify command being edited (not a
+        # message) after the picker's "edit" choice.
         self._editing_verify = False
-        self._pending_proposals: list[str] = []
         self._tracing_viewer = TracingViewerCommand(lambda: self.agent)
         self._commands = SlashCommandRegistry()
         self._register_builtin_commands()
@@ -156,10 +161,6 @@ class MainScreen(Screen[None]):
         # instance: a turn's ESC interrupt calls registry.cancel_active(),
         # which must never kill a command the user launched by hand.
         self._bang_tool = BashTool(workdir=self.workdir)
-        # External tool integrations (Herdr, ...): an empty composite
-        # outside any integrated environment, so all calls are no-ops.
-        self._integrations = create_reporters(terminal=self._write_terminal)
-        install_exit_hooks(self._integrations)
 
     @property
     def _agent_busy(self) -> bool:
@@ -169,25 +170,23 @@ class MainScreen(Screen[None]):
         /compact mini-turns): ``TurnPump.running``, set eagerly when
         ``pump.run()``/``pump.compact()`` is called.
         """
-        return self.pump.running
+        return self.conversation.busy
 
-    def _new_pump(self, agent: Agent) -> TurnPump:
-        return TurnPump(
-            agent,
-            self.workdir,
-            max_rounds=self.config.goal.max_rounds,
-            verify_timeout_ms=self.config.goal.verify_timeout_ms,
-            after_failed_run=self.config.queue.after_failed_run,
-        )
+    @property
+    def agent(self) -> Agent:
+        return self.conversation.agent
 
-    def _new_agent(self, resume: Path | None = None) -> Agent:
-        return Agent(
-            config=self.config,
-            llm_client=self.llm_client,
-            workdir=self.workdir,
-            session_dir=self.session_dir,
-            resume=resume,
-        )
+    @property
+    def pump(self) -> TurnPump:
+        return self.conversation.pump
+
+    @property
+    def llm_client(self) -> LLMClient:
+        return self.conversation.llm_client
+
+    @llm_client.setter
+    def llm_client(self, client: LLMClient) -> None:
+        self.conversation.llm_client = client
 
     # -- External tool integrations (no-op outside integrated environments) --
 
@@ -219,12 +218,6 @@ class MainScreen(Screen[None]):
 
     def _set_hint(self, hints: tuple[tuple[str, str], ...]) -> None:
         self.query_one("#hint", KeyHints).set_hints(hints)
-
-    def _report_session(self) -> None:
-        """Report the current session identity (startup, /new, /sessions)."""
-        self._integrations.report_session(
-            self.agent.session_id, str(self.agent.session_path)
-        )
 
     def compose(self) -> ComposeResult:
         yield StatusBar(
@@ -269,7 +262,7 @@ class MainScreen(Screen[None]):
         self._apply_layout(self.size.width)
         self._sync_sidebar()
         self.query_one("#input", InputWidget).focus()
-        self._report_session()
+        self.conversation.report_session()
         self._report_state("idle")
 
     def _landing(self) -> Landing:
@@ -435,11 +428,9 @@ class MainScreen(Screen[None]):
                 )
             return
         if isinstance(command, GoalClear):
-            if self.pump.status() is None:
+            if not self.conversation.clear_goal():
                 chat.add_info("当前没有 goal")
                 return
-            self.pump.clear()
-            self._awaiting_verify_proposal = False
             self._editing_verify = False
             suffix = "（当前轮跑完后停止续轮）" if self.pump.running else ""
             chat.add_info(f"已退出 goal 模式{suffix}")
@@ -450,14 +441,13 @@ class MainScreen(Screen[None]):
         if self._agent_busy:
             chat.add_info("当前任务进行中，请等待完成后再设定 /goal")
             return
-        state = self.pump.set_goal(command.text)
-        chat.add_user_message(f"/goal {command.text}")
-        self._refresh_goal_indicator()
         # M2: the first round is a proposal round — the model explores the
         # repo and proposes the acceptance command(s); the confirmation
         # picker pops when the turn ends (see _maybe_confirm_verify_proposal).
-        self._awaiting_verify_proposal = True
-        self.run_worker(self._handle_turn(build_proposer_prompt(state)))
+        prompt = self.conversation.start_goal(command.text)
+        chat.add_user_message(f"/goal {command.text}")
+        self._refresh_goal_indicator()
+        self.run_worker(self._handle_turn(prompt))
 
     def _refresh_goal_indicator(self) -> None:
         """Sync the status-bar badge with pump state (rainbow = running)."""
@@ -484,71 +474,53 @@ class MainScreen(Screen[None]):
         """After a proposal round, confirm the model's verify command.
 
         Only fires at a quiet turn boundary (the finally-chain handles
-        leftover steers first, per LIM-20): parse the last assistant
-        message for <verify_proposal> and pop the picker.
+        leftover steers first, per LIM-20); the conversation parses the
+        proposal and reports ``blocked``, this pops the picker.
         """
-        if not self._awaiting_verify_proposal:
+        proposal = self.conversation.take_verify_proposal()
+        if proposal is None:
             return
-        state = self.pump.status()
-        if state is None or state.status != STATUS_ACTIVE or state.verify_command:
-            self._awaiting_verify_proposal = False
-            return
-        text = ""
-        for msg in reversed(self.agent.messages):
-            if msg.role == "assistant" and msg.content:
-                text = msg.content
-                break
-        parsed = parse_verify_proposal(text)
         chat = self.query_one("#chat", ChatWidget)
-        if parsed is not None and len(parsed) == 0:
-            # Explicit <none/>: no objective gate exists for this goal.
-            self._awaiting_verify_proposal = False
+        if isinstance(proposal, NoVerifyGate):
             chat.add_info(
                 "模型认为该目标没有客观可判定的验收方式，保持单轮模式；"
                 "/goal clear 退出"
             )
             return
-        self._pending_proposals = parsed or []
-        if not self._pending_proposals:
+        if not proposal.commands:
             chat.add_info("未能解析模型的验收提议，请手动输入或跳过")
-        self._report_state("blocked", message="等待确认 /goal 验收命令")
         self.app.push_screen(
-            VerifyPicker(self._pending_proposals), self._on_verify_picked
+            VerifyPicker(proposal.commands), self._on_verify_picked
         )
 
     def _on_verify_picked(self, choice: str | None) -> None:
         chat = self.query_one("#chat", ChatWidget)
-        self._awaiting_verify_proposal = False
-        state = self.pump.status()
-        if state is None or state.status != STATUS_ACTIVE:
-            return
         if choice is None:
+            self.conversation.skip_verify()
             chat.add_info("已跳过自动验收（单轮模式）；/goal clear 可退出 goal")
             self._refresh_goal_indicator()
-            self._report_state("idle")
             return
         if choice == VERIFY_EDIT:
             # Prefill the best proposal for editing; the next submission is
             # treated as the verify command (see on_user_submitted).
             input_widget = self.query_one("#input", InputWidget)
-            prefill = self._pending_proposals[0] if self._pending_proposals else ""
-            input_widget.text = prefill
+            proposals = self.conversation.proposals
+            input_widget.text = proposals[0] if proposals else ""
             input_widget.move_cursor(input_widget.document.end)
             input_widget.focus()
             self._editing_verify = True
             chat.add_info("编辑验收命令后回车确认（清空回车则跳过）")
-            self._report_state("blocked", message="等待编辑 /goal 验收命令")
+            self.conversation.report_blocked("等待编辑 /goal 验收命令")
             return
         self._accept_verify(choice)
 
     def _accept_verify(self, command: str) -> None:
-        chat = self.query_one("#chat", ChatWidget)
-        state = self.pump.set_verify(command)
-        if state is None:
+        prompt = self.conversation.accept_verify(command)
+        if prompt is None:
             return
-        chat.add_info(f"验收方式已确认：{command}")
+        self.query_one("#chat", ChatWidget).add_info(f"验收方式已确认：{command}")
         self._refresh_goal_indicator()
-        self.run_worker(self._handle_turn(build_initial_prompt(state)))
+        self.run_worker(self._handle_turn(prompt))
 
     def _register_builtin_commands(self) -> None:
         self._commands.register(
@@ -716,12 +688,12 @@ class MainScreen(Screen[None]):
         # here is pure UI: disable input, label the status bar.
         input_widget.disabled = True
         statusbar.set_state("compacting…", "thinking")
-        self._report_state("working")
-        outcome = TurnOutcome()
         try:
-            async for event in self.pump.compact():
-                outcome.observe(event)
-                await self._process_agent_event(event)
+            await self.conversation.drive(
+                self.pump.compact(), self._process_agent_event
+            )
+        except Exception as e:  # noqa: BLE001 - surface it like a turn crash
+            self.query_one("#chat", ChatWidget).add_error(f"内部错误：{e}")
         finally:
             input_widget.disabled = False
             input_widget.focus()
@@ -730,7 +702,6 @@ class MainScreen(Screen[None]):
                 self.agent.session_meta.title or ""
             )
             self._sync_usage()
-            self._report_state(outcome.state, message=outcome.message)
 
     def _show_help(self) -> None:
         self.query_one("#chat", ChatWidget).add_info(self._commands.help_text())
@@ -852,18 +823,13 @@ class MainScreen(Screen[None]):
 
     def _start_new_session(self) -> None:
         chat = self.query_one("#chat", ChatWidget)
-        self.agent.close()  # release the old session's trace file handle
-        self.agent = self._new_agent()
-        # The pump wraps the agent: replacing the agent without rebuilding
-        # the pump would keep pumping the OLD agent's history (pre-existing
-        # /new bug — the resume path below always did both).
-        self.pump = self._new_pump(self.agent)
+        self.conversation.new()
+        self._editing_verify = False
         chat.clear()
         chat.add_info(f"已开始新会话 {self.agent.session_id}")
         self._sync_mode_badges()
         self.query_one("#sidebar", Sidebar).reset_session()
         self._sync_sidebar()
-        self._report_session()
 
     def _invoke_skill(self, skill: Skill, arg: str) -> None:
         """Invoke a skill: its body becomes the turn's instruction.
@@ -941,8 +907,12 @@ class MainScreen(Screen[None]):
                 chat.add_info("用法：/fork [n]（n = 保留前 n 轮对话，省略则全部保留）")
                 return
             keep = int(arg)
-        parent = self.agent.session_id
-        self._on_session_picked(self.agent.fork(keep))
+        parents: list[str] = []
+        if not self._switch_session(
+            lambda: parents.append(self.conversation.fork(keep))
+        ):
+            return
+        parent = parents[0]
         kept = "全部对话" if keep is None else f"前 {keep} 轮对话"
         chat.add_info(f"已从会话 {parent} 分叉（保留{kept}），原会话不变")
 
@@ -951,9 +921,12 @@ class MainScreen(Screen[None]):
         if not note.strip():
             chat.add_info("用法：/handoff <交接说明>（新会话从这段说明开始）")
             return
-        prompt = self.agent.handoff_prompt(note)
-        parent = self.agent.session_id
-        self._on_session_picked(self.agent.handoff(note))
+        handed: list[str] = []
+        if not self._switch_session(
+            lambda: handed.extend(self.conversation.handoff(note))
+        ):
+            return
+        parent, prompt = handed
         chat.add_info(f"已交接：新会话关联原会话 {parent}")
         chat.add_user_message(note)
         self.run_worker(self._handle_turn(prompt))
@@ -961,13 +934,21 @@ class MainScreen(Screen[None]):
     def _on_session_picked(self, path: Path | None) -> None:
         if path is None:
             return
+        self._switch_session(lambda: self.conversation.switch(path))
+
+    def _switch_session(self, switch: Callable[[], object]) -> bool:
+        """Run a conversation switch and re-render; False if it failed.
+
+        The conversation loads the target before closing the current
+        session, so on failure the screen keeps showing a live session.
+        """
         chat = self.query_one("#chat", ChatWidget)
-        self.agent.close()  # release the old session's trace file handle
-        self.agent = self._new_agent(resume=path)
-        self.pump = self._new_pump(self.agent)
-        self._awaiting_verify_proposal = False
+        try:
+            switch()
+        except Exception as e:  # noqa: BLE001 - unreadable/corrupt session
+            chat.add_error(f"无法打开会话：{e}")
+            return False
         self._editing_verify = False
-        self._pending_proposals = []
         chat.clear()
         self._render_history()
         meta = self.agent.session_meta
@@ -976,7 +957,7 @@ class MainScreen(Screen[None]):
         self._sync_mode_badges()
         self.query_one("#sidebar", Sidebar).reset_session()
         self._sync_sidebar()
-        self._report_session()
+        return True
 
     def _sync_mode_badges(self) -> None:
         status = self.query_one("#statusbar", StatusBar)
@@ -1107,7 +1088,7 @@ class MainScreen(Screen[None]):
         self._integrations.release()
         self._bang_tool.cancel()
         self._tracing_viewer.close()
-        self.agent.close()
+        self.conversation.close()
         close = getattr(self.llm_client, "close", None)
         if close is not None:
             await close()
@@ -1130,7 +1111,7 @@ class MainScreen(Screen[None]):
             self._editing_verify = False
             chat = self.query_one("#chat", ChatWidget)
             if text.startswith("/") and not event.force_text:
-                self._report_state("idle")
+                self.conversation.skip_verify()
                 self._handle_command(text)
                 return
             command = text.strip()
@@ -1138,8 +1119,8 @@ class MainScreen(Screen[None]):
                 chat.add_user_message(f"验收命令：{command}")
                 self._accept_verify(command)
             else:
+                self.conversation.skip_verify()
                 chat.add_info("已跳过自动验收（单轮模式）；/goal clear 可退出 goal")
-                self._report_state("idle")
             return
         attachments = event.attachments
         if text.startswith("!") and not event.force_text:
@@ -1344,22 +1325,17 @@ class MainScreen(Screen[None]):
         # go to the steer queue instead of being blocked. Single-flight is
         # owned by the pump (``running`` is set eagerly on call).
         statusbar.set_state("thinking…", "thinking")
-        self._report_state("working")
         self._set_hint(_HINT_BUSY)
         # pump.run() sets ``running`` eagerly at call time, so the badge
         # refresh below already sees the loop as executing (rainbow on).
         events = self.pump.run(user_input, attachments)
         self._refresh_goal_indicator()
-        outcome = TurnOutcome()
         try:
-            async for event in events:
-                outcome.observe(event)
-                await self._process_agent_event(event)
+            await self.conversation.drive(events, self._process_agent_event)
         except Exception as e:  # noqa: BLE001
             # A pump crash is a bug (the agent loop converts LLM/tool
             # failures into error events). Surface it instead of silently
             # swallowing it the way the old finally-drain did.
-            outcome.fail(f"内部错误：{e}")
             self.query_one("#chat", ChatWidget).add_error(f"内部错误：{e}")
         finally:
             # Flush any buffered streamed text (assistant/thinking) so the
@@ -1376,7 +1352,6 @@ class MainScreen(Screen[None]):
                 self.agent.session_meta.title or ""
             )
             self._sync_usage()
-            self._report_state(outcome.state, message=outcome.message)
             self._set_hint(_HINT_IDLE)
             self._refresh_goal_indicator()
             # M2: a proposal round that ends without leftover steers pops

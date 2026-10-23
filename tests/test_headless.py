@@ -14,8 +14,8 @@ from pathlib import Path
 import pytest
 
 import limbo.pump as pump_module
-from limbo.agent import Agent
 from limbo.config import Config
+from limbo.conversation import Conversation
 from limbo.headless import (
     Eof,
     HeadlessFrontend,
@@ -23,7 +23,6 @@ from limbo.headless import (
     Submit,
 )
 from limbo.models import TextChunk
-from limbo.pump import TurnPump
 
 
 @pytest.fixture
@@ -67,35 +66,19 @@ class RecordingReporter:
 
 def make_frontend(workdir: Path, responses, reporter=None, json_mode=False):
     """Build a frontend wired to a real Agent + scripted LLM."""
-    config = Config()
-    agent = Agent(
-        config=config,
-        llm_client=FakeLLMClient(responses),
-        workdir=workdir,
-        session_dir=workdir / "sessions",
-    )
-    pump = TurnPump(agent, workdir)
     reporter = reporter or RecordingReporter()
+    conversation = Conversation(
+        config=Config(),
+        workdir=workdir,
+        llm_client=FakeLLMClient(responses),
+        session_dir=workdir / "sessions",
+        reporters=reporter,
+    )
     chunks: list[str] = []
-
-    def make_agent(client, resume=None):
-        return Agent(
-            config=config,
-            llm_client=client,
-            workdir=workdir,
-            session_dir=workdir / "sessions",
-            resume=resume,
-        )
-
     frontend = HeadlessFrontend(
-        config=config,
-        agent=agent,
-        pump=pump,
-        llm_client=agent.llm_client,
+        conversation=conversation,
         reporters=reporter,
         out=chunks.append,
-        agent_factory=make_agent,
-        pump_factory=lambda a: TurnPump(a, workdir),
         echo_input=not json_mode,
         json_mode=json_mode,
     )
