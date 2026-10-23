@@ -190,6 +190,11 @@ class SlashDaily:
 
 
 @dataclass(frozen=True)
+class SlashLearn:
+    """``/learn``: review the conversation into daily skills."""
+
+
+@dataclass(frozen=True)
 class SlashMemory:
     """``/memory [edit user|notes]``: the persistent memory files."""
 
@@ -249,6 +254,7 @@ Submission = (
     | SlashPlan
     | SlashDaily
     | SlashMemory
+    | SlashLearn
     | SlashHelp
     | SlashQuit
     | SlashTracingViewer
@@ -290,6 +296,8 @@ def parse_submission(text: str) -> Submission:
         return SlashDaily(arg)
     if name == "memory":
         return SlashMemory(arg)
+    if name == "learn":
+        return SlashLearn()
     if name == "help":
         return SlashHelp()
     if name in ("quit", "exit"):
@@ -543,6 +551,7 @@ HELP_TEXT = """可用命令：
   /handoff <说明> 带交接说明开新会话（干净上下文，关联原会话）
   /plan [on|off] 计划模式：只读探索并给出方案，写类工具被拦下
   /daily-mode [on|off]  Daily mode：日常非 coding 工作（读网页、长期记忆）
+  /learn         复盘这次对话，把经验写进 daily skill（后台子代理）
   /memory        查看长期记忆（/memory edit [user|notes] 显示文件路径）
   /tracing-viewer [id|off]  在浏览器查看 trace（打印本地链接）
   /agents [scan|init]  子代理任务板 · 项目画像 · 生成项目角色
@@ -733,6 +742,8 @@ class HeadlessFrontend:
             self._cmd_daily(command.arg)
         elif isinstance(command, SlashMemory):
             self._cmd_memory(command.arg)
+        elif isinstance(command, SlashLearn):
+            self._line(self._conv.learn())
         elif isinstance(command, SlashHelp):
             self._line(HELP_TEXT)
         elif isinstance(command, SlashQuit):

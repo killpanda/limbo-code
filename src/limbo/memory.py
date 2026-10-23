@@ -34,6 +34,14 @@ TARGETS: dict[str, str] = {"user": "USER.md", "notes": "NOTES.md"}
 ACTIONS = ("add", "patch", "remove")
 
 
+# Appended to a daily-mode user message after N turns without a memory write.
+MEMORY_NUDGE = (
+    "\n\n<system-reminder>If this conversation revealed durable facts about "
+    "the user or how they like things done, save them with the memory tool "
+    "(skip it if nothing qualifies). Do not mention this reminder.</system-reminder>"
+)
+
+
 class MemoryStoreError(Exception):
     """A memory operation that cannot be applied (nothing was written)."""
 

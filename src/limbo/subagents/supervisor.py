@@ -114,6 +114,8 @@ ordering with depends_on. When the user asks to pause, resume, cancel, retry,
 reprioritize or redirect a subagent, use task_control / task_send. Answer
 subagent questions with answer; ask the user when the decision is theirs."""
 
+MAIN_ONLY_TOOLS = ("memory", "ask_user", "skill_manage", "session_search")
+
 CHILD_PROMPT = """<subagent_role>
 You are the subagent "{agent}" of limbo, working on task {id}: {title}.
 The main agent coordinates the work; you cannot see its conversation and the
@@ -536,6 +538,8 @@ class Supervisor:
                     "task_id": task.id,
                     "parent_session": self.main.session_id,
                     "title": f"{task.id} · {task.title}",
+                    # Daily children get web_fetch and the daily skills too.
+                    "daily_mode": self.main.daily_mode,
                 },
             )
         self._configure(agent, task, profile, workdir)
@@ -549,7 +553,9 @@ class Supervisor:
         messages = list(self.main.messages)
         turns = [i for i, m in enumerate(messages) if i > 0 and m.role == "user"]
         cut = turns[-1] + 1 if turns else 1
-        kept = messages[:cut]
+        # An idle main agent's history is complete (a skill review needs the
+        # final answer too); mid-turn, stop before the half-finished turn.
+        kept = messages if not self.is_main_busy() else messages[:cut]
         meta = SessionMeta(
             id=path.stem,
             workdir=str(self.workdir.resolve()),
@@ -560,6 +566,7 @@ class Supervisor:
             parent_session=self.main.session_id,
             fork_at=kept[-1].id if len(kept) > 1 else None,
             tool_intents=True,
+            daily_mode=self.main.daily_mode,
         )
         save_session(path, meta, kept)
 
@@ -569,6 +576,10 @@ class Supervisor:
         names = profile.tool_names
         if names is not None:
             remove = [n for n in agent.registry.names() if n not in names]
+        else:
+            # Talking to the user and curating memory/skills stay with the
+            # main agent unless a profile lists them explicitly.
+            remove = [n for n in MAIN_ONLY_TOOLS if agent.registry.get(n) is not None]
         if profile.tools == READ_ONLY:
             registry = agent.registry
             hooks.append(ReadOnlyHook(lambda n: registry.replay_policy(n) == "safe"))
