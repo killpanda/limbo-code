@@ -39,7 +39,8 @@ src/limbo/
 │                     # same TurnPump seam as the TUI, no textual import
 ├── conversation.py   # Conversation: the live agent+pump pair both frontends drive —
 │                     # new/switch/fork/handoff (load before close), lifecycle reporting
-│                     # (drive), /goal verify-proposal flow
+│                     # (drive), /goal verify-proposal flow, the subagent supervisor
+│                     # (subscribe/start_background/take_wake_input)
 ├── sessions.py       # Session JSONL file format: records, save/load/list/export
 ├── journal.py        # SessionJournal: when/in what order records reach the file
 │                     # (watermark, rewrite fallback, queue re-journal, meta patches)
@@ -51,6 +52,13 @@ src/limbo/
 │                     # osc7501.py (terminal program status; TTY only, LIMBO_PROGRAM_STATUS=0
 │                     # opts out, tmux passthrough); create_reporters() fans out
 ├── skills.py         # SKILL.md discovery (user + project dirs)
+├── subagents/        # Background subagents (docs/subagents.md): board.py (event-sourced
+│                     # task board + pure reconcile()), supervisor.py (scheduler, runners,
+│                     # notice delivery, user/main verbs), tools.py (main: plan_tasks/
+│                     # task_status/task_send/answer/task_control; child: checkpoint/need/
+│                     # ask_main/finish/propose_task), profiles.py (agent profiles),
+│                     # project_scan.py (<project_facts>), hooks.py (read-only/no-edit/path
+│                     # claims), worktree.py, commands.py (/task /agents @name), events.py
 ├── llm/              # catalog.py (provider/model specs), factory.py (dialect→client),
 │                     # openai_client.py, anthropic_client.py, responses_client.py, retry.py, sse.py,
 │                     # usage.py (token accounting: usage normalization + prompt-size estimation),
@@ -91,6 +99,8 @@ Providers/models live in `llm/catalog.py`; unknown models get generic OpenAI-com
 [goal]       # max_rounds = 10, verify_timeout_ms = 600000
 [queue]      # after_failed_run = "continue" | "keep" | "withdraw" (queued
              # messages after an LLM-error turn; keep/withdraw end the task)
+[subagents]  # enabled, auto = "off"|"suggest"|"on", max_parallel = 3, max_tasks = 12,
+             # task_token_budget, cheap_model, wake_main_on, on_dep_fail, on_resume
 [ui]         # theme, show_banner
 [providers.<id>]  # base_url / api_key / api_key_env / headers
 ```
@@ -101,9 +111,11 @@ Skills: `~/.limbo/skills/<name>/SKILL.md` (user) and `<workdir>/.agents/skills/<
 
 ## UI
 
-Single column: status bar (state/elapsed/tokens/model/workdir/queued + rainbow 🎯GOAL badge while a goal loop runs + ⌨code badge while Code Mode is on) → scrolling chat flow (user `❯`, streaming Markdown, tool cards, errors) → input box (Enter submits, Shift+Enter newline, Alt+Enter queues a follow-up while busy (`ui/key_fixes.py` maps its modifyOtherKeys/kitty/ESC forms), paste markers, `ctrl+v` image attach) → hint line. Slash commands: `/sessions /new /fork /handoff /export /tracing-viewer /compact /model /code-mode /plan /help /2048 /goal` + skill commands. '/'-leading input that matches no command but looks like a path is sent as a normal message with existing files auto-attached (`ui/path_input.py`); a leading space forces plain text. After palette changes run `python scripts/check_contrast.py` (≥ 4.5:1).
+Single column: status bar (state/elapsed/tokens/model/workdir/queued + rainbow 🎯GOAL badge while a goal loop runs + ⌨code badge while Code Mode is on) → scrolling chat flow (user `❯`, streaming Markdown, tool cards, errors) → input box (Enter submits, Shift+Enter newline, Alt+Enter queues a follow-up while busy (`ui/key_fixes.py` maps its modifyOtherKeys/kitty/ESC forms), paste markers, `ctrl+v` image attach) → hint line. Slash commands: `/sessions /new /fork /handoff /export /tracing-viewer /compact /model /code-mode /plan /help /2048 /goal /agents /task` + skill commands; `@<agent> text` messages a subagent. '/'-leading input that matches no command but looks like a path is sent as a normal message with existing files auto-attached (`ui/path_input.py`); a leading space forces plain text. After palette changes run `python scripts/check_contrast.py` (≥ 4.5:1).
 
 `/goal <text>` starts closed-loop mode (LIM-40): the first round is a proposal round — the model explores the repo and proposes acceptance command(s) in a `<verify_proposal>` block; the user confirms in a picker (accept / edit / skip), then the goal branch of the `TurnPump` (non-UI, shared by any frontend) runs each round as a complete `Agent.run()` turn and executes the verify command; exit 0 ends the loop, otherwise the failure output is fed back verbatim into the next round until `max_rounds`, when a no-tool wrap-up turn summarizes and any user message resumes with a fresh budget. Goal state persists on `SessionMeta.goal`. Esc during verify cancels the subprocess.
+
+Subagents (`subagents/`, docs/subagents.md): the main agent's `plan_tasks` creates tasks on the board (suggest mode: `PlanPicker` asks the user first); the `Supervisor` runs each as a child `Agent` with its own session file, gated by profile hooks. Child tools that end the turn (`need`, `ask_main`, `finish`) return `ToolResult(end_turn=True)`. Notices reach the main agent as one `source="subagent"` steer item; an idle main agent is woken through `MainWake` → `Conversation.take_wake_input()`. Board records live in the main session file (`type: "task"`), so the board survives restarts; tasks running at exit come back paused (`on_resume`).
 
 ## Key Decisions
 

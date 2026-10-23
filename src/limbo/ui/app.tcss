@@ -408,6 +408,24 @@ AuthDialog .auth-status {
     height: auto;
 }
 
+/* ---- /agents 子代理面板 ---- */
+AgentsPanel .dialog {
+    max-width: 120;
+    height: 80%;
+}
+AgentsPanel #agents-list {
+    height: auto;
+    max-height: 12;
+}
+AgentsPanel #agents-detail {
+    height: 1fr;
+    margin-top: 1;
+    border-top: solid $panel;
+}
+AgentsPanel #agents-detail-text {
+    color: $text-secondary;
+}
+
 /* ---- /goal 验收命令确认弹窗 (LIM-40) ---- */
 VerifyPicker #verify-picker {
     width: 80%;

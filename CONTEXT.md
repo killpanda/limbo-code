@@ -60,6 +60,26 @@ proposals should name modules with these terms.
   (converging on the latest config model), persist to config.toml. The UI
   screen is an adapter translating verdicts into chat messages.
 
+## Subagents
+
+- **Task board** — the delegated work of one main session
+  (`subagents/board.py`): tasks with status, `depends_on` (dependency
+  edges: a failure notifies by default), `owner` (ownership edges: a
+  failure cascades), waits, checkpoints, questions and outcomes.
+  Event-sourced into the main session file; `reconcile()` is the pure
+  scheduling rule.
+- **Subagent** — a child Agent working on one task with its own context and
+  session file. It reports through checkpoint / need / ask_main / finish
+  and never plans tasks itself (depth 1).
+- **Profile** — what kind of subagent a task gets (tools, model, prompt);
+  built-in, user (`~/.limbo/agents`) or project (`.agents/agents`).
+- **Supervisor** — owns the board, the running subagents and notice
+  delivery for one Conversation (`subagents/supervisor.py`).
+- **Notice** — a subagent event for the main agent: result, question,
+  alert, info (delivered, at most once) or progress (UI only). Delivered as
+  one `<subagent_updates>` steer item; questions and alerts wake an idle
+  main agent, results wait until the wave is done.
+
 ## Safety
 
 Limbo has no safety fences: file tools are not scoped to the workdir,

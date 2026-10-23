@@ -75,6 +75,18 @@ class ToolRegistry:
         tool = tool_class(workdir=self.workdir)
         self._tools[tool.name] = tool
 
+    def add(self, tool: BaseTool) -> None:
+        """Register a ready-made tool instance (subagent tools)."""
+        self._tools[tool.name] = tool
+
+    def unregister(self, name: str) -> None:
+        """Remove a tool from the catalog (subagent profiles narrow it)."""
+        if name != "run_code":
+            self._tools.pop(name, None)
+
+    def names(self) -> list[str]:
+        return list(self._tools)
+
     def get(self, name: str) -> BaseTool | None:
         return self._tools.get(name)
 
@@ -110,7 +122,10 @@ class ToolRegistry:
         tool = self._tools[call.name]
         token = _CURRENT_CALL.set(call_id) if call_id is not None else None
         try:
-            result = await asyncio.to_thread(tool.execute, call.arguments)
+            if getattr(tool, "is_async", False):
+                result = await tool.aexecute(call.arguments)
+            else:
+                result = await asyncio.to_thread(tool.execute, call.arguments)
         finally:
             if token is not None:
                 _CURRENT_CALL.reset(token)
@@ -134,6 +149,12 @@ class ToolRegistry:
         if parent is not None and call_id is None:
             # A Code Mode sub-call: give it an id and trace it under its
             # run_code parent (sub-calls never enter history).
+            tool = self.get(name)
+            if tool is not None and getattr(tool, "is_async", False):
+                return ToolResult(
+                    success=False,
+                    error=f"{name} cannot be called from a program; call it as a tool",
+                )
             call_id = f"{parent}.{secrets.token_hex(3)}"
             return await self._execute_traced(name, arguments, call_id, parent)
         return await self._execute(name, arguments, call_id)
@@ -204,9 +225,13 @@ class ToolRegistry:
         reaches every other tool from inside a program (deepseek-harness
         Code Mode parity).
         """
-        names = ["run_code"] if self.code_mode else [
-            n for n in self._tools if n != "run_code"
-        ]
+        names = (
+            # Async tools drive live event-loop state and cannot be called
+            # from a program: they stay native tools beside run_code.
+            ["run_code", *(n for n, t in self._tools.items() if getattr(t, "is_async", False))]
+            if self.code_mode
+            else [n for n in self._tools if n != "run_code"]
+        )
         return [self._definition(self._tools[name]) for name in names]
 
     def all_definitions(self) -> list[dict[str, Any]]:
@@ -218,7 +243,7 @@ class ToolRegistry:
         return [
             self._definition(tool)
             for name, tool in self._tools.items()
-            if name != "run_code"
+            if name != "run_code" and not getattr(tool, "is_async", False)
         ]
 
     @staticmethod

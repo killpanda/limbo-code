@@ -77,6 +77,14 @@ from limbo.pump import (
     TurnPump,
 )
 from limbo.steer import FOLLOW_UP
+from limbo.subagents.commands import agents_command, direct_message, task_command
+from limbo.subagents.events import (
+    BackgroundEvent,
+    MainWake,
+    NoticeEvent,
+    PlanProposed,
+    TaskChanged,
+)
 from limbo.toggles import parse_toggle
 from limbo.tracing.command import TracingViewerCommand
 
@@ -106,6 +114,13 @@ class Eof:
 
 
 InputEvent = Submit | Interrupt | Eof
+
+
+@dataclass(frozen=True)
+class _Background:
+    """Internal queue event: something happened on the task board."""
+
+    event: BackgroundEvent
 
 
 @dataclass(frozen=True)
@@ -188,6 +203,20 @@ class SlashTracingViewer:
 
 
 @dataclass(frozen=True)
+class SlashAgents:
+    """``/agents [scan|init]``: the task board / project profiles."""
+
+    arg: str
+
+
+@dataclass(frozen=True)
+class SlashTask:
+    """``/task ...``: direct control of subagent tasks."""
+
+    arg: str
+
+
+@dataclass(frozen=True)
 class UnknownCommand:
     name: str
 
@@ -205,6 +234,8 @@ Submission = (
     | SlashHelp
     | SlashQuit
     | SlashTracingViewer
+    | SlashAgents
+    | SlashTask
     | UnknownCommand
 )
 
@@ -243,6 +274,10 @@ def parse_submission(text: str) -> Submission:
         return SlashQuit()
     if name == "tracing-viewer":
         return SlashTracingViewer(arg)
+    if name == "agents":
+        return SlashAgents(arg)
+    if name == "task":
+        return SlashTask(arg)
     return UnknownCommand(name)
 
 
@@ -486,8 +521,12 @@ HELP_TEXT = """可用命令：
   /handoff <说明> 带交接说明开新会话（干净上下文，关联原会话）
   /plan [on|off] 计划模式：只读探索并给出方案，写类工具被拦下
   /tracing-viewer [id|off]  在浏览器查看 trace（打印本地链接）
+  /agents [scan|init]  子代理任务板 · 项目画像 · 生成项目角色
+  /task [id]     查看任务；/task <pause|resume|cancel|retry|approve|reject> <id|all> [说明]
+  @子代理名 <消息>  直接对某个子代理说话（忙时也可用）
   /quit          退出
-忙时输入的普通文本会作为插话排队；Esc / Ctrl+C 中断当前任务。"""
+忙时输入的普通文本会作为插话排队；Esc / Ctrl+C 中断当前任务。
+输入关闭后会等后台子代理做完（暂停、待确认的任务不等）再退出。"""
 
 
 def _first_line(text: str, limit: int = 60) -> str:
@@ -527,9 +566,10 @@ class HeadlessFrontend:
         self._echo_input = echo_input
         self._max_tool_lines = max_tool_lines
 
-        self._queue: asyncio.Queue[InputEvent | _TurnDone] = asyncio.Queue()
+        self._queue: asyncio.Queue[InputEvent | _TurnDone | _Background] = asyncio.Queue()
         self._turn_task: asyncio.Task[None] | None = None
         self._eof = False
+        self._eof_waiting = False
         self._quit = False
         # Restored from the session's usage ledger on resume.
         self._last_tokens = conversation.agent.session_total_tokens
@@ -547,6 +587,8 @@ class HeadlessFrontend:
 
     async def run(self, inputs: AsyncIterator[InputEvent]) -> int:
         forwarder = asyncio.create_task(self._forward(inputs))
+        unsubscribe = self._conv.subscribe(lambda e: self._queue.put_nowait(_Background(e)))
+        self._conv.start_background()
         self._conv.report_session()
         self._conv.report_idle()
         if self._json:
@@ -565,6 +607,13 @@ class HeadlessFrontend:
                 f"workdir {self._agent.workdir}"
             )
             self._line("输入消息回车发送；/help 查看命令；Esc/Ctrl+C 中断当前任务")
+        sup = self._conv.supervisor
+        if sup is not None and sup.interrupted_on_load:
+            self._line(
+                f"◆ {len(sup.interrupted_on_load)} 个子任务在上次退出时中断"
+                f"（{'、'.join(sup.interrupted_on_load)}）；/task resume all 继续"
+            )
+        self._maybe_wake_main()
         try:
             while not self._quit:
                 event = await self._queue.get()
@@ -576,7 +625,10 @@ class HeadlessFrontend:
                     self._on_interrupt(event)
                 elif isinstance(event, Eof):
                     self._on_eof()
+                elif isinstance(event, _Background):
+                    self._on_background(event.event)
         finally:
+            unsubscribe()
             forwarder.cancel()
             if self._turn_task is not None:
                 self._turn_task.cancel()
@@ -600,7 +652,13 @@ class HeadlessFrontend:
         if self._conv.awaiting_verify:
             self._answer_verify(text)
             return
+        if text.startswith("@") and self._direct_message(text):
+            return
         command = parse_submission(text)
+        if isinstance(command, (SlashAgents, SlashTask)):
+            # Board commands never touch the main history: fine mid-turn.
+            self._cmd_board(command)
+            return
         # The pump's own flag (not "a worker task exists"): it is released
         # in the same await-free section as the pump's last drain, so a
         # submission in the teardown window starts a turn instead of being
@@ -691,7 +749,16 @@ class HeadlessFrontend:
         if self._turn_task is not None:
             self._line("输入已关闭，等待当前任务完成…")
             return
-        self._quit = True
+        self._quit_when_settled()
+
+    def _quit_when_settled(self) -> None:
+        """EOF: quit once no turn runs and background subagents are done."""
+        sup = self._conv.supervisor
+        if self._turn_task is None and (sup is None or not sup.working):
+            self._quit = True
+        elif self._turn_task is None and not self._eof_waiting:
+            self._eof_waiting = True
+            self._line("输入已关闭，等待后台子代理完成…")
 
     def _skip_verify_on_eof(self) -> None:
         self._conv.skip_verify()
@@ -728,10 +795,61 @@ class HeadlessFrontend:
         if done.error is not None:
             self._line(f"✗ 内部错误：{done.error}")
         self._maybe_confirm_verify_proposal()
-        if self._eof:
-            if self._conv.awaiting_verify:
-                self._skip_verify_on_eof()
+        if self._eof and self._conv.awaiting_verify:
+            self._skip_verify_on_eof()
             self._quit = True
+            return
+        self._maybe_wake_main()
+        if self._eof:
+            self._quit_when_settled()
+
+    # -- subagents ------------------------------------------------------------
+
+    def _cmd_board(self, command: SlashAgents | SlashTask) -> None:
+        sup = self._conv.supervisor
+        if sup is None:
+            self._line('子代理已关闭（config.toml 的 [subagents] auto = "off"）')
+        elif isinstance(command, SlashAgents):
+            self._line(agents_command(sup, command.arg))
+        else:
+            self._line(task_command(sup, command.arg))
+
+    def _direct_message(self, text: str) -> bool:
+        sup = self._conv.supervisor
+        reply = direct_message(sup, text) if sup is not None else None
+        if reply is None:
+            return False
+        self._line(f"➤ {reply}")
+        return True
+
+    def _maybe_wake_main(self) -> None:
+        """Start a main-agent turn for subagent notices queued while idle."""
+        if self._turn_task is not None or self._conv.awaiting_verify or self._quit:
+            return
+        text = self._conv.take_wake_input()
+        if text is None:
+            return
+        self._line("◆ 子代理有新进展，交给主 agent 处理")
+        self._start(self._pump.run(text))
+
+    def _on_background(self, event: BackgroundEvent) -> None:
+        if self._json:
+            self._emit(background_to_json(event))
+        elif isinstance(event, NoticeEvent):
+            notice = event.notice
+            if notice.headline and notice.task_id:
+                icon = {"result": "✓", "alert": "⚠", "question": "?"}.get(notice.kind, "◆")
+                self._line(f"{icon} {notice.headline}")
+        elif isinstance(event, PlanProposed):
+            sup = self._conv.supervisor
+            if sup is not None:
+                self._line("◆ 子任务计划待确认：")
+                self._line(_indent(sup.status_text()))
+                self._line("  /task approve all 开始 · /task reject all 放弃")
+        if isinstance(event, MainWake):
+            self._maybe_wake_main()
+        if self._eof and not self._quit:
+            self._quit_when_settled()
 
     # -- /goal & the verify-proposal blocked state ----------------------------
 
@@ -954,6 +1072,33 @@ class HeadlessFrontend:
 # -- --json event stream ------------------------------------------------------------
 
 
+def background_to_json(event: BackgroundEvent) -> dict[str, Any]:
+    """A task-board event as one ``--json`` line."""
+    if isinstance(event, TaskChanged):
+        task = event.task
+        return {
+            "type": "task",
+            "id": task.id,
+            "status": task.status,
+            "title": task.title,
+            "agent": task.agent_name,
+            "activity": event.activity,
+            "waiting_on": task.waiting_on,
+            "checkpoint": task.last_checkpoint.phase if task.last_checkpoint else None,
+        }
+    if isinstance(event, NoticeEvent):
+        return {
+            "type": "subagent_notice",
+            "id": event.notice.id,
+            "kind": event.notice.kind,
+            "task_id": event.notice.task_id,
+            "text": event.notice.headline,
+        }
+    if isinstance(event, PlanProposed):
+        return {"type": "plan_proposed", "task_ids": event.task_ids}
+    return {"type": "main_wake"}
+
+
 def _snake(name: str) -> str:
     return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
@@ -1017,6 +1162,7 @@ async def _run(
         session_dir=session_dir,
         resume=resume,
         reporters=reporters,
+        client_factory=create_llm_client,
     )
 
     # --json is for scripts: plain line reads, no raw-mode echo.

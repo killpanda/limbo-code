@@ -48,9 +48,24 @@ class BaseTool(ABC):
     # running it twice changes nothing. Everything else defaults to
     # "unsafe": the model is told it may have partially run instead.
     replay: ReplayPolicy = "unsafe"
+    # Async tools (``arun``) run on the event loop instead of a worker
+    # thread — tools that drive live state (the subagent task board). They
+    # are not reachable from Code Mode programs, which run on their own
+    # loop in a thread.
+    is_async: bool = False
 
     def __init__(self, workdir: Path):
         self.workdir = workdir.resolve()
+
+    async def arun(self, arguments: dict[str, Any]) -> ToolResult:
+        """Async entry point (``is_async`` tools override this)."""
+        raise NotImplementedError
+
+    async def aexecute(self, arguments: dict[str, Any]) -> ToolResult:
+        try:
+            return await self.arun(arguments)
+        except ToolError as e:
+            return ToolResult(success=False, error=str(e))
 
     def execute(self, arguments: dict[str, Any]) -> ToolResult:
         try:

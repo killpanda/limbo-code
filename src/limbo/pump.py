@@ -27,7 +27,7 @@ Frontends are adapters translating its events into UI updates.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -140,6 +140,9 @@ class TurnPump:
         self._max_rounds = max_rounds
         self._verify_timeout_ms = verify_timeout_ms
         self._running = False
+        # Called as a run starts (the subagent supervisor queues pending
+        # notices so the main agent sees them ahead of the user's input).
+        self.before_run: Callable[[], None] | None = None
         self._verify_task: asyncio.Task[VerifyResult] | None = None
         # Adopt the configured budget onto a restored goal (D4/D6: silent
         # resume keeps the persisted state, only the budget is refreshed).
@@ -233,6 +236,8 @@ class TurnPump:
         # Eager (see class docstring): the flag must be set before the
         # caller awaits the first event, or single-flight has a gap.
         self._running = True
+        if self.before_run is not None:
+            self.before_run()
         return self._supervise(user_input, attachments)
 
     def compact(self) -> AsyncIterator[AgentEvent]:
