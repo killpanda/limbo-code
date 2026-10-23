@@ -29,6 +29,20 @@ proposals should name modules with these terms.
   verify/wrap-up window, teardown race — become one more turn); frontends
   never drain. Frontends are adapters translating its events into UI
   updates.
+- **Conversation** — the live session a frontend drives
+  (`conversation.py`): the current Agent + Turn pump pair, session
+  switching (`/new`, `/sessions`, `/fork`, `/handoff`; the target loads
+  before the current session closes), lifecycle reporting around each
+  run, and the `/goal` verify-proposal flow. The TUI and headless
+  frontends are its adapters; busy is the Turn pump's flag.
+- **Session journal** — the write side of the session file
+  (`journal.py`, `SessionJournal`): which in-memory messages are already
+  on disk, when a checkpoint appends vs rewrites, and the record order
+  that keeps a crash recoverable (summarized messages before their
+  compaction record, `dequeued` after the message carrying the item). The
+  Agent calls its verbs (`checkpoint`, `queued`/`dequeued`,
+  `record_intents`, `compacted`, `patch_meta`); `sessions.py` owns the
+  file format and loading.
 - **Steer** — a user message queued mid-turn, injected at consistency
   points (loop top, turn end, run head). The `SteerQueue` (`steer.py`) owns
   queueing semantics — id generation, FIFO, and the cancel boundary (an

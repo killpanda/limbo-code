@@ -2,7 +2,7 @@
 
 **Limbo** is a minimal terminal AI coding agent (Python 3.11+, Textual). Users converse with an LLM in a TUI to explore, read, edit, and write code via 7 tools. A `--headless` flag runs a plain-terminal REPL frontend instead of the TUI (Herdr/script control, RFC LIM-60).
 
-**Tools execute immediately — no confirmation flow, no safety fences.** File tools are not scoped to the workdir (absolute paths and symlinks are honored as-is), there is no sensitive-file skip list, and `bash` runs every command as given (no dangerous-command filter). `ToolRegistry.execute` runs a `before_tool`/`after_tool` hook chain (`tools/hooks.py`: `Block` / `Rewrite` / replace result; a raising hook blocks) that is empty by default; the only built-in hook is `/plan` (read-only plan mode: replay-safe tools and read-only bash only, also enforced on Code Mode sub-calls, persisted as `SessionMeta.plan_mode`).
+**Tools execute immediately — no confirmation flow, no safety fences.** File tools are not scoped to the workdir (absolute paths and symlinks are honored as-is), there is no sensitive-file skip list, and `bash` runs every command as given (no dangerous-command filter). `ToolRegistry` runs a `before_tool`/`after_tool` hook chain (`admit()` then `run()`; the agent journals a call's intent only after `admit()` lets it through) (`tools/hooks.py`: `Block` / `Rewrite` / replace result; a raising hook blocks) that is empty by default; the only built-in hook is `/plan` (read-only plan mode: replay-safe tools and read-only bash only, also enforced on Code Mode sub-calls, persisted as `SessionMeta.plan_mode`).
 
 ## Quick Start
 
@@ -37,7 +37,12 @@ src/limbo/
 ├── headless.py       # --headless frontend (RFC LIM-60): line-oriented REPL on the
 │                     # primary screen for Herdr (agent prompt/send-keys/read/wait);
 │                     # same TurnPump seam as the TUI, no textual import
-├── sessions.py       # Session JSONL save/load/list/export
+├── conversation.py   # Conversation: the live agent+pump pair both frontends drive —
+│                     # new/switch/fork/handoff (load before close), lifecycle reporting
+│                     # (drive), /goal verify-proposal flow
+├── sessions.py       # Session JSONL file format: records, save/load/list/export
+├── journal.py        # SessionJournal: when/in what order records reach the file
+│                     # (watermark, rewrite fallback, queue re-journal, meta patches)
 ├── trace.py          # Append-only JSONL run log (sessions/traces/)
 ├── tracing/          # /tracing-viewer: loopback web viewer over trace files (stdlib
 │                     # http.server; index.py offsets, model.py tree, static/index.html)
