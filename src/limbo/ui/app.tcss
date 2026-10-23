@@ -171,6 +171,13 @@ ChatWidget {
 .queued-message.cancelled .queued-hint {
     color: $text-tertiary;
 }
+/* daily mode 切换分隔线（Limbo Dawn） */
+.mode-divider {
+    height: 1;
+    margin-top: 1;
+    text-wrap: nowrap;
+    text-overflow: clip;
+}
 .ascii-art {
     color: $text-secondary;
     margin-top: 1;
@@ -310,6 +317,12 @@ MainScreen.-compact Landing .landing-info {
 }
 #input:focus {
     border: round $accent-lighten-1;
+}
+/* Daily mode：边框上的 ☀ daily 徽标和记忆条数 */
+#input {
+    border-title-color: $primary;
+    border-title-style: bold;
+    border-subtitle-color: $text-tertiary;
 }
 
 /* ---- 底部快捷键提示 ---- */

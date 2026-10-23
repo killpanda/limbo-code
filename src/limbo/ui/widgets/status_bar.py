@@ -45,6 +45,7 @@ class StatusBar(Horizontal):
         self._code_mode = False
         self._plan_mode = False
         self._daily_mode = False
+        self._memory_count: int | None = None
         # NOTE: attribute names must not collide with MessagePump internals
         # (e.g. `_context` is a method on MessagePump).
         self._context_percent: int | None = None
@@ -77,8 +78,6 @@ class StatusBar(Horizontal):
             parts.append("⌨code")
         if self._plan_mode:
             parts.append("📋plan")
-        if self._daily_mode:
-            parts.append("☀daily")
         if self._tokens:
             parts.append(f"↓↑ {_format_tokens(self._tokens)}")
         files, added, removed = self._changes
@@ -86,7 +85,11 @@ class StatusBar(Horizontal):
             parts.append(f"+{added}−{removed}")
         if self._queued:
             parts.append(f"⏳ {self._queued} 条排队中")
-        parts.append(self._workdir)
+        if self._daily_mode and self._memory_count is not None:
+            # The daily workdir is fixed; the memory size says more.
+            parts.append(f"记忆 {self._memory_count}")
+        else:
+            parts.append(self._workdir)
         return " · ".join(parts)
 
     def _refresh_context(self) -> None:
@@ -115,6 +118,10 @@ class StatusBar(Horizontal):
         text = Text("Limbo™ ", style=theme.variables.get("text-tertiary", ""))
         text.append_text(gradient_text("LIMBO", theme_gradient(theme), True))
         text.append(" ")
+        if self._daily_mode:
+            chip_bg = theme.variables.get("selected-bg", str(theme.panel))
+            text.append(" ☀ DAILY ", style=f"bold {theme.primary} on {chip_bg}")
+            text.append(" ")
         try:
             self._logo_label.update(text)
         except Exception:  # noqa: BLE001 - not composed yet
@@ -155,11 +162,23 @@ class StatusBar(Horizontal):
             pass
 
     def set_daily_mode(self, enabled: bool) -> None:
-        """Show/hide the ☀daily badge (daily mode posture)."""
+        """Show/hide the ☀ DAILY chip next to the wordmark (daily mode)."""
         if enabled == self._daily_mode:
             return
         self._daily_mode = enabled
+        if self.is_mounted:
+            self._render_logo()
         self._refresh_context()
+
+    @property
+    def daily_badge(self) -> bool:
+        return self._daily_mode
+
+    def set_memory_count(self, count: int | None) -> None:
+        """Memory entries, shown instead of the workdir in daily mode."""
+        if count != self._memory_count:
+            self._memory_count = count
+            self._refresh_context()
 
     def set_goal(
         self, goal: tuple[int, int] | None, *, running: bool = False

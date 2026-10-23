@@ -22,7 +22,7 @@ from pathlib import Path
 
 from textual.theme import Theme
 
-from limbo.ui.contrast import TEXT_MIN, contrast_ratio
+from limbo.ui.contrast import readable
 from limbo.ui.gradient import mix
 
 THEME_NAME = "omarchy"
@@ -94,16 +94,6 @@ def parse_gradient(spec: object) -> tuple[str, ...]:
     return tuple(colors)
 
 
-def _readable(color: str, backgrounds: tuple[str, ...], toward: str) -> str:
-    """把 ``color`` 向 ``toward`` 混色，直到对每个背景都 ≥ TEXT_MIN。"""
-    out = color
-    step = 0.0
-    while step < 1.0 and min(contrast_ratio(out, bg) for bg in backgrounds) < TEXT_MIN:
-        step += 0.08
-        out = mix(color, toward, step)
-    return out
-
-
 def build_theme(colors: dict[str, object], overrides: dict[str, object] | None = None) -> Theme:
     """按映射规则把 Omarchy 的 colors.toml 转成 Textual 主题。"""
 
@@ -168,17 +158,17 @@ def build_theme(colors: dict[str, object], overrides: dict[str, object] | None =
     # Contrast fixes apply to derived colours only: a value the user pinned
     # in limbo.toml is taken as-is.
     for key in _SLOT_TEXT:
-        slots[key] = _readable(slots[key], backgrounds, toward)
+        slots[key] = readable(slots[key], backgrounds, toward)
     for key in _TEXT_TOKENS:
         bgs = (user_bg,) if key == "user-message-fg" else backgrounds
-        variables[key] = _readable(variables[key], bgs, toward)
+        variables[key] = readable(variables[key], bgs, toward)
     for key, bg_key in (
         ("error-bright", "error-bg"),
         ("diff-added", "diff-added-bg"),
         ("diff-removed", "diff-removed-bg"),
         ("selected-fg", "selected-bg"),
     ):
-        variables[key] = _readable(variables[key], (variables[bg_key],), toward)
+        variables[key] = readable(variables[key], (variables[bg_key],), toward)
 
     for key, value in (overrides or {}).items():
         normalized = _normalize(value)

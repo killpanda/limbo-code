@@ -34,7 +34,12 @@ from limbo.agent import (
 from limbo.compaction import is_summary_message
 from limbo.config import Config, save_thinking_to_config
 from limbo.conversation import Conversation, NoVerifyGate
-from limbo.daily import DAILY_USAGE, daily_toggle_notice, daily_unchanged_notice
+from limbo.daily import (
+    DAILY_DIVIDER_OFF,
+    DAILY_DIVIDER_ON,
+    DAILY_USAGE,
+    daily_unchanged_notice,
+)
 from limbo.goal import (
     STATUS_ACTIVE,
     GoalClear,
@@ -101,10 +106,10 @@ from limbo.ui.widgets.activity import ActivityLine
 from limbo.ui.widgets.chat import ChatWidget, QueuedMessage
 from limbo.ui.widgets.command_menu import SlashCommandMenu
 from limbo.ui.widgets.input import InputWidget, PasteMarkersInvalid, UserSubmitted
-from limbo.ui.widgets.key_hints import BUSY_HINTS, IDLE_HINTS, KeyHints
+from limbo.ui.widgets.key_hints import BUSY_HINTS, DAILY_IDLE_HINTS, IDLE_HINTS, KeyHints
 from limbo.ui.widgets.landing import Landing
 from limbo.ui.widgets.pills import Pills
-from limbo.ui.widgets.sidebar import WIDE_MIN_WIDTH, Sidebar, git_branch
+from limbo.ui.widgets.sidebar import WIDE_MIN_WIDTH, Sidebar, git_branch, short_path
 from limbo.ui.widgets.status_bar import StatusBar
 
 # Key hints under the input. While a turn runs, Enter steers it and
@@ -242,6 +247,9 @@ class MainScreen(Screen[None]):
     def _set_hint(self, hints: tuple[tuple[str, str], ...]) -> None:
         self.query_one("#hint", KeyHints).set_hints(hints)
 
+    def _idle_hints(self) -> tuple[tuple[str, str], ...]:
+        return DAILY_IDLE_HINTS if self.agent.daily_mode else _HINT_IDLE
+
     def compose(self) -> ComposeResult:
         yield StatusBar(
             model=self.config.llm.model,
@@ -302,11 +310,20 @@ class MainScreen(Screen[None]):
             recent = list_sessions(self.session_dir, workdir=self.workdir)
         except OSError:
             recent = []
+        daily = self.agent.daily_mode
+        place = ""
+        if daily:
+            place = short_path(str(self.workdir))
+            count = self._memory_count()
+            if count is not None:
+                place += f" · 记忆 {count} 条"
         return Landing(
             model=self.config.llm.model,
             detail=detail,
             branch=git_branch(self.workdir),
             recent=recent,
+            daily=daily,
+            place=place,
         )
 
     # -- layout: sidebar on wide terminals, compact header on narrow ones ------
@@ -892,8 +909,15 @@ class MainScreen(Screen[None]):
             chat.add_info(DAILY_USAGE)
             return
         if self.agent.set_daily_mode(enabled):
-            chat.add_info(daily_toggle_notice(enabled))
+            # Theme first (one CSS pass), then the divider sweeps in it.
             self._sync_mode_badges()
+            chat.add_mode_divider(
+                DAILY_DIVIDER_ON if enabled else DAILY_DIVIDER_OFF, daily=enabled
+            )
+            if enabled:
+                self.query_one("#input", InputWidget).set_daily(
+                    True, self._memory_count(), animate=True
+                )
             sidebar = self.query_one("#sidebar", Sidebar)
             sidebar.set_skills([skill.name for skill in self._skills()])
         else:
@@ -1085,6 +1109,30 @@ class MainScreen(Screen[None]):
         sidebar.set_code_mode(self.agent.code_mode)
         sidebar.set_plan_mode(self.agent.plan_mode)
         sidebar.set_daily_mode(self.agent.daily_mode)
+        # Daily look (Limbo Dawn): warm theme variant, -daily class, badges.
+        daily = self.agent.daily_mode
+        set_daily_look = getattr(self.app, "set_daily_look", None)
+        if callable(set_daily_look):
+            set_daily_look(daily)
+        self.set_class(daily, "-daily")
+        self._sync_memory_count()
+        if not self.pump.running:
+            self._set_hint(self._idle_hints())
+
+    def _memory_count(self) -> int | None:
+        """Entries in long-term memory (None when memory is off)."""
+        store = self.agent.registry.memory_store
+        if store is None:
+            return None
+        return len(store.entries("user")) + len(store.entries("notes"))
+
+    def _sync_memory_count(self) -> None:
+        """Push the memory size to the daily badges (input, sidebar, bar)."""
+        daily = self.agent.daily_mode
+        count = self._memory_count() if daily else None
+        self.query_one("#statusbar", StatusBar).set_memory_count(count)
+        self.query_one("#sidebar", Sidebar).set_memory_count(count)
+        self.query_one("#input", InputWidget).set_daily(daily, count)
 
     def _render_history(self) -> None:
         """Render the agent's restored history into the chat flow.
@@ -1587,7 +1635,7 @@ class MainScreen(Screen[None]):
                 self.agent.session_meta.title or ""
             )
             self._sync_usage()
-            self._set_hint(_HINT_IDLE)
+            self._set_hint(self._idle_hints())
             self._refresh_goal_indicator()
             # M2: a proposal round that ends without leftover steers pops
             # the verify-command confirmation picker.
@@ -1682,6 +1730,8 @@ class MainScreen(Screen[None]):
                 self.query_one("#sidebar", Sidebar).record_tool_result(
                     event.name, event.arguments
                 )
+                if event.name == "memory":
+                    self._sync_memory_count()
                 self._sync_usage()
             else:
                 card.set_error(result.error or "Tool failed.")

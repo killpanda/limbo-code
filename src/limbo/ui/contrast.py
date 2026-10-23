@@ -15,6 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable
 
+from limbo.ui.gradient import mix
 from limbo.ui.theme import LIMBO_DARK, LIMBO_DUSK, LIMBO_LIGHT, palette_snapshot
 
 TEXT_MIN = 4.5
@@ -91,6 +92,16 @@ def contrast_ratio(fg: str, bg: str) -> float:
     return (hi + 0.05) / (lo + 0.05)
 
 
+def readable(color: str, backgrounds: tuple[str, ...], toward: str) -> str:
+    """把 ``color`` 向 ``toward`` 混色，直到对每个背景都 ≥ TEXT_MIN。"""
+    out = color
+    step = 0.0
+    while step < 1.0 and min(contrast_ratio(out, bg) for bg in backgrounds) < TEXT_MIN:
+        step += 0.08
+        out = mix(color, toward, step)
+    return out
+
+
 @dataclass(frozen=True)
 class CheckResult:
     theme: str
@@ -124,9 +135,16 @@ def check_theme(theme_name: str, palette: dict[str, str]) -> list[CheckResult]:
 
 
 def check_palettes() -> tuple[list[CheckResult], int]:
-    """校验 limbo-dusk / limbo-dark / limbo-light。返回 (结果列表, 失败数)。"""
+    """校验 limbo-dusk / limbo-dark / limbo-light 及其 daily（Dawn）变体。
+
+    返回 (结果列表, 失败数)。
+    """
+    # 延迟导入：daily_look 依赖本模块的 readable()。
+    from limbo.ui.daily_look import daily_variant
+
     results: list[CheckResult] = []
-    for theme in (LIMBO_DUSK, LIMBO_DARK, LIMBO_LIGHT):
+    builtins = (LIMBO_DUSK, LIMBO_DARK, LIMBO_LIGHT)
+    for theme in (*builtins, *(daily_variant(t) for t in builtins)):
         results.extend(check_theme(theme.name, palette_snapshot(theme)))
     failures = sum(1 for r in results if r.status in ("FAIL", "BAD"))
     return results, failures

@@ -236,6 +236,18 @@ class DailySettings(BaseModel):
     # web_fetch: characters per page chunk, request timeout.
     fetch_max_chars: int = 20_000
     fetch_timeout: float = 30.0
+    # TUI look while daily mode is on: "dawn" = warm variant of the current
+    # theme + ☀ badges, "badge" = badges only (colours stay as they are).
+    look: str = "dawn"
+
+    @field_validator("look")
+    @classmethod
+    def _look_known(cls, value: str) -> str:
+        value = value.strip().lower()
+        if value not in ("dawn", "badge"):
+            warnings.warn(f"daily look={value!r} is unknown; reset to 'dawn'.", stacklevel=2)
+            return "dawn"
+        return value
 
     @field_validator("user_chars", "notes_chars", "fetch_max_chars")
     @classmethod

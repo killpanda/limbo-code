@@ -13,7 +13,7 @@ from textual.widgets import TextArea
 from textual.widgets._text_area import EditResult
 
 from limbo.models import Attachment
-from limbo.ui import clipboard
+from limbo.ui import clipboard, motion
 
 # Re-exported for existing imports (tests); the store owns the values.
 from limbo.ui.paste_store import PASTE_COLLAPSE_CHARS as PASTE_COLLAPSE_CHARS
@@ -24,6 +24,11 @@ from limbo.ui.paste_store import PasteStore, clean_pasted_text
 # one text row (height 3) and grows up to MAX_TEXT_ROWS before scrolling.
 MIN_TEXT_ROWS = 1
 MAX_TEXT_ROWS = 8
+
+# Daily mode (Limbo Dawn): badge on the input border, memory size on the
+# right edge, and a placeholder with daily-style suggestions.
+DAILY_BADGE = "☀ daily"
+DAILY_PLACEHOLDER = "粘贴链接、问点事，或者 /memory"
 
 
 class UserSubmitted(Message):
@@ -112,6 +117,47 @@ class InputWidget(TextArea):
         # no Textual): the widget is the adapter translating key, cursor,
         # and clipboard events into store calls.
         self._store = PasteStore()
+        self._badge_frame = 0
+
+    # -- daily mode badge ------------------------------------------------------
+
+    def set_daily(
+        self, enabled: bool, memory_count: int | None = None, *, animate: bool = False
+    ) -> None:
+        """Show/hide the ``☀ daily`` border badge; ``animate`` decodes it in."""
+        self.placeholder = DAILY_PLACEHOLDER if enabled else ""
+        self.border_subtitle = (
+            f"记忆 {memory_count} 条" if enabled and memory_count is not None else ""
+        )
+        clock = motion.get_clock(self.app)
+        if not enabled:
+            clock.unsubscribe(self)
+            self.border_title = ""
+            return
+        if animate and clock.mode == motion.FULL:
+            self._badge_frame = 0
+            self._render_badge()
+            clock.subscribe(self, self._on_badge_frame)
+        else:
+            self.border_title = DAILY_BADGE
+
+    def _on_badge_frame(self, _step: int) -> None:
+        self._badge_frame += 1
+        self._render_badge()
+        if self._badge_frame >= motion.decode_frames(DAILY_BADGE):
+            motion.get_clock(self.app).unsubscribe(self)
+
+    def _render_badge(self) -> None:
+        dim = self.app.current_theme.variables.get("text-tertiary", "")
+        self.border_title = motion.decode_text(
+            DAILY_BADGE, self._badge_frame, dim, seed=self._badge_frame
+        )
+
+    def on_unmount(self) -> None:
+        try:
+            motion.get_clock(self.app).unsubscribe(self)
+        except Exception:  # noqa: BLE001 - app already gone
+            pass
 
     def _menu_screen(self):
         """The screen, but only when its slash-command menu is open."""

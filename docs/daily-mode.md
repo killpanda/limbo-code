@@ -64,6 +64,20 @@ coding 会话只看 2，看不到起步包和 daily skill。
 - 子代理角色 `researcher`：只读调研，daily 模式下能读网页正文，交回带出处的结论。daily 会话里的子代理
   也是 daily 姿态，但 `memory`、`ask_user`、`skill_manage`、`session_search` 只留给主 agent。
 
+## 界面：Limbo Dawn
+
+daily mode 下 TUI 换成当前主题的暖色变体 Limbo Dawn：coding 是 Dusk（蓝 → 黄的黄昏渐变），
+daily 是 Dawn（红 → 杏橙 → 黄的日出渐变）。布局、`╱` 纹理、吉祥物黄和成功/错误/diff 语义色不变。
+
+- 输入框边框上常驻 `☀ daily` 徽标，右下角是记忆条数；窄屏状态栏的字标旁有 `☀ DAILY` 色块
+- 侧栏把「修改的文件」换成「读过的网页」和「记忆」（本会话有改动时「修改的文件」照常出现）
+- 启动页、底部快捷键提示换成 daily 场景的用法
+- `/daily-mode` 切换时聊天里插一条模式分隔线，一道光扫过（`[ui] motion` 为 reduced/off 时静态）
+
+limbo 自带的三个主题用手调色板；Omarchy 和 Textual 内置主题按规则派生（渐变取 error → warning →
+accent，primary 取 warning，对比度不足时向前景推）；ANSI 主题不换色，只显示徽标。
+`[daily] look = "badge"` 关掉换色、只保留徽标。
+
 ## web_fetch
 
 打开 http(s) 链接，返回正文的 Markdown（标题、列表、链接；导航、脚本、页脚去掉，
@@ -84,4 +98,5 @@ memory_nudge_turns = 10
 learn_after_tool_calls = 10
 fetch_max_chars = 20000
 fetch_timeout = 30.0
+look = "dawn"                 # "badge"：只显示 ☀ 徽标，不换暖色主题
 ```

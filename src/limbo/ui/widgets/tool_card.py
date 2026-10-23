@@ -43,7 +43,7 @@ _STATE_LABELS = {
 # Argument keys worth showing in the one-line summary, in priority order.
 # ``description`` (run_code's program intent) is last: only tools without
 # a path/command/pattern/old_text hit it.
-_SUMMARY_KEYS = ("path", "command", "pattern", "query", "old_text", "description")
+_SUMMARY_KEYS = ("path", "command", "pattern", "query", "url", "old_text", "description")
 
 
 class ToolCard(Vertical):

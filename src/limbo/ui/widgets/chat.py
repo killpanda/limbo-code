@@ -29,6 +29,7 @@ from textual.widgets import Markdown, Static
 from limbo.models import Attachment
 from limbo.ui.banner import user_icon
 from limbo.ui.widgets.landing import Landing
+from limbo.ui.widgets.mode_divider import ModeDivider
 from limbo.ui.widgets.tool_card import ToolCard
 
 # How many message widgets stay mounted in the DOM. Older ones are pruned
@@ -394,6 +395,14 @@ class ChatWidget(VerticalScroll):
         self.messages.append(landing)
         self._mount_and_scroll(landing)
 
+    def add_mode_divider(self, label: str, *, daily: bool, animate: bool = True) -> None:
+        """Mark a daily mode switch with a full-width divider (Limbo Dawn)."""
+        self._current_assistant = None
+        self._close_thinking()
+        divider = ModeDivider(label, daily=daily, animate=animate)
+        self.messages.append(divider)
+        self._mount_and_scroll(divider)
+
     def add_error(self, text: str) -> None:
         self._current_assistant = None
         self._close_thinking()
@@ -718,6 +727,8 @@ class ChatWidget(VerticalScroll):
                 continue  # tool cards are UI chrome, not conversation text
             elif isinstance(msg, Landing):
                 parts.append(msg.transcript)
+            elif isinstance(msg, ModeDivider):
+                parts.append(msg.label)
             else:
                 parts.append(str(msg.content))
         return "\n".join(parts)

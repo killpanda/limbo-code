@@ -16,6 +16,15 @@ IDLE_HINTS: tuple[tuple[str, str], ...] = (
     ("ctrl+l", "模型"),
     ("ctrl+o", "展开"),
 )
+# Daily mode (Limbo Dawn): the daily commands replace the coding-centric keys.
+DAILY_IDLE_HINTS: tuple[tuple[str, str], ...] = (
+    ("enter", "发送"),
+    ("shift+enter", "换行"),
+    ("/", "命令"),
+    ("/memory", "记忆"),
+    ("/learn", "复盘"),
+    ("ctrl+p", "面板"),
+)
 # While a turn runs, Enter steers it and Alt+Enter queues a follow-up for
 # after the task.
 BUSY_HINTS: tuple[tuple[str, str], ...] = (

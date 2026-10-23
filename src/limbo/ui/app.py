@@ -12,6 +12,7 @@ from limbo.config import Config
 from limbo.llm.client import LLMClient
 from limbo.ui import omarchy
 from limbo.ui.clipboard import write_clipboard_text
+from limbo.ui.daily_look import base_name, daily_variant, variant_name
 from limbo.ui.key_fixes import apply_key_fixes
 from limbo.ui.motion import MotionClock, resolve_mode
 from limbo.ui.screens.main import MainScreen
@@ -49,6 +50,9 @@ class LimboApp(App[None]):
         self.session_dir = session_dir
         self.resume = resume
         self.motion = MotionClock(self, resolve_mode(config.ui.motion if config else None))
+        # Daily mode look (Limbo Dawn): on while daily mode is on and
+        # [daily] look = "dawn"; the theme becomes "<base>+daily".
+        self._daily_look = False
         for builtin in BUILTIN_THEMES:
             self.register_theme(builtin)
         theme_name = (config.ui.theme if config else None) or "auto"
@@ -81,15 +85,46 @@ class LimboApp(App[None]):
         if state == self._omarchy_state:
             return
         if state is not None and self._load_omarchy_theme():
-            if self.theme == omarchy.THEME_NAME:
+            if self.base_theme == omarchy.THEME_NAME and not self._daily_look:
                 # Same name, new colours: re-run the theme watcher.
                 self.mutate_reactive(LimboApp.theme)
             else:
-                self.theme = omarchy.THEME_NAME
+                self._apply_theme(omarchy.THEME_NAME)
         else:
             self._omarchy_state = state
-            if self.theme == omarchy.THEME_NAME:
-                self.theme = DEFAULT_THEME
+            if self.base_theme == omarchy.THEME_NAME:
+                self._apply_theme(DEFAULT_THEME)
+
+    @property
+    def base_theme(self) -> str:
+        """The theme the user picked (or Omarchy's), without the daily variant."""
+        return base_name(self.theme)
+
+    def set_daily_look(self, enabled: bool) -> None:
+        """Switch the daily mode look on/off (keeps the base theme)."""
+        if self.config is not None and self.config.daily.look != "dawn":
+            enabled = False
+        if enabled == self._daily_look:
+            return
+        self._daily_look = enabled
+        self._apply_theme(self.base_theme)
+
+    def _apply_theme(self, base: str) -> None:
+        """Show ``base`` — or its daily variant while the daily look is on."""
+        if not self._daily_look:
+            self.theme = base
+            return
+        theme = self.get_theme(base)
+        if theme is None:
+            self.theme = base
+            return
+        # Re-register every time: the base may have new colours (Omarchy).
+        self.register_theme(daily_variant(theme))
+        name = variant_name(base)
+        if self.theme == name:
+            self.mutate_reactive(LimboApp.theme)
+        else:
+            self.theme = name
 
     def on_mount(self) -> None:
         if self._follow_omarchy:

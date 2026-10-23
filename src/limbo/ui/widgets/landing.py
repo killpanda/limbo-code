@@ -29,6 +29,7 @@ WORDMARK = (
     "███████  ██  ██       ██  ██████▀   ▀█████▀ ",
 )
 TAGLINE = "介于想法和提交之间的那个地方。"
+DAILY_TAGLINE = "白天的事，也可以交给我。"
 SWEEP_FRAMES = 24
 _DIAG = "╱" * 400
 
@@ -37,6 +38,13 @@ TIPS = (
     ("@ 或路径", "引用文件"),
     ("!", "直接跑 shell"),
     ("ctrl+o", "展开工具输出"),
+)
+# Daily mode (Limbo Dawn): starting points for non-coding work.
+DAILY_TIPS = (
+    ("粘贴链接", "读网页"),
+    ("/memory", "看看我记得什么"),
+    ("/learn", "把这次经验沉淀成技能"),
+    ("/", "命令和技能"),
 )
 
 
@@ -68,12 +76,19 @@ class Landing(Vertical):
         branch: str | None,
         recent: list[SessionMeta],
         *args: Any,
+        daily: bool = False,
+        place: str = "",
         **kwargs: Any,
     ) -> None:
+        """``daily`` switches to the daily copy; ``place`` (daily only) is the
+        workdir/memory line shown instead of the git branch."""
         super().__init__(*args, **kwargs)
         self._model = model
         self._detail = detail
         self._branch = branch
+        self._daily = daily
+        self._place = place
+        self._tagline = DAILY_TAGLINE if daily else TAGLINE
         self._recent = recent[:3]
         self._frame = 0
 
@@ -89,7 +104,7 @@ class Landing(Vertical):
 
     @property
     def transcript(self) -> str:
-        return "\n".join(WORDMARK) + f"\n{TAGLINE}\n{self._model}"
+        return "\n".join(WORDMARK) + f"\n{self._tagline}\n{self._model}"
 
     def on_mount(self) -> None:
         self.app.theme_changed_signal.subscribe(self, lambda _theme: self.refresh_all())
@@ -145,12 +160,15 @@ class Landing(Vertical):
         text = Text()
         text.append("limbo code ", Style(color=c["dim"]))
         text.append(f"v{__version__}\n", Style(color=c["accent"]))
-        text.append(TAGLINE + "\n\n", Style(color=c["mid"]))
+        text.append(self._tagline + "\n\n", Style(color=c["mid"]))
         text.append("◇ ", Style(color=c["accent"]))
         text.append(self._model, Style(color=c["fg"], bold=True))
         if self._detail:
             text.append(f" · {self._detail}", Style(color=c["dim"]))
-        if self._branch:
+        if self._daily and self._place:
+            text.append("\n⌂ ", Style(color=c["dim"]))
+            text.append(self._place, Style(color=c["fg"]))
+        elif self._branch:
             text.append("\n⎇ ", Style(color=c["dim"]))
             text.append(self._branch, Style(color=c["fg"]))
         self.query_one(".landing-info", Static).update(text)
@@ -173,7 +191,7 @@ class Landing(Vertical):
         self.query_one(".landing-recent", Static).update(recent)
 
         tips = Text("从这里开始\n", Style(color=c["dim"]))
-        for key, desc in TIPS:
+        for key, desc in DAILY_TIPS if self._daily else TIPS:
             tips.append(key, Style(color=c["primary"], bold=True))
             tips.append(f"  {desc}\n", Style(color=c["mid"]))
         tips.rstrip()
