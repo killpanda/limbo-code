@@ -275,10 +275,10 @@ Limbo borrows openly from other agents. Thank you to:
   agent itself: the built-in tool behavior (output limits, multi-edit,
   process-tree kill, ripgrep), the provider conventions and model catalog,
   compaction and the session entry model, and collapsing large pastes.
-- **[Crush](https://github.com/charmbracelet/crush)** by Charm. Limbo Motion's
-  staggered entrance for the activity indicator is borrowed from Crush, and
-  the Limbo Dusk TUI (gradient wordmark, `╱` dialog rules, the `Ctrl+P`
-  command palette and `Ctrl+S` session picker) takes its cues from it.
+- **[Crush](https://github.com/charmbracelet/crush)** by Charm. The Limbo
+  Dusk TUI was designed after Crush: the gradient wordmark, `╱` dialog rules,
+  Limbo Motion (its staggered entrance is borrowed directly), the `Ctrl+P`
+  command palette and the `Ctrl+S` session picker.
 - **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** by Nous
   Research. Daily mode is modeled on Hermes: the `USER.md` / `NOTES.md`
   memory with its frozen per-session snapshot and the memory nudge,
