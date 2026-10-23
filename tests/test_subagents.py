@@ -564,3 +564,78 @@ async def test_need_new_work_and_cancel_self(tmp_path):
     assert "table added" in board.tasks["t1"].outcome.summary
     assert board.tasks["t2"].status == "cancelled"
     conv.close()
+
+
+# -- token budget ----------------------------------------------------------------
+
+
+def _usage(total, cached):
+    from limbo.models import CompletionMeta
+
+    return CompletionMeta(
+        usage={
+            "prompt_tokens": total - 10,
+            "completion_tokens": 10,
+            "total_tokens": total,
+            "prompt_cache_hit_tokens": cached,
+        }
+    )
+
+
+def _budget_script(child):
+    one_task = {"tasks": [{"title": "Work", "brief": "Do it.", "profile": "worker"}]}
+
+    def main(messages, n):
+        last = messages[-1]
+        if last.role == "user" and "<subagent_updates" in (last.content or ""):
+            return say("ok")
+        if last.role == "tool":
+            return say("Delegated.")
+        return call("plan_tasks", **one_task)
+
+    return {"main": main, "t1": child}
+
+
+@pytest.mark.asyncio
+async def test_budget_ignores_prompt_cache_hits(tmp_path):
+    # Every request re-sends a big cached prefix: 3 x 900 = 2700 total
+    # tokens, but only 3 x 50 fresh ones — well inside a 1000 budget.
+    def t1(messages, n):
+        if n < 2:
+            return [*call("checkpoint", phase=f"p{n}", summary="s"), _usage(900, 850)]
+        return [*call("finish", summary="all done"), _usage(900, 850)]
+
+    conv, llm, _ = make(tmp_path, _budget_script(t1), auto="on", task_token_budget=1000)
+    await run_main(conv, "go")
+    await settle(conv)
+    task = conv.supervisor.board.tasks["t1"]  # type: ignore[union-attr]
+    assert task.status == "done" and task.outcome.summary == "all done"  # type: ignore[union-attr]
+    assert llm.calls["t1"] == 3
+    conv.close()
+
+
+@pytest.mark.asyncio
+async def test_over_budget_finishes_the_batch_then_stops(tmp_path):
+    # The second response crosses the budget: its write still runs (no
+    # "not executed" placeholder), no third request goes out, and the
+    # outcome names the budget and the change made.
+    def t1(messages, n):
+        if n == 0:
+            return [*call("write", path="a.txt", content="a"), _usage(600, 0)]
+        if n == 1:
+            return [*call("write", path="b.txt", content="b"), _usage(600, 0)]
+        return say("unexpected")
+
+    conv, llm, _ = make(tmp_path, _budget_script(t1), auto="on", task_token_budget=1000)
+    await run_main(conv, "go")
+    await settle(conv)
+    task = conv.supervisor.board.tasks["t1"]  # type: ignore[union-attr]
+    assert llm.calls["t1"] == 2
+    assert (tmp_path / "a.txt").exists() and (tmp_path / "b.txt").exists()
+    assert task.status == "done"
+    reason = task.outcome.reason  # type: ignore[union-attr]
+    assert "超出 token 预算（新增 1200 > 1000" in reason
+    assert "write：" in reason
+    child_history = Path(task.session_file).read_text(encoding="utf-8")
+    assert "未执行" not in child_history
+    conv.close()

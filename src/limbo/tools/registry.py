@@ -66,6 +66,9 @@ class ToolRegistry:
         # limbo.code_mode). Switched by /code-mode; the agent rebuilds the
         # system prompt on toggle.
         self.code_mode = False
+        # Daily mode is a session flag, not "web_fetch is registered": a
+        # subagent profile may drop web_fetch and still be a daily session.
+        self._daily_mode = False
         self._tools: dict[str, BaseTool] = {}
         # Trace sink for Code Mode sub-calls (set by the agent): each one is
         # logged as tool_call/tool_result with its run_code parent_call_id.
@@ -111,13 +114,14 @@ class ToolRegistry:
 
     @property
     def daily_mode(self) -> bool:
-        return "web_fetch" in self._tools
+        return self._daily_mode
 
     @daily_mode.setter
     def daily_mode(self, enabled: bool) -> None:
         """Add/remove the daily tools (DAILY_TOOLS)."""
         if enabled == self.daily_mode:
             return
+        self._daily_mode = enabled
         if not enabled:
             for name in DAILY_TOOLS:
                 self._tools.pop(name, None)

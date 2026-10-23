@@ -50,10 +50,13 @@ model: inherit        # inherit | cheap | 具体模型 id
 max_iterations: 40
 isolation: shared     # shared | worktree
 context: brief        # brief（只看任务说明）| fork（带上主对话）
+inherit_prompt: false # 仅 fork：沿用主会话的 system prompt 和工具列表
 scope_paths: packages/api/**
 ---
 给子代理的额外指令。
 ```
+
+`inherit_prompt: true`（内置的 skill-reviewer 就是这样）让 fork 子代理逐字节沿用主会话的 system prompt 和工具定义，第一次请求就能命中 prompt 缓存。工具限制只在执行侧生效：主会话的工具都会展示给它，但不在白名单里的调用会失败。它的角色说明和指令放在第一条消息里；它没有上面那五个任务工具，最后一条纯文本回复就是结果。这个开关只在子代理和主会话用同一个模型时生效，换了模型缓存本来就是冷的，会回到普通 fork。
 
 ## 打点与任务编排
 
@@ -121,7 +124,7 @@ enabled = true                 # false：完全关闭
 auto = "suggest"               # off | suggest | on
 max_parallel = 3               # 同时运行的子代理
 max_tasks = 12                 # 未结束任务上限
-task_token_budget = 400000     # 单任务 token 预算，超出即失败（0 = 不限）
+task_token_budget = 400000     # 单任务 token 预算（0 = 不限）：只算新增 token（总量减去缓存命中），超出后当前这批工具跑完、下一次请求前收尾
 cheap_model = ""               # model: cheap 的角色用它（空 = 主模型）
 wake_main_on = ["question", "alert", "wave_done"]
 on_dep_fail = "notify"         # notify | cascade

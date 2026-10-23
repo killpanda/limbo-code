@@ -12,8 +12,11 @@ Frontmatter keys: ``name``, ``description``, ``when_to_use``, ``tools``
 (``read_only`` | ``all`` | ``no_edit`` | comma list), ``model``
 (``inherit``, ``cheap`` or a model id), ``max_iterations``,
 ``isolation`` (``shared`` | ``worktree``), ``context`` (``brief`` |
-``fork``), ``scope_paths`` (comma list). The body is the profile's
-instructions, appended to the subagent's system prompt.
+``fork``), ``inherit_prompt`` (``true``: a fork child keeps the main
+session's system prompt and tool list for prompt-cache parity),
+``scope_paths`` (comma list). The body is the profile's instructions,
+appended to the subagent's system prompt (with ``inherit_prompt``, sent in
+its first message instead).
 """
 
 from __future__ import annotations
@@ -73,6 +76,10 @@ class Profile:
     isolation: str = "shared"
     context: str = "brief"  # brief | fork
     scope_paths: tuple[str, ...] = ()
+    # context=fork only: keep the main session's system prompt and tool
+    # list verbatim (prompt-cache parity); the body and role go in the
+    # first message and the final reply is the result (no task tools).
+    inherit_prompt: bool = False
     body: str = ""
     path: Path | None = None
     builtin: bool = False
@@ -174,6 +181,7 @@ BUILTIN_PROFILES: tuple[Profile, ...] = (
         model="cheap",
         max_iterations=20,
         context="fork",
+        inherit_prompt=True,
         body=SKILL_REVIEW_PROMPT,
         builtin=True,
     ),
@@ -210,6 +218,7 @@ def parse_profile_md(text: str, fallback_name: str, path: Path | None = None) ->
         if fields.get("context") in ("brief", "fork")
         else "brief",
         scope_paths=tuple(s.strip().strip("\"'") for s in scope.split(",") if s.strip()),
+        inherit_prompt=fields.get("inherit_prompt", "").lower() in ("true", "yes", "1"),
         body=body.strip(),
         path=path,
     )
@@ -284,6 +293,8 @@ def render_profile_md(profile: Profile) -> str:
         f"isolation: {profile.isolation}",
         f"context: {profile.context}",
     ]
+    if profile.inherit_prompt:
+        lines.append("inherit_prompt: true")
     if profile.scope_paths:
         lines.append("scope_paths: " + ", ".join(profile.scope_paths))
     lines += ["---", profile.body, ""]
