@@ -66,12 +66,26 @@ from limbo.pump import (
 from limbo.sessions import derive_title, export_jsonl, export_markdown, list_sessions
 from limbo.skills import Skill, discover_skills
 from limbo.steer import FOLLOW_UP, STEER
+from limbo.subagents.commands import (
+    agents_command,
+    counts_label,
+    direct_message,
+    task_command,
+)
+from limbo.subagents.events import (
+    BackgroundEvent,
+    MainWake,
+    NoticeEvent,
+    PlanProposed,
+    TaskChanged,
+)
 from limbo.toggles import parse_toggle
 from limbo.tools.bash import BashTool
 from limbo.tracing.command import TracingViewerCommand
 from limbo.ui import recent_models
 from limbo.ui.commands import SlashCommand, SlashCommandRegistry
 from limbo.ui.path_input import attachments_from_text, looks_like_path
+from limbo.ui.screens.agents_panel import AgentsPanel, PlanPicker
 from limbo.ui.screens.btw import BtwScreen
 from limbo.ui.screens.command_palette import CommandPalette, PaletteChoice
 from limbo.ui.screens.game2048 import Game2048Screen
@@ -148,6 +162,9 @@ class MainScreen(Screen[None]):
             session_dir=self.session_dir,
             resume=resume,
             reporters=self._integrations,
+            # Subagents get clients of their own (per-session cache keys);
+            # an injected client (tests) is shared instead.
+            client_factory=None if llm_client is not None else create_llm_client,
         )
         self._slash_menu_open = False
         # M2: the next submission is a verify command being edited (not a
@@ -264,6 +281,11 @@ class MainScreen(Screen[None]):
         self.query_one("#input", InputWidget).focus()
         self.conversation.report_session()
         self._report_state("idle")
+        # Background subagents: their events drive the pill, notice lines
+        # and the idle main agent's wake-ups.
+        self.conversation.subscribe(self._on_background)
+        self.conversation.start_background()
+        self._announce_board()
 
     def _landing(self) -> Landing:
         spec = resolve_model(self.config.llm.model)
@@ -622,6 +644,25 @@ class MainScreen(Screen[None]):
         )
         self._commands.register(
             SlashCommand(
+                "/agents",
+                "子代理面板（任务板、打点、直接控制）· scan 项目画像 · init 生成项目角色",
+                takes_args=True,
+                allow_when_busy=True,
+                handler=lambda arg: self._agents_cmd(arg),
+            )
+        )
+        self._commands.register(
+            SlashCommand(
+                "/task",
+                "控制子任务：/task [id] · /task <pause|resume|cancel|retry|approve|reject> "
+                "<id|all> · @子代理名 <消息> 直接对话",
+                takes_args=True,
+                allow_when_busy=True,
+                handler=lambda arg: self._task_cmd(arg),
+            )
+        )
+        self._commands.register(
+            SlashCommand(
                 "/goal",
                 "闭环目标模式：/goal <目标>（模型自拟验收，确认后自动闭环）· /goal clear",
                 takes_args=True,
@@ -954,6 +995,7 @@ class MainScreen(Screen[None]):
         meta = self.agent.session_meta
         chat.add_info(f"已切换到会话 {meta.id} · {meta.title or '(无标题)'}")
         self._render_restored_queue()
+        self._announce_board()
         self._sync_mode_badges()
         self.query_one("#sidebar", Sidebar).reset_session()
         self._sync_sidebar()
@@ -980,7 +1022,10 @@ class MainScreen(Screen[None]):
             if is_summary_message(msg):
                 chat.add_info("（此前对话已压缩为摘要）")
             elif msg.role == "user" and msg.content:
-                chat.add_user_message(msg.content, msg.attachments)
+                if msg.content.startswith("<subagent_updates"):
+                    chat.add_info("◆ （子代理的进展已交给主 agent）")
+                else:
+                    chat.add_user_message(msg.content, msg.attachments)
             elif msg.role == "assistant":
                 if msg.reasoning:
                     chat.add_thinking_message(msg.reasoning)
@@ -1105,6 +1150,8 @@ class MainScreen(Screen[None]):
 
     def on_user_submitted(self, event: UserSubmitted) -> None:
         text = event.message
+        if text.startswith("@") and not event.force_text and self._direct_message(text):
+            return
         if self._editing_verify:
             # M2 edit mode: the submission is a verify command, not a chat
             # message. A slash command cancels edit mode and runs normally.
@@ -1146,6 +1193,117 @@ class MainScreen(Screen[None]):
             return
         chat.add_user_message(text, attachments)
         self.run_worker(self._handle_turn(text, attachments))
+
+    # -- subagents: /agents, /task, @name and background events --------------
+
+    def _no_subagents(self) -> None:
+        self.query_one("#chat", ChatWidget).add_info(
+            "子代理已关闭（config.toml 的 [subagents] auto = \"off\"）"
+        )
+
+    def _agents_cmd(self, arg: str) -> None:
+        sup = self.conversation.supervisor
+        if sup is None:
+            self._no_subagents()
+            return
+        if arg.strip():
+            self.query_one("#chat", ChatWidget).add_info(agents_command(sup, arg))
+            return
+        self.app.push_screen(
+            AgentsPanel(sup, self.conversation.subscribe), self._on_agents_panel_closed
+        )
+
+    def _on_agents_panel_closed(self, prefill: str | None) -> None:
+        if prefill:
+            input_widget = self.query_one("#input", InputWidget)
+            input_widget.text = prefill
+            input_widget.move_cursor(input_widget.document.end)
+            input_widget.focus()
+        self._sync_agents_pill()
+
+    def _task_cmd(self, arg: str) -> None:
+        sup = self.conversation.supervisor
+        if sup is None:
+            self._no_subagents()
+            return
+        self.query_one("#chat", ChatWidget).add_info(task_command(sup, arg))
+        self._sync_agents_pill()
+
+    def _direct_message(self, text: str) -> bool:
+        """``@name text`` to a subagent; False when it names none."""
+        sup = self.conversation.supervisor
+        if sup is None:
+            return False
+        reply = direct_message(sup, text)
+        if reply is None:
+            return False
+        chat = self.query_one("#chat", ChatWidget)
+        chat.add_user_message(text)
+        chat.add_info(reply)
+        return True
+
+    def _announce_board(self) -> None:
+        """After load/switch: tasks interrupted by the last exit, and the pill."""
+        sup = self.conversation.supervisor
+        if sup is not None and sup.interrupted_on_load:
+            ids = "、".join(sup.interrupted_on_load)
+            hint = (
+                "已自动继续"
+                if sup.settings.on_resume == "auto"
+                else "已暂停；/task resume all 继续，/agents 查看"
+            )
+            self.query_one("#chat", ChatWidget).add_info(
+                f"◆ {len(sup.interrupted_on_load)} 个子任务在上次退出时中断（{ids}），{hint}"
+            )
+        self._sync_agents_pill()
+        self._maybe_wake_main()
+
+    def _sync_agents_pill(self) -> None:
+        sup = self.conversation.supervisor
+        self.query_one("#pills", Pills).set_agents(counts_label(sup) if sup else "")
+
+    def _on_background(self, event: BackgroundEvent) -> None:
+        if not self.is_mounted:
+            return
+        chat = self.query_one("#chat", ChatWidget)
+        if isinstance(event, TaskChanged):
+            self._sync_agents_pill()
+        elif isinstance(event, NoticeEvent):
+            notice = event.notice
+            if notice.headline and notice.task_id:
+                icon = {"result": "✓", "alert": "⚠", "question": "?"}.get(notice.kind, "◆")
+                chat.add_info(f"{icon} {notice.headline}")
+        elif isinstance(event, MainWake):
+            self._maybe_wake_main()
+        elif isinstance(event, PlanProposed):
+            sup = self.conversation.supervisor
+            if sup is not None:
+                self.app.push_screen(
+                    PlanPicker(sup, event.task_ids),
+                    lambda choice, ids=event.task_ids: self._on_plan_picked(ids, choice),
+                )
+
+    def _on_plan_picked(self, task_ids: list[str], choice: str | None) -> None:
+        sup = self.conversation.supervisor
+        chat = self.query_one("#chat", ChatWidget)
+        if sup is None:
+            return
+        if choice is None:
+            chat.add_info("计划待确认：/task approve all 开始，/task reject all 放弃")
+            return
+        results = [sup.control(task_id, choice, by="user") for task_id in task_ids]
+        chat.add_info("\n".join(results))
+        self._sync_agents_pill()
+
+    def _maybe_wake_main(self) -> None:
+        """Run a main-agent turn for subagent notices queued while idle."""
+        if self._agent_busy or self._editing_verify:
+            return
+        text = self.conversation.take_wake_input()
+        if text is None:
+            return
+        self.query_one("#chat", ChatWidget).add_info("◆ 子代理有新进展，交给主 agent 处理")
+        self.run_worker(self._handle_turn(text))
 
     # -- '!' bang commands: run bash directly, never touch the LLM ----------
 
@@ -1357,6 +1515,10 @@ class MainScreen(Screen[None]):
             # M2: a proposal round that ends without leftover steers pops
             # the verify-command confirmation picker.
             self._maybe_confirm_verify_proposal()
+            # Subagent notices that arrived after the turn's last model
+            # call start a turn of their own.
+            self._sync_agents_pill()
+            self.call_later(self._maybe_wake_main)
 
     async def _process_agent_event(self, event: PumpEvent) -> None:
         chat = self.query_one("#chat", ChatWidget)

@@ -12,6 +12,10 @@ hand, twice:
 - **lifecycle reporting** — :meth:`drive` pumps one run's events into a
   frontend callback while reporting ``working`` and the run's outcome
   (``done``/``error``/``idle``) to the integrations;
+- **the subagent supervisor** — one per main agent (``[subagents]``):
+  the task board, background subagents, notices; frontends subscribe to
+  its :class:`~limbo.subagents.events.BackgroundEvent` stream and start a
+  main turn on :class:`~limbo.subagents.events.MainWake`;
 - **the /goal verify-proposal flow** — after a proposal round,
   :meth:`take_verify_proposal` parses the model's ``<verify_proposal>``
   and the conversation stays in the awaiting state until the frontend
@@ -44,6 +48,8 @@ from limbo.goal import (
 from limbo.integrations.base import CompositeReporter, IntegrationReporter, TurnOutcome
 from limbo.llm.client import LLMClient
 from limbo.pump import PumpEvent, TurnPump
+from limbo.subagents.events import BackgroundEvent
+from limbo.subagents.supervisor import ClientFactory, Supervisor
 
 
 @dataclass(frozen=True)
@@ -73,6 +79,7 @@ class Conversation:
         session_dir: Path | None = None,
         resume: Path | None = None,
         reporters: IntegrationReporter | None = None,
+        client_factory: ClientFactory | None = None,
     ) -> None:
         self.config = config
         self.workdir = workdir
@@ -80,8 +87,13 @@ class Conversation:
         self.llm_client = llm_client
         self._session_dir = session_dir
         self._reporters: IntegrationReporter = reporters or CompositeReporter()
+        # Subagents get a client of their own from this factory (None:
+        # they share the main client — tests and fakes).
+        self._client_factory = client_factory
+        self._listeners: list[Callable[[BackgroundEvent], None]] = []
         self._agent = self._build_agent(resume)
         self._pump = self._build_pump(self._agent)
+        self._supervisor = self._build_supervisor(self._agent)
         # /goal proposal flow: a proposal round is in flight or just ended
         # (parse its output at the next quiet boundary) → the proposals are
         # out and the next answer decides the gate.
@@ -121,6 +133,54 @@ class Conversation:
             after_failed_run=self.config.queue.after_failed_run,
         )
 
+    # -- subagents -----------------------------------------------------------
+
+    @property
+    def supervisor(self) -> Supervisor | None:
+        """The task board's supervisor (None when ``[subagents]`` is off)."""
+        return self._supervisor
+
+    def _build_supervisor(self, agent: Agent) -> Supervisor | None:
+        if not self.config.subagents.enabled:
+            return None
+        supervisor = Supervisor(
+            main_agent=agent,
+            config=self.config,
+            workdir=self.workdir,
+            llm_client=self.llm_client,
+            client_factory=self._client_factory,
+            emit=self._emit_background,
+            is_main_busy=lambda: self._pump.running,
+        )
+        self._pump.before_run = supervisor.flush_notices
+        return supervisor
+
+    def subscribe(
+        self, listener: Callable[[BackgroundEvent], None]
+    ) -> Callable[[], None]:
+        """Receive background events (on the event loop); returns unsubscribe."""
+        self._listeners.append(listener)
+        return lambda: self._listeners.remove(listener)
+
+    def _emit_background(self, event: BackgroundEvent) -> None:
+        for listener in list(self._listeners):
+            listener(event)
+
+    def start_background(self) -> None:
+        """Start scheduling subagents (frontends call it once the loop runs)."""
+        if self._supervisor is not None:
+            self._supervisor.start()
+
+    def take_wake_input(self) -> str | None:
+        """The notices queued for the idle main agent, as one turn input.
+
+        None when there is nothing to deliver or a run already owns the
+        agent (its loop-top drain picks them up instead).
+        """
+        if self._supervisor is None or self.busy:
+            return None
+        return self._supervisor.take_wake_input()
+
     # -- session switching ----------------------------------------------------
 
     def new(self) -> None:
@@ -153,11 +213,18 @@ class Conversation:
         return parent, prompt
 
     def _replace(self, agent: Agent) -> None:
+        # The old session's subagents stop at their next consistency point
+        # and stay "running" on disk: going back to that session resumes
+        # them per [subagents] on_resume.
+        if self._supervisor is not None:
+            self._supervisor.stop()
         self._agent.close()  # release the old session's trace file handle
         self._agent = agent
         # The pump wraps the agent: a new agent always needs a new pump, or
         # it would keep pumping the old history.
         self._pump = self._build_pump(agent)
+        self._supervisor = self._build_supervisor(agent)
+        self.start_background()
         self._proposal_round = False
         self._proposals = None
         self.report_session()
@@ -168,6 +235,8 @@ class Conversation:
         )
 
     def close(self) -> None:
+        if self._supervisor is not None:
+            self._supervisor.stop()
         self._agent.close()
 
     # -- driving runs ---------------------------------------------------------

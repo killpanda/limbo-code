@@ -234,6 +234,38 @@ class QueueSettings(BaseModel):
     after_failed_run: Literal["continue", "keep", "withdraw"] = "continue"
 
 
+class SubagentSettings(BaseModel):
+    """[subagents] section: background subagents and the task board."""
+
+    # false: no supervisor at all (no board, no /agents, no task tools).
+    enabled: bool = True
+    # off: no task tools for the model (the board stays readable); suggest:
+    # the model's plan waits for the user's approval; on: it runs at once.
+    auto: Literal["off", "suggest", "on"] = "suggest"
+    max_parallel: int = 3
+    # Live (unfinished) tasks at a time. Subagents never plan themselves
+    # (depth 1): they can only propose_task, which the main agent approves.
+    max_tasks: int = 12
+    # Per-task token budget (0 = unlimited); a task over budget fails.
+    task_token_budget: int = 400_000
+    # Model for profiles with ``model: cheap`` (empty = the main model).
+    cheap_model: str = ""
+    # Which notices wake an idle main agent: question, alert, wave_done
+    # (results are batched until no subagent is running), result (each).
+    wake_main_on: list[str] = Field(
+        default_factory=lambda: ["question", "alert", "wave_done"]
+    )
+    on_dep_fail: Literal["notify", "cascade"] = "notify"
+    # Tasks that were running when the process stopped: ask (paused, the
+    # user resumes with /task resume all), auto (resume), pause (paused).
+    on_resume: Literal["ask", "auto", "pause"] = "ask"
+    default_isolation: Literal["shared", "worktree"] = "shared"
+    # Characters of a finished task's summary delivered to the main agent.
+    result_chars: int = 2000
+    # Auto checkpoint every N tool calls of a subagent (0 = off).
+    auto_checkpoint_every: int = 8
+
+
 class Config(BaseModel):
     llm: LLMConfig = Field(default_factory=LLMConfig)
     ui: UIConfig = Field(default_factory=UIConfig)
@@ -241,6 +273,7 @@ class Config(BaseModel):
     compaction: CompactionSettings = Field(default_factory=CompactionSettings)
     goal: GoalSettings = Field(default_factory=GoalSettings)
     queue: QueueSettings = Field(default_factory=QueueSettings)
+    subagents: SubagentSettings = Field(default_factory=SubagentSettings)
     # [providers.<id>] per-provider overrides, keyed by catalog provider id
     # (e.g. [providers.glm], [providers.codex]).
     providers: dict[str, ProviderOverride] = Field(default_factory=dict)

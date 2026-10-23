@@ -35,6 +35,10 @@ class SteerItem:
     text: str
     attachments: list[Attachment] = field(default_factory=list)
     mode: SteerMode = STEER
+    # "user", or "subagent" for a notice delivered to the main agent; refs
+    # are the notice ids it carries (dedupe across a crash).
+    source: str = "user"
+    refs: tuple[str, ...] = ()
 
 
 class SteerQueue:
@@ -60,6 +64,9 @@ class SteerQueue:
         text: str,
         attachments: list[Attachment] | None = None,
         mode: SteerMode = STEER,
+        *,
+        source: str = "user",
+        refs: tuple[str, ...] = (),
     ) -> SteerItem:
         """Queue a message; returns the item (the UI binds its card to the id)."""
         item = SteerItem(
@@ -67,6 +74,8 @@ class SteerQueue:
             text=text,
             attachments=attachments or [],
             mode=mode,
+            source=source,
+            refs=tuple(refs),
         )
         self._items.append(item)
         return item

@@ -18,7 +18,11 @@ rules that keep the journal recoverable after a crash at any point:
   record goes after the message carrying the item (at-least-once: a crash
   between the two re-queues a message, never loses one);
 - **meta** — a title change rewrites the meta line (listing reads only
-  that line), any other change appends a ``meta_patch``.
+  that line), any other change appends a ``meta_patch``;
+- **task board** — subagent ``task`` records append immediately (like
+  ``queued``); a rewrite drops their history, so the board is re-journaled
+  as one ``snapshot`` record right after it (and on the first checkpoint
+  when records arrived before the file existed).
 
 The agent owns the state (messages, meta, queue) and calls the domain
 verbs below; it never builds a record or tracks what is on disk. All
@@ -31,7 +35,7 @@ from __future__ import annotations
 
 import json
 import threading
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -97,6 +101,11 @@ class SessionJournal:
         self._pending_summarized: list[Message] = []
         # Queue items that left the queue since the last checkpoint.
         self._pending_dequeued: list[str] = []
+        # Subagent task board: the whole board as one record (set by the
+        # supervisor); written after a rewrite and when task events
+        # arrived before there was a file to append them to.
+        self.task_snapshot: Callable[[], dict[str, Any] | None] | None = None
+        self._task_snapshot_pending = False
 
     # -- state ----------------------------------------------------------------
 
@@ -145,6 +154,23 @@ class SessionJournal:
         """Items left the queue; journaled after the next checkpoint's messages."""
         with self.lock:
             self._pending_dequeued.extend(ids)
+
+    def task_event(self, record: dict[str, Any]) -> None:
+        """Journal one task board record now.
+
+        Without a file (or with a rewrite pending) the next checkpoint
+        writes the whole board as a snapshot instead. A failed append
+        raises after scheduling that rewrite.
+        """
+        with self.lock:
+            if not self.path.exists() or self._rewrite_needed:
+                self._task_snapshot_pending = True
+                return
+            try:
+                append_session_records(self.path, [record])
+            except OSError:
+                self._rewrite_needed = True
+                raise
 
     def record_intents(self, calls: Sequence[tuple[str, str, str]]) -> None:
         """Journal ``(call_id, name, replay)`` calls before they run.
@@ -260,9 +286,12 @@ class SessionJournal:
         # queued (everything else has left the queue).
         self._pending_dequeued.clear()
         queued = [_queued(item) for item in queue]
-        if queued:
+        board = self.task_snapshot() if self.task_snapshot is not None else None
+        records = [*queued, *([board] if board else [])]
+        self._task_snapshot_pending = False
+        if records:
             try:
-                append_session_records(self.path, queued)
+                append_session_records(self.path, records)
             except OSError:
                 self._rewrite_needed = True
                 raise
@@ -299,3 +328,8 @@ class SessionJournal:
                 [{"type": QUEUE_TYPE, "op": "dequeued", "ids": self._pending_dequeued}],
             )
             self._pending_dequeued = []
+        if self._task_snapshot_pending and self.task_snapshot is not None:
+            board = self.task_snapshot()
+            if board:
+                append_session_records(self.path, [board])
+            self._task_snapshot_pending = False

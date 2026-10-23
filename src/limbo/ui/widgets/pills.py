@@ -1,4 +1,5 @@
-"""Status pills above the input (Limbo Dusk): queued messages and /goal.
+"""Status pills above the input (Limbo Dusk): queued messages, /goal and
+background subagents.
 
 Hidden when there is nothing to show. Each pill is a short bordered-looking
 chip rendered as text: ``▸ 队列 2`` / ``◐ 目标 · 第 3/10 轮``.
@@ -18,6 +19,7 @@ class Pills(Static):
         super().__init__(*args, markup=False, **kwargs)
         self._queued = 0
         self._goal: tuple[int, int] | None = None
+        self._agents = ""
 
     def on_mount(self) -> None:
         self.app.theme_changed_signal.subscribe(self, lambda _theme: self._render_pills())
@@ -31,6 +33,12 @@ class Pills(Static):
     def set_goal(self, progress: tuple[int, int] | None) -> None:
         if progress != self._goal:
             self._goal = progress
+            self._render_pills()
+
+    def set_agents(self, label: str) -> None:
+        """``2 运行中 · 1 等待`` while subagents have live tasks; "" hides."""
+        if label != self._agents:
+            self._agents = label
             self._render_pills()
 
     @property
@@ -56,6 +64,8 @@ class Pills(Static):
             chip("◐", str(theme.warning), "目标", f"{done}/{total}")
         if self._queued:
             chip("▸", str(theme.primary), "排队", str(self._queued))
+        if self._agents:
+            chip("◆", str(theme.secondary or theme.primary), "子代理", self._agents)
         return text
 
     def _render_pills(self) -> None:

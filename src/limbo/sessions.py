@@ -36,6 +36,10 @@ META_PATCH_TYPE = "meta_patch"
 # Queued user messages (steer / follow-up inbox): "queued" when offered,
 # "dequeued" once injected into history or cancelled.
 QUEUE_TYPE = "queue"
+# Subagent task board events (limbo.subagents.board): folded into the
+# board by the supervisor; a "snapshot" op restarts the fold after a
+# full rewrite dropped the event history.
+TASK_TYPE = "task"
 
 
 class SessionNotFoundError(Exception):
@@ -92,6 +96,10 @@ class SessionMeta(BaseModel):
     # starts a fresh context from a note).
     parent_session: str | None = None
     fork_at: str | None = None
+    # Subagent sessions: "subagent" plus the task it executes. They live in
+    # ``<parent id>.agents/`` beside the parent, so listing never sees them.
+    role: str = "main"
+    task_id: str | None = None
     # Populated by list/load; not written to disk.
     path: Path | None = None
 
@@ -137,6 +145,11 @@ class QueuedMessageRecord(BaseModel):
     text: str
     attachments: list[Attachment] = []
     mode: str = "steer"  # "steer" | "follow_up"
+    # "user" or "subagent" (a notice delivered to the main agent); refs
+    # are the notice ids it carries, so a crash between queueing a notice
+    # and marking it reported never delivers it twice.
+    source: str = "user"
+    refs: list[str] = []
 
 
 @dataclass
@@ -149,6 +162,8 @@ class LoadedSession:
     intents: list[ToolIntentRecord] = field(default_factory=list)
     # Messages still queued when the file was last written, in FIFO order.
     queue: list[QueuedMessageRecord] = field(default_factory=list)
+    # Raw task board records, in file order (folded by the supervisor).
+    tasks: list[dict[str, Any]] = field(default_factory=list)
 
 
 def _utc_now_iso() -> str:
@@ -393,6 +408,7 @@ def load_session_full(path: Path) -> LoadedSession:
     compactions: list[CompactionRecord] = []
     intents: list[ToolIntentRecord] = []
     queued: dict[str, QueuedMessageRecord] = {}
+    tasks: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
@@ -438,6 +454,10 @@ def load_session_full(path: Path) -> LoadedSession:
                 elif data.get("op") == "dequeued":
                     for item_id in data.get("ids") or []:
                         queued.pop(item_id, None)
+            elif kind == TASK_TYPE:
+                if data.get("op") == "snapshot":
+                    tasks.clear()
+                tasks.append(record)
             elif kind == TOOL_INTENT_TYPE:
                 try:
                     intents.append(ToolIntentRecord(**data))
@@ -459,6 +479,7 @@ def load_session_full(path: Path) -> LoadedSession:
         compactions=compactions,
         intents=intents,
         queue=list(queued.values()),
+        tasks=tasks,
     )
 
 

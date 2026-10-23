@@ -9,7 +9,7 @@ import secrets
 import time
 import traceback
 import warnings
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -65,6 +65,8 @@ from limbo.sessions import (
     save_session,
 )
 from limbo.steer import FOLLOW_UP, STEER, SteerItem, SteerMode, SteerQueue
+from limbo.tools.base import BaseTool
+from limbo.tools.hooks import ToolHook
 from limbo.tools.registry import Admitted, ToolRegistry
 from limbo.trace import TRACE_SCHEMA, TraceLogger, trace_path_for, utc_now_iso
 
@@ -214,6 +216,9 @@ class Agent:
         workdir: Path,
         session_dir: Path | None = None,
         resume: Path | None = None,
+        *,
+        session_file: Path | None = None,
+        meta_fields: dict[str, Any] | None = None,
     ):
         self.config = config
         self.llm_client = llm_client
@@ -233,6 +238,11 @@ class Agent:
         self._iteration_count = 0
         self._last_finish_reason: str | None = None
         self._consecutive_length_stops = 0
+        # A tool asked to end the turn after its batch (subagent tools).
+        self._end_turn_requested = False
+        # Extra system-prompt section and tools installed after
+        # construction (subagent orchestration, see install()).
+        self._prompt_extra = ""
         self._init_system_message()
 
         # Auto-compaction state (LIM-14). The estimator holds the real
@@ -258,6 +268,9 @@ class Agent:
         # Read-only tool calls interrupted by a crash, re-run at the start
         # of the next turn (their placeholder result is then replaced).
         self._pending_reruns: list[dict[str, Any]] = []
+        # Raw task board records of the loaded session (the subagent
+        # supervisor folds them into its board).
+        self.loaded_task_records: list[dict[str, Any]] = []
         if resume is not None:
             loaded = load_session_full(resume)
             self._meta, history, self._compactions = (
@@ -278,6 +291,7 @@ class Agent:
             )
             self.messages.extend(recovery.messages)
             self._pending_reruns = recovery.rerun
+            self.loaded_task_records = loaded.tasks
             if loaded.queue:
                 # Messages still queued when the process died (pi-durable's
                 # persisted inbox): back into the queue, already journaled.
@@ -288,6 +302,8 @@ class Agent:
                             text=q.text,
                             attachments=q.attachments,
                             mode=FOLLOW_UP if q.mode == FOLLOW_UP else STEER,
+                            source=q.source,
+                            refs=tuple(q.refs),
                         )
                         for q in loaded.queue
                     ]
@@ -319,7 +335,7 @@ class Agent:
                 None,
             )
         else:
-            self._session_file = self._new_session_file()
+            self._session_file = session_file or self._new_session_file()
             self._journal = SessionJournal(self._session_file)
             self._meta = SessionMeta(
                 id=self._session_file.stem,
@@ -327,6 +343,7 @@ class Agent:
                 model=config.llm.model,
                 created_at=datetime.now(timezone.utc).isoformat(timespec="seconds"),
                 tool_intents=True,
+                **(meta_fields or {}),
             )
 
         # Trace log: full-fidelity JSONL record of the run, kept separate from
@@ -577,8 +594,42 @@ class Agent:
         """Estimated prompt size of the next request (the UI context meter)."""
         return self._estimated_next_prompt_tokens()
 
+    def install(
+        self,
+        *,
+        tools: Sequence[BaseTool] = (),
+        hooks: Sequence[ToolHook] = (),
+        remove_tools: Sequence[str] = (),
+        prompt_section: str = "",
+    ) -> None:
+        """Extend this agent after construction (subagent orchestration).
+
+        Registers tool instances and hooks, removes tools a profile does
+        not grant, and appends ``prompt_section`` to the system prompt,
+        which is rebuilt in place (resume regenerates it anyway).
+        """
+        for name in remove_tools:
+            self.registry.unregister(name)
+        for tool in tools:
+            self.registry.add(tool)
+        self.registry.hooks.extend(hooks)
+        if prompt_section:
+            self._prompt_extra = prompt_section
+        self._init_system_message()
+
+    @property
+    def journal(self) -> SessionJournal:
+        return self._journal
+
+    @property
+    def ended_by_tool(self) -> bool:
+        """The last turn ended because a tool asked for it (``end_turn``)."""
+        return self._end_turn_requested
+
     def _init_system_message(self) -> None:
         prompt = build_system_prompt(self.registry, self.workdir)
+        if self._prompt_extra:
+            prompt += "\n\n" + self._prompt_extra
         if self.messages and self.messages[0].role == "system":
             # Code Mode toggles rebuild the system prompt in place (the
             # SDK section changes with the presentation).
@@ -645,6 +696,9 @@ class Agent:
         text: str,
         attachments: list[Attachment] | None = None,
         mode: SteerMode = STEER,
+        *,
+        source: str = "user",
+        refs: tuple[str, ...] = (),
     ) -> str:
         """Queue a user message for the running task.
 
@@ -655,7 +709,9 @@ class Agent:
         binds its queued card to it).
         """
         with self._journal.lock:
-            item = self._steer_queue.offer(text, attachments, mode)
+            item = self._steer_queue.offer(
+                text, attachments, mode, source=source, refs=refs
+            )
             try:
                 self._journal.queued(_queue_record(item))
             except OSError as e:
@@ -850,6 +906,7 @@ class Agent:
         self._checkpoint_failed_this_turn = False
         self._overflow_recovered_this_turn = False
         self._last_run_failed = False
+        self._end_turn_requested = False
         # RFC LIM-53: an interrupt requested while idle must not leak into
         # this turn (one of the two reset points; compact() is the other).
         self._interrupt_requested = False
@@ -1212,6 +1269,11 @@ class Agent:
                 # RFC LIM-53: batch results (real or placeholder) are all
                 # recorded; end the turn instead of starting another call.
                 break
+            if self._end_turn_requested:
+                # A tool (subagent need/ask_main/finish) ended the turn:
+                # its result is recorded, no further LLM call.
+                self.trace.log("turn_ended_by_tool", turn=self._turn_count)
+                break
 
     async def _execute_tool_calls(self, assistant: Message) -> AsyncIterator[AgentEvent]:
         """Execute one batch of tool calls.
@@ -1297,6 +1359,8 @@ class Agent:
                 )
 
         # Record results in assistant source order after the batch completes.
+        if any(r.end_turn for r in results.values()):
+            self._end_turn_requested = True
         for tc in tool_calls:
             result = results[tc["id"]]
             content, attachments = self._gate_tool_attachments(result)
@@ -1872,5 +1936,10 @@ class Agent:
 
 def _queue_record(item: SteerItem) -> QueuedMessageRecord:
     return QueuedMessageRecord(
-        id=item.id, text=item.text, attachments=item.attachments, mode=item.mode
+        id=item.id,
+        text=item.text,
+        attachments=item.attachments,
+        mode=item.mode,
+        source=item.source,
+        refs=list(item.refs),
     )

@@ -46,6 +46,11 @@ you can branch, hand off, or replay any session.
   confirm it, and Limbo iterates until it passes.
 - **Steer while it works.** Type while a turn is running to redirect it;
   `Alt+Enter` queues a follow-up for after the task; `Esc` interrupts.
+- **Background subagents.** The agent can split work into tasks that run in
+  parallel with their own context: they checkpoint, wait on each other when
+  they discover a dependency, and report back. You approve the plan, watch
+  the board in `/agents`, and pause, cancel or talk to any of them with
+  `/task` or `@name`, or just ask the main agent.
 - **Side channels.** `/btw <question>` asks something quick without polluting
   the history; `!<command>` runs a shell command yourself, never sent to the
   model.
@@ -141,6 +146,7 @@ Then just describe the task: *"find why the login test is flaky and fix it"*.
 | `/goal <task>` | iterate until a confirmed verify command passes |
 | `/code-mode [on\|off]` | one `run_code` tool: a Python program, many tool calls |
 | `/btw <question>` | side question that stays out of history |
+| `/agents` `/task` `@name` | background subagents: the task board, direct control, talk to one |
 | `/compact` | compact the conversation now |
 | `/sessions` `/new` | switch to a past session, or start fresh |
 | `/fork [n]` | branch into a new session (optionally keep only the first n turns) |
@@ -228,4 +234,6 @@ drift from what ships.
 - [`docs/session-management.md`](docs/session-management.md): sessions,
   recovery, fork and handoff, tracing viewer
 - [`docs/skills.md`](docs/skills.md): writing skills
+- [`docs/subagents.md`](docs/subagents.md): background subagents, the task
+  board and how to steer them
 - [`design/`](design/): RFCs for headless mode, bang commands, and the UI

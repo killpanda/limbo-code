@@ -78,6 +78,10 @@ class ToolResult(BaseModel):
     output: str | None = None
     error: str | None = None
     attachments: list[Attachment] | None = None
+    # Ask the agent loop to end the turn once this batch is recorded
+    # (subagent ``need``/``ask_main``/``finish``): the model gets no
+    # further LLM call in this turn. Never persisted.
+    end_turn: bool = False
 
 
 @dataclass(frozen=True)
