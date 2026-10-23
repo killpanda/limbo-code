@@ -138,23 +138,33 @@ class KittyKeyboardMode(str, Enum):
     terminal (e.g. Ghostty), and Ghostty then encodes IME commits as the
     physical commit key (space) while dropping the composed text — typing
     Chinese turns into spaces (pasting is unaffected, it bypasses the key
-    encoder). Disabling the protocol makes herdr negotiate IME-compatible host
-    flags so committed IME text arrives as raw UTF-8.
+    encoder).
+
+    Turning the protocol off entirely is not an option either: herdr then
+    encodes Shift+Enter for the pane as a bare ``\r`` (indistinguishable from
+    Enter), so the input box can no longer insert a newline. Requesting only
+    ``DISAMBIGUATE_ESCAPE_CODES`` is the middle ground: herdr leaves the host
+    flags alone (IME text still arrives as raw UTF-8) and forwards Shift+Enter
+    as ``ESC [ 13 ; 2 u``.
     """
 
-    # Disable only inside the herdr multiplexer (detected via HERDR_ENV);
-    # keep the protocol everywhere else. Safe default for CJK users.
+    # Inside the herdr multiplexer (detected via HERDR_ENV) request only the
+    # disambiguate flag; the full Textual request everywhere else. Safe
+    # default for CJK users.
     AUTO = "auto"
-    # Always request the kitty keyboard protocol (Textual's default behavior).
+    # Always request the full kitty keyboard protocol (Textual's default).
     ENABLED = "enabled"
-    # Never request it — forces raw/legacy terminal input everywhere.
+    # Never request it — forces raw/legacy terminal input everywhere
+    # (Shift+Enter is then indistinguishable from Enter inside herdr).
     DISABLED = "disabled"
 
-    def disable_textual_kitty_key(self, *, in_herdr: bool) -> bool:
+    def disable_textual_kitty_key(self) -> bool:
         """Whether Textual's kitty keyboard protocol should be disabled."""
-        return self is KittyKeyboardMode.DISABLED or (
-            self is KittyKeyboardMode.AUTO and in_herdr
-        )
+        return self is KittyKeyboardMode.DISABLED
+
+    def disambiguate_only(self, *, in_herdr: bool) -> bool:
+        """Whether to request only the kitty disambiguate flag."""
+        return self is KittyKeyboardMode.AUTO and in_herdr
 
 
 class UIConfig(BaseModel):
@@ -169,8 +179,9 @@ class UIConfig(BaseModel):
     # full, or reduced inside an SSH session. LIMBO_MOTION overrides it.
     motion: str | None = None
     # Kitty keyboard protocol handling (see KittyKeyboardMode):
-    #   auto     - enable normally, except inside the herdr multiplexer where
-    #              it breaks IME/Chinese input (default)
+    #   auto     - enable normally; inside the herdr multiplexer request only
+    #              the disambiguate flag, the full set breaks IME/Chinese
+    #              input there (default)
     #   enabled  - always request the kitty keyboard protocol
     #   disabled - never request it (forces raw/legacy terminal input)
     kitty_keyboard: KittyKeyboardMode = KittyKeyboardMode.AUTO
