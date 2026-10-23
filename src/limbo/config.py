@@ -227,8 +227,6 @@ class DailySettings(BaseModel):
     memory: bool = True
     user_chars: int = 1500
     notes_chars: int = 2500
-    # USER.md (who the user is) also rides in coding sessions' prompts.
-    inject_user_in_coding: bool = True
     # web_fetch: characters per page chunk, request timeout.
     fetch_max_chars: int = 20_000
     fetch_timeout: float = 30.0

@@ -54,16 +54,16 @@ class MemorySnapshot:
     user: tuple[str, ...] = ()
     notes: tuple[str, ...] = ()
 
-    def render(self, *, include_user: bool, include_notes: bool) -> str | None:
+    def render(self) -> str | None:
         """The ``<memory>`` prompt block, or None when there is nothing to show."""
         sections = []
-        if include_user and self.user:
+        if self.user:
             sections.append(
                 "<user_profile>\n"
                 + "\n".join(f"- {_xml_escape(e)}" for e in self.user)
                 + "\n</user_profile>"
             )
-        if include_notes and self.notes:
+        if self.notes:
             sections.append(
                 "<agent_notes>\n"
                 + "\n".join(f"- {_xml_escape(e)}" for e in self.notes)

@@ -21,10 +21,12 @@ limbo daily --continue   # 接上一个 daily 会话
 
 两个纯文本文件，可以直接打开编辑，条目之间用单独一行 `§` 分隔：
 
-| 文件 | 内容 | 注入 |
-|---|---|---|
-| `~/.limbo/memory/USER.md` | 你是谁：身份、偏好、风格 | 所有会话（`inject_user_in_coding = false` 可关掉 coding 里的注入） |
-| `~/.limbo/memory/NOTES.md` | agent 的笔记：稳定事实、约定、你纠正过的事 | 仅 daily |
+| 文件 | 内容 |
+|---|---|
+| `~/.limbo/memory/USER.md` | 你是谁：身份、偏好、风格 |
+| `~/.limbo/memory/NOTES.md` | agent 的笔记：稳定事实、约定、你纠正过的事 |
+
+记忆只进 daily 会话的提示词，coding 会话完全读不到。
 
 - 模型用 `memory` 工具写入（add / patch / remove，一次调用可批量、原子执行），超过字符上限时整批拒绝。
 - 写入立刻落盘（上一版留在 `*.bak`），但本会话的提示词不变，从下一个会话起生效。
@@ -53,7 +55,6 @@ model = ""                    # 留空沿用 [llm] model；只对 limbo daily �
 memory = true
 user_chars = 1500
 notes_chars = 2500
-inject_user_in_coding = true
 fetch_max_chars = 20000
 fetch_timeout = 30.0
 ```

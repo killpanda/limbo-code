@@ -115,29 +115,19 @@ def test_prompt_follows_mode_and_memory_snapshot_is_frozen(tmp_path):
     agent = _agent(tmp_path)
     coding = agent.messages[0].content or ""
     assert "coding assistant" in coding
-    assert "Name: Jack" in coding  # USER.md rides in coding sessions too
-    assert "~/notes" not in coding  # NOTES.md only in daily mode
+    # Coding sessions never see memory.
+    assert "Name: Jack" not in coding and "~/notes" not in coding
 
     assert agent.set_daily_mode(True)
     daily = agent.messages[0].content or ""
-    assert "personal assistant" in daily and "~/notes" in daily
+    assert "personal assistant" in daily
+    assert "Name: Jack" in daily and "~/notes" in daily
     # A write mid-session never changes this session's prompt.
     store.apply("user", [{"action": "add", "content": "Likes tea"}])
     agent.set_daily_mode(False)
     agent.set_daily_mode(True)
     assert "Likes tea" not in (agent.messages[0].content or "")
     assert not agent.set_daily_mode(True)
-
-
-def test_user_profile_can_be_kept_out_of_coding_sessions(tmp_path):
-    MemoryStore(memory_module.memory_dir(), {"user": 500}).apply(
-        "user", [{"action": "add", "content": "Name: Jack"}]
-    )
-    config = Config()
-    config.daily.inject_user_in_coding = False
-    agent = Agent(config=config, llm_client=FakeLLMClient(), workdir=tmp_path,
-                  session_dir=tmp_path / "sessions")
-    assert "Name: Jack" not in (agent.messages[0].content or "")
 
 
 @pytest.mark.asyncio

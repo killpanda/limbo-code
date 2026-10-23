@@ -110,7 +110,7 @@ Providers/models live in `llm/catalog.py`; unknown models get generic OpenAI-com
 [subagents]  # enabled, auto = "off"|"suggest"|"on", max_parallel = 3, max_tasks = 12,
              # task_token_budget, cheap_model, wake_main_on, on_dep_fail, on_resume
 [daily]      # workdir = "~/limbo-daily", model, memory, user_chars, notes_chars,
-             # inject_user_in_coding, fetch_max_chars, fetch_timeout
+             # fetch_max_chars, fetch_timeout
 [ui]         # theme, show_banner
 [providers.<id>]  # base_url / api_key / api_key_env / headers
 ```
@@ -127,7 +127,7 @@ Single column: status bar (state/elapsed/tokens/model/workdir/queued + rainbow �
 
 Subagents (`subagents/`, docs/subagents.md): the main agent's `plan_tasks` creates tasks on the board (suggest mode: `PlanPicker` asks the user first); the `Supervisor` runs each as a child `Agent` with its own session file, gated by profile hooks. Child tools that end the turn (`need`, `ask_main`, `finish`) return `ToolResult(end_turn=True)`. Notices reach the main agent as one `source="subagent"` steer item; an idle main agent is woken through `MainWake` → `Conversation.take_wake_input()`. Board records live in the main session file (`type: "task"`), so the board survives restarts; tasks running at exit come back paused (`on_resume`).
 
-Daily mode (`limbo daily` / `--daily` / `/daily-mode on|off`, docs/daily-mode.md): a session posture like Code Mode — same loop, a general-assistant system prompt, plus `web_fetch` and `memory` tools; persisted as `SessionMeta.daily_mode`, `/new` keeps the current mode. Memory is a snapshot taken when the Agent is built: `USER.md` rides in every session's prompt (`[daily] inject_user_in_coding`), `NOTES.md` only in daily mode; `memory` tool writes reach disk at once but the prompt changes only next session (prefix cache stays intact).
+Daily mode (`limbo daily` / `--daily` / `/daily-mode on|off`, docs/daily-mode.md): a session posture like Code Mode — same loop, a general-assistant system prompt, plus `web_fetch` and `memory` tools; persisted as `SessionMeta.daily_mode`, `/new` keeps the current mode. Memory is a snapshot taken when the Agent is built: `USER.md` and `NOTES.md` enter daily-mode prompts only (coding sessions never see memory); `memory` tool writes reach disk at once but the prompt changes only next session (prefix cache stays intact).
 
 ## Key Decisions
 

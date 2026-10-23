@@ -119,8 +119,8 @@ def build_system_prompt(
     so the prompt always matches the tools the model can actually call.
     The skills catalog is included only when the read tool is available
     (the model loads SKILL.md files with read on demand). ``memory`` is the
-    session's frozen memory snapshot: daily mode shows all of it, coding
-    mode only the user profile (when ``[daily] inject_user_in_coding``).
+    session's frozen memory snapshot, shown only in daily mode (coding
+    sessions never see memory).
     """
     parts = [
         _DAILY_INTRO if registry.daily_mode else _BASE_INTRO,
@@ -137,11 +137,8 @@ def build_system_prompt(
         )
     if registry.plan_mode:
         parts.append(f"\n\n{PLAN_MODE_INSTRUCTION}")
-    if memory is not None:
-        block = memory.render(
-            include_user=registry.daily_mode or registry.config.daily.inject_user_in_coding,
-            include_notes=registry.daily_mode,
-        )
+    if memory is not None and registry.daily_mode:
+        block = memory.render()
         if block is not None:
             parts.append(block)
     context = _context_block(workdir, home or Path.home())
