@@ -1,6 +1,29 @@
 # Limbo
 
-A minimal terminal AI coding agent.
+A minimal terminal AI coding agent. Chat with an LLM in the terminal and it
+explores, reads, edits, and runs your code — streaming its reasoning and every
+tool call as it goes.
+
+![Limbo](docs/assets/limbo-hero.png)
+
+## Why
+
+- **Small surface.** Seven tools — `read` `write` `edit` `bash` `grep` `find`
+  `ls` — plus a clean agent loop. Nothing to configure before the first useful
+  answer.
+- **Any model.** A provider catalog covers DeepSeek, Kimi, GLM, and OpenAI
+  Codex across three wire formats (OpenAI completions, Anthropic messages,
+  OpenAI responses). Unknown models fall back to generic OpenAI-compatible
+  defaults.
+- **Fast turns.** Tool calls issued together run concurrently (same-file
+  mutations are serialized), and **Code Mode** collapses the tool catalog to a
+  single `run_code`: the model writes one Python program against a generated
+  SDK, turning several round trips into one.
+- **Work that survives.** Sessions are JSONL files you can resume, branch,
+  hand off, or export; compaction keeps long runs alive without dropping the
+  record.
+- **No black boxes.** Full-fidelity traces of every request, tool call, and
+  token count, browsable in a local viewer (`/tracing-viewer`).
 
 ## Install
 
@@ -8,300 +31,95 @@ Requires Python 3.11 or later.
 
 ```bash
 pip install limbo-code
+limbo auth login          # store a provider key in ~/.limbo/auth.json
+limbo --workdir ~/code/my-project
 ```
 
-## Configure
-
-Create `~/.limbo/config.toml`:
+Prefer a config file? `~/.limbo/config.toml`:
 
 ```toml
 [llm]
-api_key = "your-api-key"
-model = "deepseek-v4-pro"
+api_key = "sk-..."                    # or just export DEEPSEEK_API_KEY
+model = "deepseek-v4-pro"             # endpoint + key env resolve from the catalog
 base_url = "https://api.deepseek.com/v1"
 ```
 
-Limbo speaks to LLMs through a **provider/model catalog**
-(`src/limbo/llm/catalog.py`). Each provider declares its API dialect,
-endpoint, and credential env var; each model carries its own context window,
-max output tokens, and thinking/reasoning behavior. A client factory
-(`src/limbo/llm/factory.py`) picks the client implementation from the
-provider's API dialect, so non-OpenAI dialects can be added without touching
-call sites. Models not in the catalog fall back to generic
-OpenAI-compatible defaults driven by `base_url` + `model` + `api_key`.
+## Built-in providers
 
-Built-in providers:
+| Provider | Wire format | Endpoint |
+|----------|-------------|----------|
+| `deepseek` | openai-completions | `https://api.deepseek.com/v1` |
+| `moonshotai` (Kimi) | openai-completions | `https://api.moonshot.ai/v1` |
+| `kimi-coding` | anthropic-messages | `https://api.kimi.com/coding` |
+| `glm` (GLM Coding Plan) | openai-completions | `https://open.bigmodel.cn/api/coding/paas/v4` |
+| `codex` (OpenAI Codex) | openai-responses | `https://api.openai.com/v1` (relay expected) |
 
-| Provider | API dialect | Endpoint | Key env var |
-|----------|-------------|----------|-------------|
-| `deepseek` | openai-completions | `https://api.deepseek.com/v1` | `DEEPSEEK_API_KEY` |
-| `moonshotai` (Kimi) | openai-completions | `https://api.moonshot.ai/v1` | `MOONSHOT_API_KEY` |
-| `kimi-coding` (Kimi For Coding) | anthropic-messages | `https://api.kimi.com/coding` | `KIMI_API_KEY` |
-| `glm` (GLM Coding Plan) | openai-completions | `https://open.bigmodel.cn/api/coding/paas/v4` | `ZHIPUAI_API_KEY` |
-| `codex` (OpenAI Codex) | openai-responses | `https://api.openai.com/v1` (override with your relay) | `CODEX_API_KEY` |
-
-Built-in Codex models include `gpt-5.5`, `gpt-5.6-sol`/`terra`/`luna`,
-`gpt-5.4`, `gpt-5.4-mini`, and `gpt-5.3-codex-spark`. **`gpt-5.5` is
-verified by live test against the target relay** (its 1M context is
-relay-reported); the other entries mirror pi's built-in catalog and are
-unverified — availability depends on the relay in use, and unknown or
-unsupported models fall back to the generic OpenAI-compatible defaults.
-Codex speaks the
-OpenAI **Responses API** (`POST {base_url}/responses`), served by a
-dedicated client (`src/limbo/llm/responses_client.py`, plain httpx SSE):
-system messages become `instructions`, tool definitions are flattened, and
-reasoning models stream `reasoning` summaries and replay encrypted
-reasoning items across turns. Limbo targets **API-key relays**, not the
-ChatGPT subscription backend (OAuth) — point the provider at your relay
-and make sure its model IDs match the catalog:
+Switching models is a one-word change (`model = "k3"`) — or `-m glm-4.7` for a
+single run, or `/model` mid-session. A `[providers.<id>]` section overrides one
+provider without touching global settings: relay URL, renamed credential env
+var, extra headers.
 
 ```toml
-[llm]
-model = "gpt-5.5"
-
 [providers.codex]
 base_url = "https://my-relay.example.com/v1"
 api_key_env = "CODEX_API_KEY"
+headers = { x-relay = "on" }
 ```
 
-Built-in GLM Coding Plan models: `glm-4.7`, `glm-5.1`, `glm-5.2` (1M
-context), `glm-5-turbo`, `glm-5v-turbo` (vision), and `glm-4.5-air`. The
-Coding Plan is a subscription with its own endpoint and keys — a coding-plan
-key only works on the `/api/coding/paas/v4` endpoints (not the pay-per-token
-`/api/paas/v4` ones) and vice versa. For the international endpoint set
-`[providers.glm] base_url = "https://api.z.ai/api/coding/paas/v4"` (see
-below).
+## In the session
 
-Built-in Kimi models include `kimi-k3` (1M context, pay-per-token), and for
-Kimi For Coding subscriptions: `k3` (1M context), `kimi-for-coding`, and
-`kimi-for-coding-highspeed` (256K context). The two use different endpoints
-and keys — a `sk-kimi-*` Kimi For Coding key only works with the
-`kimi-coding` models (`k3`, ...) and vice versa.
+| Command | What it does |
+|---------|--------------|
+| `/model [name]` | switch model (picker when bare); persists to config, no restart |
+| `/code-mode [on\|off]` | one `run_code` tool: a Python program, many tool calls |
+| `/plan [on\|off]` | read-only mode — explore and propose, mutating tools blocked |
+| `/goal <task>` | closed loop: propose a verify command, iterate until it passes |
+| `/btw <question>` | side question that stays out of history |
+| `/compact` | compact the conversation now |
+| `/sessions` `/new` `/fork` `/handoff` | resume, start, branch, or hand off work |
+| `/export [path]` | dump the session as JSONL or Markdown |
+| `/tracing-viewer [id\|off]` | browse this run's trace in a local web page |
 
-Switching to a catalog model only requires changing `model` — the provider's
-endpoint and key env var are picked up automatically:
+`Enter` sends, `Shift+Enter` newlines, `Alt+Enter` queues a follow-up for after
+the current task, `Esc` interrupts.
 
-```toml
-[llm]
-model = "k3"             # Kimi For Coding; base_url/api_key resolve from the catalog
-```
-
-The `anthropic-messages` dialect is served by a dedicated client
-(`src/limbo/llm/anthropic_client.py`, plain httpx SSE) selected by the
-client factory. It converts OpenAI-style tool definitions to Anthropic's
-shape, merges consecutive tool results into a single user turn, and replays
-assistant thinking blocks with their signature.
-
-For the mainland-China Moonshot endpoint, set `base_url =
-"https://api.moonshot.cn/v1"` explicitly (a configured `base_url` always
-wins over the catalog — unless a `[providers.<id>]` override says otherwise,
-see below).
-
-### Per-provider overrides
-
-An optional `[providers.<id>]` section overrides a single catalog provider
-without touching the global `[llm]` settings — e.g. pointing a provider at a
-relay, renaming its credential env var, or adding extra headers:
-
-```toml
-[providers.glm]
-base_url = "https://api.z.ai/api/coding/paas/v4"  # international endpoint
-
-[providers.codex]
-base_url = "https://my-relay.example.com/v1"
-api_key_env = "CODEX_API_KEY"     # rename the env var read for the key
-headers = { x-relay = "on" }       # extra headers on every request
-```
-
-All fields are optional; unset fields fall back to the catalog. Resolution
-order for `base_url` (first hit wins):
-
-1. `[providers.<id>] base_url`
-2. `[llm] base_url` (when changed from the DeepSeek default)
-3. the catalog provider's built-in endpoint
-
-and for the API key: `[providers.<id>] api_key` → `[llm] api_key` → the
-environment variable (`[providers.<id>] api_key_env` rename, else the
-catalog's default env var).
-
-> **Note:** rule 1 is the single exception to the long-standing "an explicit
-> `[llm] base_url` always wins" behavior — a per-provider override is more
-> specific than the global setting. If you configure both, the
-> `[providers.<id>]` value is used for that provider's models.
-
-### Optional LLM settings
-
-```toml
-[llm]
-temperature = 0.2        # 0.0 - 2.0, default 0.2
-max_iterations = 50      # safety limit on tool-turn loops, default 50
-max_tokens = 8192        # output cap; default = the model's catalog value
-thinking_effort = "high" # reasoning control; default = provider behavior
-```
-
-`thinking_effort` is interpreted per model dialect:
-
-- `k3`, `kimi-for-coding*` (Anthropic adaptive thinking): `low` | `high` |
-  `max` → `thinking: {type: adaptive}` + `output_config.effort`. Thinking
-  cannot be disabled; temperature is omitted while thinking is enabled.
-- `kimi-k3` (moonshotai, OpenAI-style): `low` | `high` | `max` → sent as
-  `reasoning_effort`. Thinking cannot be disabled on K3.
-- `kimi-k2-thinking`, `kimi-k2.5`+ (DeepSeek-style): any non-`off` value →
-  `thinking: {type: enabled}`; `"off"` → `thinking: {type: disabled}`
-  (except `kimi-k2.7-code*`, where thinking is always on).
-- `glm-*` (z.ai-style): like DeepSeek-style but with `clear_thinking: false`
-  so thinking is preserved across turns; `glm-5.2` additionally maps
-  `low`/`high`/`max` to `reasoning_effort` (`low` clamps to `high`).
-- `gpt-5.*` codex models (Responses API): `low` | `medium` | `high` |
-  `xhigh` → `reasoning: {effort, summary: auto}`; 5.6-generation models
-  (`gpt-5.6-*`) also accept `max`. Temperature is omitted for reasoning
-  models.
-- Non-reasoning models: ignored.
-
-Reasoning output streams into the chat as muted thinking blocks and is
-stored on the assistant message so it can be replayed to APIs that require
-it (Kimi K3 rejects tool-call replays without `reasoning_content`).
-
-Optional tool settings:
-
-```toml
-[tools]
-bash_enabled = true
-```
-
-Optional UI settings:
-
-```toml
-[ui]
-kitty_keyboard = "auto"   # auto (default) | enabled | disabled
-```
-
-`kitty_keyboard` controls Textual's kitty keyboard protocol. The default
-`auto` disables it only when Limbo runs inside the **herdr** multiplexer:
-herdr mirrors a pane's `REPORT_ALL_KEYS` request to the host terminal
-(e.g. Ghostty), and Ghostty then encodes IME commits as the physical commit
-key (space) while dropping the composed text — typing Chinese turns into
-spaces (pasting is unaffected). With the protocol disabled, herdr keeps
-IME-compatible host flags and committed IME text arrives as raw UTF-8. Use
-`enabled` to always keep the protocol (e.g. in a direct Ghostty/kitty
-terminal), or `disabled` to force raw/legacy input everywhere.
-
-### Session storage
-
-Conversations are saved as JSONL files in `~/.limbo/sessions/` so you can
-review or debug them later. Use the `--session-dir` argument to redirect them
-to another location.
-
-Old session files are not automatically cleaned up; remove them manually when
-you no longer need them.
-
-### Tracing viewer
-
-Every run also writes a full trace (LLM request bodies, token usage, tool
-calls, timings, errors) to `~/.limbo/sessions/traces/`. Type
-`/tracing-viewer` to browse it in a local web page, Langfuse-style: turns,
-a waterfall of LLM and tool calls, and per-call details, refreshed live
-while the agent runs. The server listens on 127.0.0.1 only and the URL
-carries a one-time token. `/tracing-viewer <session-id>` opens a past
-session; `/tracing-viewer off` stops the server.
-
-## Run
-
-```bash
-limbo --workdir /path/to/project
-limbo --model glm-4.7        # override the configured model for this run
-```
-
-### Switching models at runtime
-
-Use `/model` in the TUI: without an argument it opens a picker that lists
-catalog models grouped by provider (context window, reasoning capability,
-and the current model are annotated; providers without a resolvable API key
-are dimmed with a hint). `/model <name>` switches directly — unknown names
-fall back to generic OpenAI-compatible defaults. The picker re-reads
-`config.toml` every time it opens, so edits (e.g. a newly added
-`[providers.<id>]`) apply without a restart.
-
-A switch takes effect immediately (no restart): the LLM client is rebuilt,
-and the new model is written back to `config.toml` (comments preserved via
-tomlkit) so the next launch keeps it. If the write fails, the switch still
-applies for the current session. Switching is refused while a turn is in
-flight.
-
-### Code Mode (`/code-mode on|off`)
-
-Code Mode collapses the model-facing tool catalog to a single `run_code`
-tool: instead of one tool call per action, the model writes a **Python
-program** against a generated SDK and `run_code` executes it — a sequence
-that would take several LLM round trips becomes one. The system prompt
-injects the SDK (every other tool as `await tools.<name>(kwarg=...)`, with
-signatures derived from the registry), so:
-
-```python
-# one run_code call instead of three tool-call round trips
-content = await tools.read(path="src/main.py")
-await tools.write(path="copy.py", content=content)
-return await tools.bash(command="python copy.py")
-```
-
-Inside the program `tools` and `ToolCallError` are bound. Tools return
-their text output as `str`; a failed call raises `ToolCallError` (catchable
-with `try/except`), an unhandled exception fails the run with the
-traceback and captured output so the model self-corrects on the next
-iteration, and independent calls may overlap under `asyncio.gather`. Only
-what the program prints or returns enters the conversation — intermediate
-tool results never do. A runaway program is bounded by a default 120 s
-budget (pass `timeout=` to override) and ESC interrupts at the next tool
-boundary.
-
-Toggle with `/code-mode on|off` (no argument flips). The mode is per
-session: it is persisted in the session file and restored on resume, and
-the status bar shows a `⌨code` badge while it is on. Switching is refused
-while a turn is in flight.
+Scripts and multiplexers get the same agent as a line-oriented REPL:
+`limbo --headless` (or `--json` for one JSON event per line).
 
 ## Safety
 
-Limbo executes every tool call immediately, without asking for confirmation,
-and has **no safety fences**: file tools (`read`, `edit`, `write`, `grep`,
-`find`, `ls`) are not scoped to the working directory — absolute paths and
-symlink targets outside it are honored as-is — and there is no
-sensitive-file blocklist, so `.env`, SSH keys, and the like are read and
-searched like any other file.
-
-Bash is likewise unrestricted: it is started in the working directory but
-can `cd ..`, use absolute paths, read or write anywhere, and no command is
-filtered out — `rm -rf` and `git reset --hard` run exactly as given. Only
-run Limbo with trusted models and in repositories you can afford to modify
-or lose.
-
-If you need to work with untrusted projects, disable the bash tool entirely:
+**There are no fences.** Tools run immediately and unconfined: file tools honor
+absolute paths and symlinks anywhere, there is no sensitive-file blocklist, and
+`bash` runs every command as written — `rm -rf` included. Run Limbo with
+trusted models in repositories you can afford to modify or lose.
 
 ```toml
 [tools]
-bash_enabled = false
+bash_enabled = false     # if you need a hard stop
 ```
 
 ## Development
 
-Set up the environment (dev tools are a PEP 735 dependency group, so plain
-`uv sync` installs pytest/ruff/mypy — no `--extra` flag):
-
 ```bash
-uv sync
+uv sync        # dev tools are a PEP 735 group, installed by default
+make check     # sync + tests + lint + typecheck
 ```
 
-Run everything (sync + tests + lint + type check) with one command:
+Individually — always `python -m pytest`, never `uv run pytest` (which can fall
+through to a global pytest on `PATH`):
 
 ```bash
-make check
+uv run python -m pytest tests/ -v
+uv run ruff check src tests
+uv run mypy src
 ```
 
-Or run the pieces individually. Always use `python -m pytest`: `uv run pytest`
-silently falls through to a global pytest on PATH when the venv lacks pytest,
-which can run the suite against the wrong source tree.
+The screenshot above is rendered from the real UI by
+`scripts/readme_hero.py` (`uv run python scripts/readme_hero.py`), so it can't
+drift from what ships.
 
-```bash
-uv run python -m pytest tests/ -v   # tests
-uv run ruff check src tests         # lint
-uv run mypy src                     # type check
-```
+## More
+
+- `AGENTS.md` — architecture and design decisions
+- `CONTEXT.md` — domain glossary
+- `docs/` — session management, skills, UI design notes
