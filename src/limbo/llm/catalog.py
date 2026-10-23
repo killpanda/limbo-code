@@ -255,6 +255,18 @@ CATALOG: dict[str, ModelSpec] = {
     # 64K default output cap is deliberately conservative — thinking
     # tokens count toward the output limit, so a near-max cap would let a
     # long chain of thought starve the visible answer.
+    # deepseek-flash is the official Flash name (DeepSeek-V4.1-Flash, per
+    # the pricing page 2026-10): 1M context, 384K max output, image input.
+    # deepseek-v4-flash / -vision-exp are legacy aliases served by it.
+    "deepseek-flash": ModelSpec(
+        id="deepseek-flash",
+        provider=DEEPSEEK,
+        context_window=1_000_000,
+        max_tokens=65_536,
+        reasoning=True,
+        vision=True,
+        thinking_format="deepseek",
+    ),
     "deepseek-v4-pro": ModelSpec(
         id="deepseek-v4-pro",
         provider=DEEPSEEK,
@@ -328,7 +340,13 @@ CATALOG: dict[str, ModelSpec] = {
     "k3": _kimi_coding(
         "k3", context_window=1_048_576, max_tokens=131_072
     ),
-    "kimi-for-coding": _kimi_coding("kimi-for-coding"),
+    # k3-256k: K3 capped at 256K context (images only, no video).
+    "k3-256k": _kimi_coding("k3-256k"),
+    # kimi-for-coding now serves K2.8 Preview with a 1M window; highspeed
+    # stays at 256K (Kimi Code models page, 2026-10).
+    "kimi-for-coding": _kimi_coding(
+        "kimi-for-coding", context_window=1_048_576, max_tokens=131_072
+    ),
     "kimi-for-coding-highspeed": _kimi_coding("kimi-for-coding-highspeed"),
     # -- GLM Coding Plan (subscription whitelist) ----------------------------
     "glm-4.5-air": _glm("glm-4.5-air", context_window=131_072, max_tokens=98_304),
