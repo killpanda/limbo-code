@@ -39,6 +39,7 @@ description: Test-driven development workflow.
 |------|------|
 | 用户级 | `~/.limbo/skills/<name>/SKILL.md` |
 | 项目级 | `<workdir>/.agents/skills/<name>/SKILL.md` |
+| Daily（仅 daily 会话） | `~/.limbo/daily/skills/<name>/SKILL.md` |
 
 内置斜杠命令（`/sessions` 等）优先于同名 skill。
 

@@ -87,6 +87,9 @@ class SessionMeta(BaseModel):
     usage: dict[str, UsageEntry] = Field(default_factory=dict)
     # Plan mode (/plan): the read-only tool hook is mounted; restored on resume.
     plan_mode: bool = False
+    # Daily mode (non-coding posture): assistant prompt + daily tools;
+    # restored on resume.
+    daily_mode: bool = False
     # Whether tool calls are journaled as ``tool_intent`` records before
     # they run. Legacy sessions lack it, so a dangling call there cannot be
     # told apart as "never started" vs "interrupted mid-run".

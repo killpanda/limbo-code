@@ -37,10 +37,12 @@ class LimboApp(App[None]):
         session_dir: Path | None = None,
         resume: Path | None = None,
         *args,
+        daily: bool = False,
         **kwargs,
     ):
         super().__init__(*args, **kwargs)
         apply_key_fixes()
+        self.daily = daily
         self.workdir = Path(workdir).resolve()
         self.config = config
         self.llm_client = llm_client
@@ -99,6 +101,7 @@ class LimboApp(App[None]):
                 llm_client=self.llm_client,
                 session_dir=self.session_dir,
                 resume=self.resume,
+                daily=self.daily,
             )
         )
 

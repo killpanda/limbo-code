@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from limbo.code_mode import CODE_ONLY_INSTRUCTION, render_tools_sdk
+from limbo.memory import MemorySnapshot
 from limbo.skills import discover_skills, format_skills_for_prompt
 from limbo.tools.hooks import PLAN_MODE_INSTRUCTION
 
@@ -23,6 +24,22 @@ _BASE_INTRO = (
     "You are an expert coding assistant operating inside limbo, "
     "a coding agent harness. You help users by reading files, "
     "executing commands, editing code, and writing new files.\n\n"
+)
+
+# Daily mode (non-coding posture): same harness, a general assistant voice.
+_DAILY_INTRO = (
+    "You are a capable personal assistant operating inside limbo. You help "
+    "the user with everyday non-coding work: researching topics, reading web "
+    "pages and documents, writing and editing text, organizing notes and "
+    "files, and answering questions.\n\n"
+)
+
+_DAILY_GUIDELINES_TAIL = (
+    "- For current facts, search (web_search) and read the sources (web_fetch) "
+    "before answering; cite the URLs you relied on\n"
+    "- Save substantial outputs (notes, reports, drafts) as files in the working "
+    "directory and give their paths\n"
+    "- Reply in the user's language; lead with the answer and keep it concise"
 )
 
 _GUIDELINES_TAIL = (
@@ -60,7 +77,12 @@ def _guidelines(registry: ToolRegistry) -> str:
                 "- Write multi-line scripts to a file with write, then run "
                 "them with bash — avoid long heredoc one-liners"
             )
-    lines.append(_GUIDELINES_TAIL)
+    if registry.daily_mode and registry.get("memory") is not None:
+        lines.append(
+            "- When the user tells you something durable about themselves or "
+            "how they like things done, save it with memory"
+        )
+    lines.append(_DAILY_GUIDELINES_TAIL if registry.daily_mode else _GUIDELINES_TAIL)
     return "\n".join(lines)
 
 
@@ -89,16 +111,19 @@ def build_system_prompt(
     registry: ToolRegistry,
     workdir: Path,
     home: Path | None = None,
+    memory: MemorySnapshot | None = None,
 ) -> str:
     """Assemble the system prompt: base text + tools + guidelines + context.
 
     The tools section and the bash guideline are derived from ``registry``,
     so the prompt always matches the tools the model can actually call.
     The skills catalog is included only when the read tool is available
-    (the model loads SKILL.md files with read on demand).
+    (the model loads SKILL.md files with read on demand). ``memory`` is the
+    session's frozen memory snapshot, shown only in daily mode (coding
+    sessions never see memory).
     """
     parts = [
-        _BASE_INTRO,
+        _DAILY_INTRO if registry.daily_mode else _BASE_INTRO,
         _tools_section(registry),
         "\n\n",
         _guidelines(registry),
@@ -112,11 +137,17 @@ def build_system_prompt(
         )
     if registry.plan_mode:
         parts.append(f"\n\n{PLAN_MODE_INSTRUCTION}")
+    if memory is not None and registry.daily_mode:
+        block = memory.render()
+        if block is not None:
+            parts.append(block)
     context = _context_block(workdir, home or Path.home())
     if context is not None:
         parts.append(context)
     if registry.get("read") is not None:
-        skills_block = format_skills_for_prompt(discover_skills(workdir))
+        skills_block = format_skills_for_prompt(
+            discover_skills(workdir, daily=registry.daily_mode)
+        )
         if skills_block:
             parts.append(skills_block)
     return "".join(parts)

@@ -61,12 +61,23 @@ def main() -> int:
         from limbo.cli_auth import run  # noqa: PLC0415 - subcommands skip the TUI imports
 
         return run(sys.argv[1:])
+    argv = sys.argv[1:]
+    # `limbo daily ...` is `limbo --daily ...`.
+    if argv[:1] == ["daily"]:
+        argv = ["--daily", *argv[1:]]
     parser = argparse.ArgumentParser(description="Limbo TUI coding agent")
     parser.add_argument(
         "--workdir",
         type=Path,
-        default=Path.cwd(),
-        help="Working directory (default: current directory)",
+        default=None,
+        help="Working directory (default: current directory; with --daily, "
+        "[daily] workdir)",
+    )
+    parser.add_argument(
+        "--daily",
+        action="store_true",
+        help="Start in daily mode (non-coding assistant: web_fetch, memory) "
+        "in the [daily] workdir; same as `limbo daily`",
     )
     parser.add_argument(
         "--session-dir",
@@ -107,10 +118,12 @@ def main() -> int:
         help="With --headless (implied): print every event as one JSON object "
         "per line, so scripts can drive Limbo without parsing the screen",
     )
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
 
     config = load_config()
     _apply_kitty_keyboard_workaround(config)
+    if args.daily and config.daily.model and not args.model:
+        config.llm.model = config.daily.model
     if args.model:
         from limbo.cli_auth import split_model_arg  # noqa: PLC0415
 
@@ -125,7 +138,14 @@ def main() -> int:
         return 1
 
     session_dir = args.session_dir or DEFAULT_SESSION_DIR
-    workdir = args.workdir
+    workdir = args.workdir or Path.cwd()
+    if args.daily and args.workdir is None:
+        workdir = Path(config.daily.workdir).expanduser()
+        try:
+            workdir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            print(f"Error: cannot create daily workdir {workdir}: {e}", file=sys.stderr)
+            return 1
     resume: Path | None = None
 
     if args.continue_session:
@@ -164,6 +184,7 @@ def main() -> int:
             session_dir=args.session_dir,
             resume=resume,
             json_mode=args.json,
+            daily=args.daily,
         )
 
     from limbo.ui.app import LimboApp  # noqa: I001, PLC0415 - deferred so the kitty keyboard workaround runs first
@@ -173,6 +194,7 @@ def main() -> int:
         config=config,
         session_dir=args.session_dir,
         resume=resume,
+        daily=args.daily,
     )
     app.run()
     return 0

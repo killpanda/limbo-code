@@ -44,6 +44,7 @@ class StatusBar(Horizontal):
         self._queued = 0
         self._code_mode = False
         self._plan_mode = False
+        self._daily_mode = False
         # NOTE: attribute names must not collide with MessagePump internals
         # (e.g. `_context` is a method on MessagePump).
         self._context_percent: int | None = None
@@ -76,6 +77,8 @@ class StatusBar(Horizontal):
             parts.append("⌨code")
         if self._plan_mode:
             parts.append("📋plan")
+        if self._daily_mode:
+            parts.append("☀daily")
         if self._tokens:
             parts.append(f"↓↑ {_format_tokens(self._tokens)}")
         files, added, removed = self._changes
@@ -150,6 +153,13 @@ class StatusBar(Horizontal):
             self._context_label.update(self._context_text())
         except Exception:  # noqa: BLE001 - not composed yet
             pass
+
+    def set_daily_mode(self, enabled: bool) -> None:
+        """Show/hide the ☀daily badge (daily mode posture)."""
+        if enabled == self._daily_mode:
+            return
+        self._daily_mode = enabled
+        self._refresh_context()
 
     def set_goal(
         self, goal: tuple[int, int] | None, *, running: bool = False

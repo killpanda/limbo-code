@@ -83,3 +83,21 @@ def isolated_auth_file(tmp_path, monkeypatch):
 def isolated_deepseek_key(monkeypatch):
     """A developer's $DEEPSEEK_API_KEY must not add web_search to every registry."""
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def isolated_memory_dir(tmp_path, monkeypatch):
+    """A developer's real ~/.limbo/memory must not leak into prompts or get written."""
+    import limbo.memory as memory_module
+
+    monkeypatch.setattr(memory_module, "DEFAULT_MEMORY_DIR", tmp_path / "memory")
+
+
+@pytest.fixture(autouse=True)
+def isolated_daily_skills_dir(tmp_path, monkeypatch):
+    """Daily-mode skills come from a per-test directory, never ~/.limbo/daily."""
+    import limbo.skills as skills_module
+
+    monkeypatch.setattr(
+        skills_module, "DEFAULT_DAILY_SKILLS_DIR", tmp_path / "daily-skills"
+    )

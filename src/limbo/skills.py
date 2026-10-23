@@ -29,6 +29,9 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_USER_SKILLS_DIR = Path.home() / ".limbo" / "skills"
 PROJECT_SKILLS_DIR = ".agents/skills"
+# Daily mode's own skills: seen only by daily sessions (which also see the
+# user and project skills above); coding sessions never list them.
+DEFAULT_DAILY_SKILLS_DIR = Path.home() / ".limbo" / "daily" / "skills"
 
 # Validation limits per the Agent Skills spec (agentskills.io).
 MAX_NAME_LENGTH = 64
@@ -167,18 +170,21 @@ def _load_skills_from(skills_dir: Path) -> list[Skill]:
 
 
 def discover_skills(
-    workdir: Path, user_dir: Path | None = None
+    workdir: Path, user_dir: Path | None = None, *, daily: bool = False
 ) -> list[Skill]:
     """Discover skills from the user dir and the project (.agents/skills).
 
-    Project skills override user skills with the same name (a warning is
-    logged for each collision). Sorted by name.
+    ``daily`` adds the daily-mode dir (``~/.limbo/daily/skills``) on top.
+    Later sources override earlier ones with the same name — user, then
+    project, then daily — with a warning logged for each collision.
+    Sorted by name.
     """
     user_dir = user_dir if user_dir is not None else DEFAULT_USER_SKILLS_DIR
+    sources = [user_dir, workdir / PROJECT_SKILLS_DIR]
+    if daily:
+        sources.append(DEFAULT_DAILY_SKILLS_DIR)
     by_name: dict[str, Skill] = {}
-    for skill in _load_skills_from(user_dir) + _load_skills_from(
-        workdir / PROJECT_SKILLS_DIR
-    ):
+    for skill in [s for d in sources for s in _load_skills_from(d)]:
         if skill.name in by_name:
             logger.warning(
                 "Skill name collision: %r from %s overrides %s",

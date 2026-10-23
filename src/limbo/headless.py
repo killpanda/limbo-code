@@ -52,6 +52,7 @@ from limbo.agent import (
 )
 from limbo.config import Config
 from limbo.conversation import Conversation, NoVerifyGate
+from limbo.daily import DAILY_USAGE, daily_toggle_notice, daily_unchanged_notice
 from limbo.goal import (
     GoalClear,
     GoalQuery,
@@ -61,6 +62,7 @@ from limbo.goal import (
 from limbo.integrations import create_reporters, install_exit_hooks
 from limbo.integrations.base import IntegrationReporter
 from limbo.llm.factory import create_llm_client
+from limbo.memory import MEMORY_USAGE, describe, parse_memory_command
 from limbo.model_switch import (
     prepare_model_switch,
     reload_llm_config,
@@ -181,6 +183,20 @@ class SlashPlan:
 
 
 @dataclass(frozen=True)
+class SlashDaily:
+    """``/daily-mode [on|off]``: the daily (non-coding) posture."""
+
+    arg: str
+
+
+@dataclass(frozen=True)
+class SlashMemory:
+    """``/memory [edit user|notes]``: the persistent memory files."""
+
+    arg: str
+
+
+@dataclass(frozen=True)
 class SlashHandoff:
     """``/handoff <note>``: a linked new session that starts from the note."""
 
@@ -231,6 +247,8 @@ Submission = (
     | SlashFork
     | SlashHandoff
     | SlashPlan
+    | SlashDaily
+    | SlashMemory
     | SlashHelp
     | SlashQuit
     | SlashTracingViewer
@@ -268,6 +286,10 @@ def parse_submission(text: str) -> Submission:
         return SlashHandoff(arg)
     if name == "plan":
         return SlashPlan(arg)
+    if name == "daily-mode":
+        return SlashDaily(arg)
+    if name == "memory":
+        return SlashMemory(arg)
     if name == "help":
         return SlashHelp()
     if name in ("quit", "exit"):
@@ -520,6 +542,8 @@ HELP_TEXT = """可用命令：
   /fork [n]      分叉出新会话继续（n = 只保留前 n 轮），原会话不变
   /handoff <说明> 带交接说明开新会话（干净上下文，关联原会话）
   /plan [on|off] 计划模式：只读探索并给出方案，写类工具被拦下
+  /daily-mode [on|off]  Daily mode：日常非 coding 工作（读网页、长期记忆）
+  /memory        查看长期记忆（/memory edit [user|notes] 显示文件路径）
   /tracing-viewer [id|off]  在浏览器查看 trace（打印本地链接）
   /agents [scan|init]  子代理任务板 · 项目画像 · 生成项目角色
   /task [id]     查看任务；/task <pause|resume|cancel|retry|approve|reject> <id|all> [说明]
@@ -705,6 +729,10 @@ class HeadlessFrontend:
             self._cmd_handoff(command.note)
         elif isinstance(command, SlashPlan):
             self._cmd_plan(command.arg)
+        elif isinstance(command, SlashDaily):
+            self._cmd_daily(command.arg)
+        elif isinstance(command, SlashMemory):
+            self._cmd_memory(command.arg)
         elif isinstance(command, SlashHelp):
             self._line(HELP_TEXT)
         elif isinstance(command, SlashQuit):
@@ -726,6 +754,28 @@ class HeadlessFrontend:
             )
         else:
             self._line(f"计划模式已是{'开启' if enabled else '关闭'}状态")
+
+    def _cmd_daily(self, arg: str) -> None:
+        enabled = parse_toggle(arg, self._agent.daily_mode)
+        if enabled is None:
+            self._line(DAILY_USAGE)
+        elif self._agent.set_daily_mode(enabled):
+            self._line(daily_toggle_notice(enabled))
+        else:
+            self._line(daily_unchanged_notice(enabled))
+
+    def _cmd_memory(self, arg: str) -> None:
+        try:
+            target = parse_memory_command(arg)
+        except ValueError:
+            self._line(MEMORY_USAGE)
+            return
+        store = self._agent.registry.memory_store
+        if target is None or store is None:
+            self._line(describe(store, self._agent.memory_snapshot))
+        else:
+            # No editor here: the REPL owns the terminal (raw mode).
+            self._line(f"直接编辑 {store.path(target)}，从下一个会话起生效")
 
     def _on_interrupt(self, event: Interrupt) -> None:
         if self._conv.awaiting_verify:
@@ -1130,10 +1180,11 @@ def run_headless(
     session_dir: Path | None,
     resume: Path | None,
     json_mode: bool = False,
+    daily: bool = False,
 ) -> int:
     """Synchronous entry for ``limbo --headless`` (called from app.main)."""
     try:
-        return asyncio.run(_run(workdir, config, session_dir, resume, json_mode))
+        return asyncio.run(_run(workdir, config, session_dir, resume, json_mode, daily))
     except KeyboardInterrupt:
         return 130
 
@@ -1144,6 +1195,7 @@ async def _run(
     session_dir: Path | None,
     resume: Path | None,
     json_mode: bool = False,
+    daily: bool = False,
 ) -> int:
     workdir = workdir.resolve()
     def out(text: str) -> None:
@@ -1163,6 +1215,7 @@ async def _run(
         resume=resume,
         reporters=reporters,
         client_factory=create_llm_client,
+        daily=daily,
     )
 
     # --json is for scripts: plain line reads, no raw-mode echo.

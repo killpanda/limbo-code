@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from limbo.config import Config
+from limbo.memory import MemoryStore, memory_dir
 from limbo.models import ToolResult
 from limbo.tools.base import BaseTool, ReplayPolicy
 from limbo.tools.bash import BashTool
@@ -20,8 +21,10 @@ from limbo.tools.find import FindTool
 from limbo.tools.grep import GrepTool
 from limbo.tools.hooks import Block, PlanModeHook, Rewrite, ToolHook
 from limbo.tools.ls import LsTool
+from limbo.tools.memory import MemoryTool
 from limbo.tools.read import ReadTool
 from limbo.tools.run_code import RunCodeTool
+from limbo.tools.web_fetch import WebFetchTool
 from limbo.tools.web_search import WebSearchTool
 from limbo.tools.write import WriteTool
 from limbo.trace import utc_now_iso
@@ -33,6 +36,10 @@ from limbo.websearch import build_provider
 _CURRENT_CALL: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "limbo_current_tool_call", default=None
 )
+
+
+# Tools only daily mode registers.
+DAILY_TOOLS = ("web_fetch", "memory")
 
 
 @dataclass(frozen=True)
@@ -79,6 +86,37 @@ class ToolRegistry:
         run_code = RunCodeTool(workdir=workdir)
         run_code.registry = self
         self._tools["run_code"] = run_code
+        daily = self.config.daily
+        # None when [daily] memory is off: no memory tool, no prompt block.
+        self.memory_store: MemoryStore | None = (
+            MemoryStore(
+                memory_dir(), {"user": daily.user_chars, "notes": daily.notes_chars}
+            )
+            if daily.memory
+            else None
+        )
+
+    # -- daily mode (non-coding posture) ---------------------------------------
+
+    @property
+    def daily_mode(self) -> bool:
+        return "web_fetch" in self._tools
+
+    @daily_mode.setter
+    def daily_mode(self, enabled: bool) -> None:
+        """Add/remove the daily tools (web_fetch, memory)."""
+        if enabled == self.daily_mode:
+            return
+        if not enabled:
+            for name in DAILY_TOOLS:
+                self._tools.pop(name, None)
+            return
+        daily = self.config.daily
+        self._tools["web_fetch"] = WebFetchTool(
+            self.workdir, daily.fetch_max_chars, daily.fetch_timeout
+        )
+        if self.memory_store is not None:
+            self._tools["memory"] = MemoryTool(self.workdir, self.memory_store)
 
     def register(self, tool_class: type[BaseTool]) -> None:
         tool = tool_class(workdir=self.workdir)
