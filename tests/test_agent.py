@@ -127,10 +127,10 @@ async def test_agent_tool_crash_becomes_error_result_and_loop_continues(workdir)
         session_dir=workdir / "sessions",
     )
 
-    async def crashing_execute(name, arguments, **_):
+    async def crashing_run(call, **_):
         raise RuntimeError("tool exploded")
 
-    agent.registry.execute = crashing_execute
+    agent.registry.run = crashing_run
 
     events = await _collect(agent.run("read main.py"))
     result_events = [e for e in events if isinstance(e, ToolResultEvent)]
@@ -158,13 +158,13 @@ async def test_agent_max_iterations_cancels_tool_calls(workdir):
     )
 
     executed = []
-    original_execute = agent.registry.execute
+    original_run = agent.registry.run
 
-    async def tracking_execute(name, arguments, **_):
-        executed.append((name, arguments))
-        return await original_execute(name, arguments)
+    async def tracking_run(call, **kwargs):
+        executed.append((call.name, call.arguments))
+        return await original_run(call, **kwargs)
 
-    agent.registry.execute = tracking_execute
+    agent.registry.run = tracking_run
 
     events = await _collect(agent.run("read main.py"))
 
@@ -439,11 +439,11 @@ async def test_agent_parallel_tool_calls_run_concurrently(workdir):
         session_dir=workdir / "sessions",
     )
 
-    async def slow_execute(name, arguments, **_):
+    async def slow_run(call, **_):
         await asyncio.sleep(0.3)
-        return ToolResult(success=True, output=f"ok:{name}")
+        return ToolResult(success=True, output=f"ok:{call.name}")
 
-    agent.registry.execute = slow_execute
+    agent.registry.run = slow_run
 
     start = time.monotonic()
     events = await _collect(agent.run("read both"))

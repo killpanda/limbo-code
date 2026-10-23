@@ -65,7 +65,7 @@ from limbo.sessions import (
     save_session,
 )
 from limbo.steer import FOLLOW_UP, STEER, SteerItem, SteerMode, SteerQueue
-from limbo.tools.registry import ToolRegistry
+from limbo.tools.registry import Admitted, ToolRegistry
 from limbo.trace import TRACE_SCHEMA, TraceLogger, trace_path_for, utc_now_iso
 
 # Consecutive length-stop rejections tolerated before the turn is aborted.
@@ -905,11 +905,14 @@ class Agent:
         call_id: str,
         name: str,
         arguments: dict[str, Any],
+        admission: Admitted | ToolResult,
     ) -> ToolResult:
-        """Execute a tool with full trace logging. Re-raises on crash.
+        """Run an admitted tool call with full trace logging. Re-raises on crash.
 
-        Journaling the intent is the caller's job (``_commit_intents``):
-        a parallel batch declares every call in one append before any runs.
+        Admission (the ``before_tool`` hooks) and journaling the intent are
+        the caller's job (``_admit``): a parallel batch declares every
+        admitted call in one append before any runs. A refused call is
+        traced like any other and returns its refusal.
         """
         self.trace.log(
             "tool_call",
@@ -922,7 +925,11 @@ class Agent:
         started_at = utc_now_iso()
         start = time.monotonic()
         try:
-            result = await self.registry.execute(name, arguments, call_id=call_id)
+            result = (
+                admission
+                if isinstance(admission, ToolResult)
+                else await self.registry.run(admission, call_id=call_id)
+            )
         except Exception as e:  # noqa: BLE001
             self.trace.log(
                 "tool_result",
@@ -952,32 +959,35 @@ class Agent:
         )
         return result
 
-    async def _commit_intents(self, tool_calls: list[dict[str, Any]]) -> None:
-        """Journal tool calls before they run (pi-durable's effect sandwich).
+    async def _admit(
+        self, tool_calls: list[dict[str, Any]]
+    ) -> dict[str, Admitted | ToolResult]:
+        """Run the hook chain for a batch, then journal what will run.
 
-        On resume, a dangling call with a committed intent may have
-        partially run, one without never started. Best effort: a failed
-        write is reported like a failed checkpoint and the tools still run.
-
-        One append (and one lock acquisition) per batch instead of per
-        call: a ten-call batch used to serialize ten writes before any
-        tool could start.
+        pi-durable's effect sandwich: an intent is committed before a call's
+        side effects, and only for calls the hooks let through — a refused
+        call (e.g. under /plan) never started, so on resume it must read
+        "did not run", not "may have partially run". One append (and one
+        lock acquisition) per batch. Best effort: a failed write is
+        reported like a failed checkpoint and the tools still run.
         """
-        calls = [
-            (
-                tc["id"],
-                tc["function"]["name"],
-                self.registry.replay_policy(tc["function"]["name"]),
+        admissions = {
+            tc["id"]: self.registry.admit(
+                tc["function"]["name"], tc["function"]["arguments"]
             )
             for tc in tool_calls
-            if tc.get("id")
+        }
+        calls = [
+            (call_id, admission.name, self.registry.replay_policy(admission.name))
+            for call_id, admission in admissions.items()
+            if isinstance(admission, Admitted)
         ]
-        if not calls:
-            return
-        try:
-            await asyncio.to_thread(self._journal.record_intents, calls)
-        except Exception as e:  # noqa: BLE001
-            self._report_save_error("intent", e)
+        if calls:
+            try:
+                await asyncio.to_thread(self._journal.record_intents, calls)
+            except Exception as e:  # noqa: BLE001
+                self._report_save_error("intent", e)
+        return admissions
 
     async def _rerun_interrupted(self) -> AsyncIterator[AgentEvent]:
         """Re-run read-only calls a crash interrupted (resume only).
@@ -999,8 +1009,10 @@ class Agent:
             name = tc["function"]["name"]
             arguments = tc["function"]["arguments"]
             yield ToolCallRequest(id=tc["id"], name=name, arguments=arguments)
-            await self._commit_intents([tc])
-            result = await self._execute_tool_safe(tc["id"], name, arguments)
+            admissions = await self._admit([tc])
+            result = await self._execute_tool_safe(
+                tc["id"], name, arguments, admissions[tc["id"]]
+            )
             yield ToolResultEvent(
                 id=tc["id"], name=name, result=result, arguments=arguments
             )
@@ -1219,12 +1231,14 @@ class Agent:
         unexecuted: list[str] = []
 
         if self.config.tools.parallel and len(tool_calls) > 1:
+            admissions: dict[str, Admitted | ToolResult] = {}
 
             async def run_one(tc: dict[str, Any]) -> tuple[dict[str, Any], ToolResult]:
                 result = await self._execute_tool_safe(
                     tc["id"],
                     tc["function"]["name"],
                     tc["function"]["arguments"],
+                    admissions[tc["id"]],
                 )
                 return tc, result
 
@@ -1246,7 +1260,7 @@ class Agent:
             else:
                 # Declare the whole batch before any call runs: one append,
                 # and every side effect is covered by an intent.
-                await self._commit_intents(tool_calls)
+                admissions = await self._admit(tool_calls)
                 futures = [asyncio.ensure_future(run_one(tc)) for tc in tool_calls]
                 for future in asyncio.as_completed(futures):
                     tc, result = await future
@@ -1267,9 +1281,12 @@ class Agent:
                     result = ToolResult(success=False, error=_NOT_EXECUTED_MESSAGE)
                     unexecuted.append(tc["id"])
                 else:
-                    await self._commit_intents([tc])
+                    admission = (await self._admit([tc]))[tc["id"]]
                     result = await self._execute_tool_safe(
-                        tc["id"], tc["function"]["name"], tc["function"]["arguments"]
+                        tc["id"],
+                        tc["function"]["name"],
+                        tc["function"]["arguments"],
+                        admission,
                     )
                 results[tc["id"]] = result
                 yield ToolResultEvent(
@@ -1325,10 +1342,11 @@ class Agent:
         call_id: str,
         name: str,
         arguments: dict[str, Any],
+        admission: Admitted | ToolResult,
     ) -> ToolResult:
         """Execute one tool, converting crashes into error results."""
         try:
-            return await self._execute_tool(call_id, name, arguments)
+            return await self._execute_tool(call_id, name, arguments, admission)
         except Exception as e:  # noqa: BLE001
             return ToolResult(success=False, error=f"Tool error: {e}")
 

@@ -7,6 +7,7 @@ import contextvars
 import secrets
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from limbo.tools.ls import LsTool
 from limbo.tools.read import ReadTool
 from limbo.tools.run_code import RunCodeTool
 from limbo.tools.write import WriteTool
+from limbo.trace import utc_now_iso
 
 # The tool call currently executing in this context. asyncio.to_thread and
 # run_code's private event loop both copy the context, so a Code Mode
@@ -29,6 +31,14 @@ from limbo.tools.write import WriteTool
 _CURRENT_CALL: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "limbo_current_tool_call", default=None
 )
+
+
+@dataclass(frozen=True)
+class Admitted:
+    """A call the ``before_tool`` chain let through (arguments as rewritten)."""
+
+    name: str
+    arguments: dict[str, Any]
 
 
 class ToolRegistry:
@@ -73,22 +83,14 @@ class ToolRegistry:
         policy = getattr(self.get(name), "replay", "unsafe")
         return "safe" if policy == "safe" else "unsafe"
 
-    async def execute(
-        self, name: str, arguments: dict[str, Any], call_id: str | None = None
-    ) -> ToolResult:
-        parent = _CURRENT_CALL.get()
-        if parent is not None and call_id is None:
-            # A Code Mode sub-call: give it an id and trace it under its
-            # run_code parent (sub-calls never enter history).
-            call_id = f"{parent}.{secrets.token_hex(3)}"
-            return await self._execute_traced(name, arguments, call_id, parent)
-        return await self._execute(name, arguments, call_id)
+    def admit(self, name: str, arguments: dict[str, Any]) -> Admitted | ToolResult:
+        """Run the ``before_tool`` chain: the call to run, or why it may not.
 
-    async def _execute(
-        self, name: str, arguments: dict[str, Any], call_id: str | None
-    ) -> ToolResult:
-        tool = self.get(name)
-        if tool is None:
+        Split from :meth:`run` so the agent can journal a call's intent
+        only once it is actually going to run — a call a hook refused
+        (e.g. under /plan) never started, and recovery must say so.
+        """
+        if self.get(name) is None:
             return ToolResult(success=False, error=f"Unknown tool: {name}")
         for hook in list(self.hooks):
             try:
@@ -101,23 +103,48 @@ class ToolRegistry:
                 return ToolResult(success=False, error=decision.reason)
             if isinstance(decision, Rewrite):
                 arguments = decision.arguments
+        return Admitted(name, arguments)
+
+    async def run(self, call: Admitted, call_id: str | None = None) -> ToolResult:
+        """Execute an admitted call, then the ``after_tool`` chain."""
+        tool = self._tools[call.name]
         token = _CURRENT_CALL.set(call_id) if call_id is not None else None
         try:
-            result = await asyncio.to_thread(tool.execute, arguments)
+            result = await asyncio.to_thread(tool.execute, call.arguments)
         finally:
             if token is not None:
                 _CURRENT_CALL.reset(token)
         for hook in list(self.hooks):
             try:
-                replaced = hook.after_tool(name, arguments, result)
+                replaced = hook.after_tool(call.name, call.arguments, result)
             except Exception as e:  # noqa: BLE001
                 return ToolResult(
                     success=False,
-                    error=f"Hook {hook.name} failed after {name} ran: {e}",
+                    error=f"Hook {hook.name} failed after {call.name} ran: {e}",
                 )
             if replaced is not None:
                 result = replaced
         return result
+
+    async def execute(
+        self, name: str, arguments: dict[str, Any], call_id: str | None = None
+    ) -> ToolResult:
+        """Admit and run one call (Code Mode sub-calls come through here)."""
+        parent = _CURRENT_CALL.get()
+        if parent is not None and call_id is None:
+            # A Code Mode sub-call: give it an id and trace it under its
+            # run_code parent (sub-calls never enter history).
+            call_id = f"{parent}.{secrets.token_hex(3)}"
+            return await self._execute_traced(name, arguments, call_id, parent)
+        return await self._execute(name, arguments, call_id)
+
+    async def _execute(
+        self, name: str, arguments: dict[str, Any], call_id: str | None
+    ) -> ToolResult:
+        call = self.admit(name, arguments)
+        if isinstance(call, ToolResult):
+            return call
+        return await self.run(call, call_id)
 
     async def _execute_traced(
         self, name: str, arguments: dict[str, Any], call_id: str, parent: str
@@ -126,6 +153,8 @@ class ToolRegistry:
         if log is not None:
             log("tool_call", id=call_id, parent_call_id=parent, name=name,
                 arguments=arguments)
+        # Same tool_result shape as a top-level call (started_at included).
+        started_at = utc_now_iso()
         start = time.monotonic()
         result = await self._execute(name, arguments, call_id)
         if log is not None:
@@ -137,6 +166,7 @@ class ToolRegistry:
                 success=result.success,
                 output=result.output,
                 error=result.error,
+                started_at=started_at,
                 duration=time.monotonic() - start,
             )
         return result

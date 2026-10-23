@@ -52,6 +52,12 @@ async def test_plan_mode_blocks_a_write_call_in_a_turn(tmp_path):
     tool_msgs = [m for m in agent.messages if m.role == "tool"]
     assert len(tool_msgs) == 1
     assert "Plan mode" in (tool_msgs[0].content or "")
+    # The refused call never started: no intent is journaled for it, so a
+    # crash here would recover it as "did not run", not "may have
+    # partially run".
+    from limbo.sessions import load_session_full
+
+    assert load_session_full(agent.session_path).intents == []
 
 
 
