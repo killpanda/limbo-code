@@ -77,10 +77,11 @@ from limbo.trace import TRACE_SCHEMA, TraceLogger, trace_path_for, utc_now_iso
 # it burns the whole iteration budget re-sending what can never fit.
 _MAX_CONSECUTIVE_LENGTH_STOPS = 3
 
-# Placeholder result for tool calls that never started because the user
-# interrupted the batch (RFC LIM-53). Only ever used for calls that
-# genuinely never ran, so history and disk cannot diverge.
-_NOT_EXECUTED_MESSAGE = "未执行：用户打断（ESC）"
+# Placeholder result for tool calls that never started because the batch
+# was interrupted (RFC LIM-53). Only ever used for calls that genuinely
+# never ran, so history and disk cannot diverge. ``interrupt(reason)``
+# names who stopped it (the supervisor pausing or cancelling a subagent).
+_USER_INTERRUPT_REASON = "用户打断（ESC）"
 
 
 class _StreamInterrupted(Exception):
@@ -139,6 +140,8 @@ class UsageUpdate:
     """Cumulative token usage for the session, emitted after each LLM call."""
 
     total_tokens: int
+    # Tokens the provider had to process anew: total minus cache hits.
+    fresh_tokens: int = 0
 
 
 @dataclass(frozen=True)
@@ -233,7 +236,11 @@ class Agent:
         # stream / tool batch / compact summary at the nearest
         # history-consistency point.
         self._interrupt_requested = False
+        self._interrupt_reason = _USER_INTERRUPT_REASON
         self._turn_interrupted = False
+        # request_stop(): end the turn at the next loop top, before another
+        # request goes out (the current tool batch still runs).
+        self._stop_reason: str | None = None
         self._stream_task: asyncio.Task[Any] | None = None
         self._stream_cut = False
         self._iteration_count = 0
@@ -244,6 +251,11 @@ class Agent:
         # Extra system-prompt section and tools installed after
         # construction (subagent orchestration, see install()).
         self._prompt_extra = ""
+        # Cache parity (install()): a fork child sends its parent's exact
+        # system prompt and tool definitions so the provider's prefix cache
+        # hits; the child's own registry and hooks still decide dispatch.
+        self._system_override: str | None = None
+        self._advertised_tools: list[dict[str, Any]] | None = None
         # Frozen memory snapshot (limbo.memory): taken once per session so
         # mid-session memory writes never change the prompt prefix.
         store = self.registry.memory_store
@@ -499,6 +511,22 @@ class Agent:
         return sum(entry.total_tokens for entry in self._meta.usage.values())
 
     @property
+    def session_fresh_tokens(self) -> int:
+        """Cumulative tokens minus prompt-cache hits: what the provider had
+        to process anew. Re-sending a cached prefix every iteration costs
+        little, so budgets count this, not ``session_total_tokens``."""
+        return sum(
+            max(0, entry.total_tokens - entry.cached_tokens)
+            for entry in self._meta.usage.values()
+        )
+
+    def _usage_update(self) -> UsageUpdate:
+        return UsageUpdate(
+            total_tokens=self.session_total_tokens,
+            fresh_tokens=self.session_fresh_tokens,
+        )
+
+    @property
     def usage_ledger(self) -> dict[str, UsageEntry]:
         return dict(self._meta.usage)
 
@@ -616,12 +644,19 @@ class Agent:
         hooks: Sequence[ToolHook] = (),
         remove_tools: Sequence[str] = (),
         prompt_section: str = "",
+        system_prompt: str | None = None,
+        advertised_tools: list[dict[str, Any]] | None = None,
     ) -> None:
         """Extend this agent after construction (subagent orchestration).
 
         Registers tool instances and hooks, removes tools a profile does
         not grant, and appends ``prompt_section`` to the system prompt,
         which is rebuilt in place (resume regenerates it anyway).
+
+        ``system_prompt`` / ``advertised_tools`` replace what the model is
+        shown verbatim (cache parity with a parent session); calls are
+        still dispatched through this agent's own registry, so a tool that
+        is advertised but not registered fails as unknown.
         """
         for name in remove_tools:
             self.registry.unregister(name)
@@ -630,6 +665,10 @@ class Agent:
         self.registry.hooks.extend(hooks)
         if prompt_section:
             self._prompt_extra = prompt_section
+        if system_prompt is not None:
+            self._system_override = system_prompt
+        if advertised_tools is not None:
+            self._advertised_tools = advertised_tools
         self._init_system_message()
 
     @property
@@ -642,15 +681,31 @@ class Agent:
         return self._end_turn_requested
 
     def _init_system_message(self) -> None:
-        prompt = build_system_prompt(self.registry, self.workdir, memory=self._memory)
-        if self._prompt_extra:
-            prompt += "\n\n" + self._prompt_extra
+        if self._system_override is not None:
+            prompt = self._system_override
+        else:
+            prompt = build_system_prompt(self.registry, self.workdir, memory=self._memory)
+            if self._prompt_extra:
+                prompt += "\n\n" + self._prompt_extra
         if self.messages and self.messages[0].role == "system":
             # Code Mode toggles rebuild the system prompt in place (the
             # SDK section changes with the presentation).
             self.messages[0] = Message(role="system", content=prompt)
         else:
             self.messages.append(Message(role="system", content=prompt))
+
+    @property
+    def system_prompt(self) -> str:
+        """The system prompt the next request sends."""
+        if self.messages and self.messages[0].role == "system":
+            return self.messages[0].content or ""
+        return ""
+
+    def tool_definitions(self) -> list[dict[str, Any]]:
+        """The tool definitions the next request sends."""
+        if self._advertised_tools is not None:
+            return self._advertised_tools
+        return self.registry.definitions()
 
     @property
     def messages(self) -> list[Message]:
@@ -833,7 +888,7 @@ class Agent:
 
     # -- interrupt (LIM-53) ---------------------------------------------------
 
-    def interrupt(self) -> None:
+    def interrupt(self, reason: str = _USER_INTERRUPT_REASON) -> None:
         """Interrupt the current turn / compact at the next consistency point.
 
         Non-blocking; safe to call from the UI at any time (a no-op when
@@ -845,10 +900,26 @@ class Agent:
         cancellable by design (they finish and record real results).
         """
         self._interrupt_requested = True
+        self._interrupt_reason = reason
         task = self._stream_task
         if task is not None and not task.done():
             task.cancel()
         self.registry.cancel_active()
+
+    def request_stop(self, reason: str) -> None:
+        """End the current turn before its next LLM request.
+
+        Unlike interrupt() nothing is cancelled: the in-flight response
+        and its tool batch complete and are recorded, then the loop top
+        stops instead of sending another request (a subagent over its
+        token budget). Reset at run() entry; see ``stop_reason``.
+        """
+        self._stop_reason = reason
+
+    @property
+    def stop_reason(self) -> str | None:
+        """Why request_stop() ended the last turn (None: it did not)."""
+        return self._stop_reason
 
     @property
     def last_run_failed(self) -> bool:
@@ -964,7 +1035,9 @@ class Agent:
         # RFC LIM-53: an interrupt requested while idle must not leak into
         # this turn (one of the two reset points; compact() is the other).
         self._interrupt_requested = False
+        self._interrupt_reason = _USER_INTERRUPT_REASON
         self._turn_interrupted = False
+        self._stop_reason = None
         self._turn_count += 1
         self._turn_start = time.monotonic()
         self._turn_started_at = utc_now_iso()
@@ -1135,6 +1208,16 @@ class Agent:
 
     async def _conversation_loop(self) -> AsyncIterator[AgentEvent]:
         while self._iteration_count < self.config.llm.max_iterations:
+            if self._stop_reason is not None:
+                # request_stop(): history is consistent here (the previous
+                # batch is recorded) and nothing is in flight.
+                self.trace.log(
+                    "turn_stopped",
+                    turn=self._turn_count,
+                    iteration=self._iteration_count,
+                    reason=self._stop_reason,
+                )
+                break
             self._iteration_count += 1
             # Loop-top check: history is consistent here (all tool results
             # from the previous batch are recorded) and no request has been
@@ -1365,7 +1448,7 @@ class Agent:
                 # start of the batch (cancel_active() had nothing to kill
                 # yet) — no call starts, every call gets the placeholder.
                 for tc in tool_calls:
-                    result = ToolResult(success=False, error=_NOT_EXECUTED_MESSAGE)
+                    result = ToolResult(success=False, error=f"未执行：{self._interrupt_reason}")
                     results[tc["id"]] = result
                     unexecuted.append(tc["id"])
                     yield ToolResultEvent(
@@ -1395,7 +1478,7 @@ class Agent:
                     # Only genuinely un-executed calls get it — started
                     # tools always record their real result, so history
                     # and disk cannot diverge.
-                    result = ToolResult(success=False, error=_NOT_EXECUTED_MESSAGE)
+                    result = ToolResult(success=False, error=f"未执行：{self._interrupt_reason}")
                     unexecuted.append(tc["id"])
                 else:
                     admission = (await self._admit([tc]))[tc["id"]]
@@ -1555,7 +1638,7 @@ class Agent:
                     pass
 
     async def _call_llm(self) -> AsyncIterator[AgentEvent]:
-        tool_definitions = self.registry.definitions()
+        tool_definitions = self.tool_definitions()
         assistant_content = ""
         assistant_reasoning = ""
         assistant_signature: str | None = None
@@ -1678,7 +1761,7 @@ class Agent:
         totals = self.record_usage(usage)
         self._last_finish_reason = meta.finish_reason if meta else None
         if totals.total_tokens:
-            yield UsageUpdate(total_tokens=self.session_total_tokens)
+            yield self._usage_update()
         self.trace.log(
             "llm_response",
             turn=self._turn_count,
@@ -1907,7 +1990,7 @@ class Agent:
         )
         # The summary call is billed too: refresh the counter.
         if self.session_total_tokens:
-            yield UsageUpdate(total_tokens=self.session_total_tokens)
+            yield self._usage_update()
 
     def _save_session_sync(self) -> None:
         """Persist the session: incremental append by default, full rewrite

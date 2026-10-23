@@ -29,10 +29,12 @@ class FakeLLMClient:
         self.responses = responses or []
         self.calls = 0
         self.seen: list[list] = []
+        self.tools: list = []
 
     async def chat(self, messages, tools, on_request=None):
         self.calls += 1
         self.seen.append(list(messages))
+        self.tools.append(tools)
         for event in self.responses.pop(0):
             yield event
 
@@ -255,8 +257,7 @@ async def test_learn_runs_a_reviewer_that_writes_a_skill(tmp_path):
             {"action": "create", "name": "trip-planning",
              "content": _skill_md("trip-planning", "Use when planning trips.")}]}),
          CompletionMeta()],
-        [ToolCallEvent(id="r2", name="finish", arguments={"summary": "trip-planning: new"}),
-         CompletionMeta()],
+        [TextChunk(text="trip-planning: new"), CompletionMeta()],
     ])
     conv = Conversation(config=Config(), workdir=tmp_path, llm_client=client,
                         session_dir=tmp_path / "sessions", daily=True)
@@ -269,5 +270,28 @@ async def test_learn_runs_a_reviewer_that_writes_a_skill(tmp_path):
         await asyncio.sleep(0.01)
     task = next(iter(conv.supervisor.board.tasks.values()))
     assert task.status == "done", task
+    assert task.outcome is not None and task.outcome.summary == "trip-planning: new"
     assert (skills_module.DEFAULT_DAILY_SKILLS_DIR / "trip-planning" / "SKILL.md").exists()
+    # Cache parity: the reviewer sends the main session's exact system
+    # prompt and tool list; its role and brief ride in the first message.
+    assert client.seen[0][0].content == conv.agent.system_prompt
+    assert client.tools[0] == conv.agent.tool_definitions()
+    first = client.seen[0][-1].content or ""
+    assert "<subagent_role>" in first and "skill_manage" in first
+    conv.close()
+
+
+def test_daily_child_stays_daily_when_its_profile_drops_web_fetch(tmp_path):
+    # The skill-reviewer's tool list has no web_fetch; the session is still
+    # a daily one (its prompt, its persisted meta).
+    conv = Conversation(config=Config(), workdir=tmp_path, llm_client=FakeLLMClient(),
+                        session_dir=tmp_path / "sessions", daily=True)
+    assert conv.supervisor is not None
+    conv.supervisor.plan([{"title": "t", "brief": "b", "profile": "skill-reviewer",
+                           "context": "fork"}], created_by="user")
+    task = conv.supervisor.board.live()[0]
+    child, _ = conv.supervisor._open_agent(task)
+    assert child.registry.get("web_fetch") is None
+    assert child.daily_mode
+    child.close()
     conv.close()

@@ -33,7 +33,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from limbo.agent import ErrorEvent, TextDelta, ToolCallRequest, UsageUpdate
+from limbo.agent import ErrorEvent, TextDelta, ToolCallRequest, ToolResultEvent, UsageUpdate
 from limbo.config import Config
 from limbo.llm.client import LLMClient
 from limbo.sessions import save_session
@@ -62,7 +62,7 @@ from limbo.subagents.events import (
     PlanProposed,
     TaskChanged,
 )
-from limbo.subagents.hooks import ClaimHook, NoEditHook, ReadOnlyHook
+from limbo.subagents.hooks import SUBAGENT_TOOL_NAMES, ClaimHook, NoEditHook, ReadOnlyHook
 from limbo.subagents.profiles import (
     NO_EDIT,
     READ_ONLY,
@@ -131,6 +131,20 @@ user does not watch you live.
   finish(status="failed") and say why.
 {scope}{others}</subagent_role>"""
 
+# A cache-parity fork child (profile inherit_prompt) keeps the main
+# session's system prompt and tool list byte for byte, so its role travels
+# in the first user message instead, and it has no task tools of its own:
+# its final plain-text reply is the result.
+FORK_CHILD_PROMPT = """<subagent_role>
+From here on you are the subagent "{agent}" of limbo, working on task {id}:
+{title}. The conversation above is the main session's, shown for context;
+the user does not watch you live.
+- The tool list is the main session's, but you may only call: {tools}.
+  Any other tool fails.
+- When you are done, reply with your result as plain text and no tool
+  calls: that reply is all the main agent reads.
+</subagent_role>"""
+
 
 @dataclass
 class PlanResult:
@@ -148,6 +162,10 @@ class _Runner:
     last_text: str = ""
     last_error: str = ""
     over_budget: bool = False
+    budget_reason: str = ""
+    # First line of every successful state-changing call (named in the
+    # outcome when the budget ends the task before it reports).
+    writes: list[str] = field(default_factory=list)
     resumed: bool = False
 
 
@@ -396,6 +414,7 @@ class Supervisor:
                 async for event in agent.run(text):
                     self._observe(runner, event)
                 if runner.over_budget:
+                    self._finish_over_budget(runner)
                     break
                 if self.board.get(task_id).status != "running":
                     break
@@ -460,20 +479,49 @@ class Supervisor:
                 self._set_activity(task_id, "✎ 回复中")
         elif isinstance(event, ErrorEvent):
             runner.last_error = event.message
+        elif isinstance(event, ToolResultEvent):
+            agent = runner.agent
+            if (
+                event.result.success
+                and event.name not in SUBAGENT_TOOL_NAMES
+                and agent is not None
+                and agent.registry.replay_policy(event.name) != "safe"
+            ):
+                first = (event.result.output or "").strip().splitlines()
+                runner.writes.append(f"{event.name}：{first[0][:160] if first else '完成'}")
         elif isinstance(event, UsageUpdate):
             self._tokens[task_id] = event.total_tokens
             task = self.board.tasks.get(task_id)
             budget = task.max_tokens if task is not None else 0
-            if budget and event.total_tokens > budget and not runner.over_budget:
+            # The budget counts fresh tokens: a fork child re-sends the
+            # whole inherited conversation every iteration, and those cache
+            # hits would otherwise exhaust it in a handful of requests.
+            if budget and event.fresh_tokens > budget and not runner.over_budget:
                 runner.over_budget = True
-                if runner.agent is not None:
-                    runner.agent.interrupt()
-                self._finish(
-                    task_id,
-                    summary=runner.last_text,
-                    failed=True,
-                    reason=f"超出 token 预算（{event.total_tokens} > {budget}）",
+                runner.budget_reason = (
+                    f"超出 token 预算（新增 {event.fresh_tokens} > {budget}，缓存命中不计）"
                 )
+                # Not interrupt(): the response that crossed the line and
+                # its tool batch complete (their writes land), then the
+                # turn ends before the next request.
+                if runner.agent is not None:
+                    runner.agent.request_stop(runner.budget_reason)
+
+    def _finish_over_budget(self, runner: _Runner) -> None:
+        """The budget ended the turn: report what the task got done."""
+        task = self.board.tasks.get(runner.task_id)
+        if task is None or task.terminal:
+            return  # it called finish in the crossing batch
+        lines = [runner.budget_reason + "，已在下一次请求前收尾，结果可能不完整"]
+        if runner.writes:
+            lines.append("已执行的改动：\n" + "\n".join(f"- {w}" for w in runner.writes[-20:]))
+        text = runner.last_text.strip()
+        self._finish(
+            runner.task_id,
+            summary=text,
+            failed=not (text or runner.writes),
+            reason="\n".join(lines),
+        )
 
     def _set_activity(self, task_id: str, text: str) -> None:
         self._activity[task_id] = text
@@ -545,6 +593,17 @@ class Supervisor:
         self._configure(agent, task, profile, workdir)
         return agent, resumed
 
+    def _inherits_prompt(self, task: Task, profile: Profile) -> bool:
+        """Cache parity (hermes' background review): a fork child on the
+        main model sends the main session's exact prefix, so even its first
+        request is a prompt-cache hit. On another model the cache is cold
+        anyway and the child keeps its own prompt and task tools."""
+        return (
+            task.context == "fork"
+            and profile.inherit_prompt
+            and self._model_for(profile) == self.main.config.llm.model
+        )
+
     def _write_fork(self, path: Path, task: Task) -> None:
         """context=fork: the child starts from the main history up to the
         current turn's user message (never a half-finished tool batch)."""
@@ -587,6 +646,18 @@ class Supervisor:
             hooks.append(NoEditHook())
         if profile.writes and task.isolation == "shared":
             hooks.append(ClaimHook(task.id, self.board, workdir))
+        if self._inherits_prompt(task, profile):
+            # Advertising is not permission: the main tool list is shown,
+            # the child's trimmed registry and hooks decide what runs.
+            agent.install(
+                hooks=hooks,
+                remove_tools=remove,
+                system_prompt=self.main.system_prompt,
+                advertised_tools=self.main.tool_definitions(),
+            )
+            if hasattr(agent.llm_client, "prompt_cache_key"):
+                agent.llm_client.prompt_cache_key = self.main.session_id
+            return
         agent.install(
             tools=subagent_tools(workdir, self, task.id),
             hooks=hooks,
@@ -625,6 +696,16 @@ class Supervisor:
                 parts.append("主 agent / 用户补充：\n" + inbox)
             return "\n\n".join(parts)
         parts = [f"任务 {task.id}：{task.title}", task.brief.strip()]
+        profile = resolve_profile(self.profiles, task.profile)
+        if self._inherits_prompt(task, profile):
+            names = profile.tool_names or []
+            role = FORK_CHILD_PROMPT.format(
+                agent=task.agent_name,
+                id=task.id,
+                title=task.title,
+                tools=", ".join(names) or "（主会话的全部工具）",
+            )
+            parts = [role, profile.body, *parts]
         if task.acceptance:
             parts.append(f"验收标准：{task.acceptance}")
         if task.scope_paths:
@@ -645,7 +726,7 @@ class Supervisor:
         self._stopped = True
         for runner in list(self._runners.values()):
             if runner.agent is not None:
-                runner.agent.interrupt()
+                runner.agent.interrupt("limbo 退出，任务会在下次启动时恢复")
             if runner.future is not None:
                 runner.future.cancel()
         self.board.set_sink(None)
@@ -951,7 +1032,7 @@ class Supervisor:
         )
         runner = self._runners.get(task.id)
         if runner is not None and runner.agent is not None:
-            runner.agent.interrupt()
+            runner.agent.interrupt("任务被暂停")
         return f"{task.id} 已暂停"
 
     def _resume(self, task: Task, note: str) -> str:
@@ -978,7 +1059,7 @@ class Supervisor:
         )
         runner = self._runners.get(task.id)
         if runner is not None and runner.agent is not None:
-            runner.agent.interrupt()
+            runner.agent.interrupt("任务被取消")
         if by == "system":
             self._push(self._result_notice(self.board.get(task.id)))
         return f"{task.id} 已取消"

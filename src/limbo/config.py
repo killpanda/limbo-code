@@ -325,7 +325,9 @@ class SubagentSettings(BaseModel):
     # Live (unfinished) tasks at a time. Subagents never plan themselves
     # (depth 1): they can only propose_task, which the main agent approves.
     max_tasks: int = 12
-    # Per-task token budget (0 = unlimited); a task over budget fails.
+    # Per-task budget of fresh tokens (total minus prompt-cache hits;
+    # 0 = unlimited). Over it, the current tool batch completes and the
+    # task ends before its next request, reporting what it changed.
     task_token_budget: int = 400_000
     # Model for profiles with ``model: cheap`` (empty = the main model).
     cheap_model: str = ""
