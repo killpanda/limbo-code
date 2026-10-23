@@ -97,6 +97,24 @@ you can branch, hand off, or replay any session.
 - `Ctrl+P` command palette, image and file paste with `Ctrl+V`, collapsible
   tool output with `Ctrl+O`.
 
+### Daily mode for everything else
+
+`limbo daily` (or `/daily-mode on`) turns Limbo into an everyday assistant for
+non-coding work, in its own working directory:
+
+- **Memory.** `USER.md` (who you are) and `NOTES.md` (what it learned) under
+  `~/.limbo/memory/`, loaded into daily sessions only, never into coding ones.
+- **More tools.** `web_fetch` reads pages and PDFs, `session_search` recalls
+  past conversations, and `ask_user` asks you a multiple-choice question.
+- **A starter pack of skills** for PDFs, Word, Excel, slides, citations,
+  meeting notes, weekly reviews, YouTube and arXiv. Daily mode has its own
+  skill directory (`~/.limbo/daily/skills/`) that coding sessions never see.
+- **It learns.** `/learn`, or an automatic review after a long stretch of
+  work, has a background subagent write what it learned into skills. Every
+  write lands in the daily skill directory and keeps a `.bak`.
+
+See [docs/daily-mode.md](docs/daily-mode.md).
+
 ### Scriptable
 
 `limbo --headless` gives the same agent as a line-oriented REPL, and
@@ -244,6 +262,31 @@ The screenshot above is rendered from the real UI by
 `scripts/readme_hero.py` (`uv run python scripts/readme_hero.py`), so it can't
 drift from what ships.
 
+## Acknowledgements
+
+Limbo borrows openly from other agents. Thank you to:
+
+- **[pi](https://github.com/badlogic/pi-mono) and pi-durable.** The durable
+  session design comes from pi-durable: the "commit the intent, then the
+  effect" journal, the replay policy for tool calls interrupted by a crash,
+  the placeholders that say what is known about an unfinished call, the
+  steer and follow-up inbox (`Alt+Enter`), the task graph edges behind
+  background subagents, and context overflow detection. From the pi coding
+  agent itself: the built-in tool behavior (output limits, multi-edit,
+  process-tree kill, ripgrep), the provider conventions and model catalog,
+  compaction and the session entry model, and collapsing large pastes.
+- **[Crush](https://github.com/charmbracelet/crush)** by Charm. Limbo Motion's
+  staggered entrance for the activity indicator is borrowed from Crush, and
+  the Limbo Dusk TUI (gradient wordmark, `╱` dialog rules, the `Ctrl+P`
+  command palette and `Ctrl+S` session picker) takes its cues from it.
+- **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** by Nous
+  Research. Daily mode is modeled on Hermes: the `USER.md` / `NOTES.md`
+  memory with its frozen per-session snapshot and the memory nudge,
+  `session_search`, `ask_user`, and skill self-learning (the skill reviewer's
+  prompt is adapted from Hermes). The bundled daily skills in
+  `src/limbo/daily_skills/` are ported from Hermes under the MIT license, and
+  each keeps its `LICENSE`.
+
 ## Learn more
 
 - [`AGENTS.md`](AGENTS.md): architecture and design decisions
@@ -251,6 +294,8 @@ drift from what ships.
 - [`docs/session-management.md`](docs/session-management.md): sessions,
   recovery, fork and handoff, tracing viewer
 - [`docs/skills.md`](docs/skills.md): writing skills
+- [`docs/daily-mode.md`](docs/daily-mode.md): daily mode, memory and
+  self-learning skills
 - [`docs/subagents.md`](docs/subagents.md): background subagents, the task
   board and how to steer them
 - [`design/`](design/): RFCs for headless mode, bang commands, and the UI
