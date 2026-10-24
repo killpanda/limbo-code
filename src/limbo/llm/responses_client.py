@@ -107,7 +107,7 @@ class OpenAIResponsesClient:
     ) -> dict[str, Any]:
         instructions, input_items = _messages_to_responses(messages)
         body: dict[str, Any] = {
-            "model": self.config.llm.model,
+            "model": self.spec.wire_id,
             "store": False,
             "stream": True,
             "input": input_items,

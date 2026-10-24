@@ -138,7 +138,7 @@ class OpenAICompatibleClient:
             vision=self.spec.vision,
         )
         kwargs: dict[str, Any] = {
-            "model": self.config.llm.model,
+            "model": self.spec.wire_id,
             "messages": request_messages,
             "temperature": self.config.llm.temperature,
             "max_tokens": self.config.llm.max_tokens or self.spec.max_tokens,

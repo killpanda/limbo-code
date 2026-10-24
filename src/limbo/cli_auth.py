@@ -16,8 +16,10 @@ from typing import TextIO
 
 from limbo import auth
 from limbo.config import Config, load_config
+from limbo.llm import magpie
 from limbo.llm.catalog import (
     CATALOG,
+    MAGPIE,
     ModelSpec,
     ProviderSpec,
     api_key_source,
@@ -75,10 +77,13 @@ def login(
         provider = found[0]
     name = provider_display_name(provider.id)
     if key is None:
+        default = provider.default_api_key
+        prompt = f"{name} API key（输入不回显{f'，回车用默认 {default}' if default else ''}）："
         if stdin.isatty():
-            key = getpass.getpass(f"{name} API key（输入不回显）：")
+            key = getpass.getpass(prompt)
         else:
             key = stdin.readline()
+        key = key.strip() or (default or "")
     key = key.strip()
     if not key:
         print("没有输入 key，已取消", file=sys.stderr)
@@ -126,7 +131,10 @@ def list_models(config: Config, query: str | None = None, stdout: TextIO | None 
     stdout = stdout or sys.stdout
     current = config.llm.model
     for provider in providers():
-        specs = [s for s in CATALOG.values() if s.provider.id == provider.id]
+        if provider.id == MAGPIE.id:
+            specs = asyncio.run(magpie.live_models(config)) or magpie.seeded_models()
+        else:
+            specs = [s for s in CATALOG.values() if s.provider.id == provider.id]
         if query:
             specs = [s for s in specs if query.lower() in s.id.lower()]
         if not specs:

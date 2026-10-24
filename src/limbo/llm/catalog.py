@@ -59,6 +59,9 @@ class ProviderSpec:
     # Extra request-body fields sent only when the request carries tools
     # (GLM Coding Plan expects tool_stream for streamed tool calls).
     tool_extra_body: dict[str, Any] = field(default_factory=dict)
+    # Key used when nothing else is configured: local gateways such as
+    # Magpie accept a fixed placeholder, so they work with zero setup.
+    default_api_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -90,6 +93,14 @@ class ModelSpec:
     # Replay reasoning_content (empty string when absent) on assistant
     # messages. Kimi K3 rejects tool-call replays without the field.
     requires_reasoning_content: bool = False
+    # Model name sent on the wire when it differs from the limbo id (Magpie
+    # models are addressed as ``magpie/<provider>/<model>`` but the gateway
+    # expects ``<provider>/<model>``). Empty means "same as id".
+    api_model: str = ""
+
+    @property
+    def wire_id(self) -> str:
+        return self.api_model or self.id
 
 
 DEEPSEEK = ProviderSpec(
@@ -143,6 +154,43 @@ CODEX = ProviderSpec(
     base_url="https://api.openai.com/v1",
     api_key_env="CODEX_API_KEY",
 )
+
+
+# Magpie (https://usemagpie.ai/): a local desktop gateway that fronts many
+# vendors and subscriptions behind OpenAI Chat / Responses / Anthropic
+# Messages and translates streaming, tool calls and reasoning between them.
+# Provider keys stay inside Magpie; the gateway needs no client key, so the
+# placeholder "magpie" (its own docs' value) is sent unless one is set.
+# Limbo talks OpenAI Chat to it unless a model lists only another native
+# endpoint (see magpie_model); the variants share the provider id so keys
+# and [providers.magpie] overrides apply to all of them.
+MAGPIE = ProviderSpec(
+    id="magpie",
+    api=API_OPENAI_COMPLETIONS,
+    base_url="http://127.0.0.1:3425/v1",
+    api_key_env="MAGPIE_API_KEY",
+    default_api_key="magpie",
+)
+MAGPIE_RESPONSES = ProviderSpec(
+    id=MAGPIE.id,
+    api=API_OPENAI_RESPONSES,
+    base_url=MAGPIE.base_url,
+    api_key_env=MAGPIE.api_key_env,
+    default_api_key=MAGPIE.default_api_key,
+)
+# The Anthropic SDK appends /v1/messages itself.
+MAGPIE_MESSAGES = ProviderSpec(
+    id=MAGPIE.id,
+    api=API_ANTHROPIC_MESSAGES,
+    base_url="http://127.0.0.1:3425",
+    api_key_env=MAGPIE.api_key_env,
+    default_api_key=MAGPIE.default_api_key,
+)
+MAGPIE_PREFIX = f"{MAGPIE.id}/"
+# The gateway's own /v1/models entries by wire id (``<upstream>/<model>``),
+# filled by limbo.llm.magpie when the list is read. magpie_model prefers
+# these over catalog guesses.
+MAGPIE_LIVE: dict[str, dict[str, Any]] = {}
 
 
 def _codex(
@@ -383,9 +431,124 @@ CATALOG: dict[str, ModelSpec] = {
 }
 
 
+def _magpie_levels(levels: list[str]) -> dict[str, str]:
+    """Gateway reasoning levels → thinking_levels; "none" becomes "off"."""
+    return {("off" if level == "none" else level): level for level in levels}
+
+
+def _magpie_provider(endpoints: list[str]) -> ProviderSpec:
+    if not endpoints or "/v1/chat/completions" in endpoints:
+        return MAGPIE
+    if "/v1/responses" in endpoints:
+        return MAGPIE_RESPONSES
+    if "/v1/messages" in endpoints:
+        return MAGPIE_MESSAGES
+    return MAGPIE
+
+
+def _magpie_from_gateway(model_id: str, wire: str, entry: dict[str, Any]) -> ModelSpec:
+    """Spec from the gateway's own /v1/models entry for ``wire``."""
+    base = CATALOG.get(wire.rsplit("/", 1)[-1])
+    if base is not None and base.provider.id == MAGPIE.id:
+        base = None
+    provider = _magpie_provider(list(entry.get("native_endpoints") or []))
+    context = (
+        entry.get("context_window")
+        or entry.get("context_length")
+        or entry.get("max_input_tokens")
+    )
+    if not isinstance(context, int) or context <= 0:
+        context = base.context_window if base else DEFAULT_CONTEXT_WINDOW
+    # Keep the catalog's conservative output cap (thinking tokens count
+    # against it); the gateway's maximum only ever lowers it.
+    max_tokens = base.max_tokens if base else DEFAULT_MAX_TOKENS
+    max_output = entry.get("max_output_tokens")
+    if isinstance(max_output, int) and max_output > 0:
+        max_tokens = min(max_output, base.max_tokens if base else 65_536)
+    modalities = entry.get("modalities") or {}
+    vision = "image" in (modalities.get("input") or [])
+    reasoning = bool(entry.get("reasoning"))
+    levels = [lvl for lvl in entry.get("reasoning_levels") or [] if isinstance(lvl, str)]
+    thinking_format = None
+    if reasoning and levels:
+        thinking_format = {
+            API_OPENAI_RESPONSES: "openai-responses",
+            API_ANTHROPIC_MESSAGES: "anthropic-adaptive",
+        }.get(provider.api, "openai")
+    thinking_levels = _magpie_levels(levels) if thinking_format else {}
+    if thinking_format != "openai":
+        # Only reasoning_effort carries "none"; the other dialects have
+        # no off switch through the gateway.
+        thinking_levels.pop("off", None)
+    return ModelSpec(
+        id=model_id,
+        provider=provider,
+        api_model=wire,
+        context_window=context,
+        max_tokens=max_tokens,
+        reasoning=reasoning,
+        vision=vision,
+        thinking_format=thinking_format,
+        thinking_levels=thinking_levels,
+        thinking_can_disable="off" in thinking_levels,
+        requires_reasoning_content=bool(base and base.requires_reasoning_content),
+    )
+
+
+def magpie_model(model_id: str) -> ModelSpec:
+    """Spec for ``magpie/<upstream>/<model>`` (any id Magpie serves).
+
+    Magpie discovers its model list from each vendor at run time, so the
+    ids are open-ended. When the gateway's list has been read
+    (``MAGPIE_LIVE``), its context window, output cap, image input,
+    reasoning levels and native endpoint drive the spec. Otherwise window,
+    output cap, vision and reasoning are guessed from the catalog entry with
+    the same bare model name (``magpie/deepseek/deepseek-v4-pro`` →
+    ``deepseek-v4-pro``), with thinking through OpenAI ``reasoning_effort``;
+    routing groups and unknown models get generic defaults.
+    """
+    wire = model_id.removeprefix(MAGPIE_PREFIX)
+    entry = MAGPIE_LIVE.get(wire)
+    if entry is not None:
+        return _magpie_from_gateway(model_id, wire, entry)
+    base = CATALOG.get(wire.rsplit("/", 1)[-1])
+    if base is None or base.provider.id == MAGPIE.id:
+        return ModelSpec(id=model_id, provider=MAGPIE, api_model=wire)
+    levels = {level: level for level in base.thinking_levels} or {
+        level: level for level in ("low", "medium", "high")
+    }
+    return ModelSpec(
+        id=model_id,
+        provider=MAGPIE,
+        api_model=wire,
+        context_window=base.context_window,
+        max_tokens=base.max_tokens,
+        reasoning=base.reasoning,
+        vision=base.vision,
+        thinking_format="openai" if base.reasoning else None,
+        thinking_levels=levels if base.reasoning else {},
+        thinking_can_disable=False,
+        requires_reasoning_content=base.requires_reasoning_content,
+    )
+
+
 def resolve_model(model_id: str) -> ModelSpec:
     """Look up a model; unknown ids get a generic OpenAI-compatible spec."""
-    return CATALOG.get(model_id) or ModelSpec(id=model_id, provider=GENERIC_OPENAI)
+    if model_id.startswith(MAGPIE_PREFIX):
+        return magpie_model(model_id)
+    spec = CATALOG.get(model_id)
+    if spec is not None:
+        return spec
+    return ModelSpec(id=model_id, provider=GENERIC_OPENAI)
+
+
+# -- Magpie (local gateway) --------------------------------------------------
+# One example id so Magpie shows up in ``limbo auth login`` and, while the
+# gateway is not running, in the picker and ``limbo models``. The real list
+# is read from the gateway (limbo.llm.magpie); any
+# ``magpie/<upstream>/<model>`` id works.
+MAGPIE_EXAMPLE = MAGPIE_PREFIX + "deepseek/deepseek-flash"
+CATALOG[MAGPIE_EXAMPLE] = magpie_model(MAGPIE_EXAMPLE)
 
 
 def resolve_base_url(spec: ModelSpec, config: Config) -> str:
@@ -402,11 +565,16 @@ def resolve_base_url(spec: ModelSpec, config: Config) -> str:
     4. The configured value (DeepSeek default) as the final fallback.
     """
     override = config.providers.get(spec.provider.id)
-    if override and override.base_url:
-        return override.base_url
     stored = auth.get(spec.provider.id)
-    if stored and stored.base_url:
-        return stored.base_url
+    explicit = (override.base_url if override else None) or (
+        stored.base_url if stored else None
+    )
+    if explicit:
+        if spec.provider is MAGPIE_MESSAGES:
+            # Overrides name the OpenAI-style /v1 base; the Anthropic SDK
+            # adds /v1 itself.
+            return explicit.rstrip("/").removesuffix("/v1")
+        return explicit
     configured = config.llm.base_url
     if configured != DEFAULT_BASE_URL or not spec.provider.base_url:
         return configured
@@ -419,7 +587,8 @@ def resolve_api_key(spec: ModelSpec, config: Config) -> str | None:
     Resolution order (first hit wins): ``[providers.<id>] api_key``, then
     a stored login (``limbo auth login``, ``~/.limbo/auth.json``), then
     ``[llm] api_key``, then the environment variable named by
-    ``resolve_api_key_env``.
+    ``resolve_api_key_env``, then the provider's placeholder
+    ``default_api_key`` (local gateways only).
     """
     override = config.providers.get(spec.provider.id)
     if override and override.api_key:
@@ -430,9 +599,9 @@ def resolve_api_key(spec: ModelSpec, config: Config) -> str | None:
     if config.llm.api_key:
         return config.llm.api_key
     env = resolve_api_key_env(spec, config)
-    if env:
-        return os.environ.get(env)
-    return None
+    if env and os.environ.get(env):
+        return os.environ[env]
+    return spec.provider.default_api_key
 
 
 def api_key_source(spec: ModelSpec, config: Config) -> str | None:
@@ -447,6 +616,8 @@ def api_key_source(spec: ModelSpec, config: Config) -> str | None:
     env = resolve_api_key_env(spec, config)
     if env and os.environ.get(env):
         return f"${env}"
+    if spec.provider.default_api_key:
+        return "默认 key"
     return None
 
 
@@ -456,6 +627,7 @@ PROVIDER_NAMES = {
     "kimi-coding": "Kimi For Coding",
     "glm": "GLM Coding Plan",
     "codex": "OpenAI Codex",
+    "magpie": "Magpie（本地网关）",
     "custom": "自定义 OpenAI 兼容",
 }
 

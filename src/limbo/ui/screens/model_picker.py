@@ -1,6 +1,8 @@
 """Model picker (ctrl+l / /model): search, recents, and log in inline.
 
 Models are grouped by provider; recently used ones are listed first.
+Magpie's group is read live from the local gateway once the picker opens
+(seeded examples show until then, or while the gateway is not running).
 Typing filters by model id or provider. Picking a model whose provider has
 no key opens :class:`AuthDialog` to paste one, then switches. The last row
 connects any OpenAI-compatible endpoint. Dismisses with the model id, or
@@ -16,13 +18,17 @@ from textual.binding import Binding
 from textual.widgets import Input, Label, ListItem, ListView, Static
 
 from limbo.config import Config
+from limbo.llm import magpie
 from limbo.llm.catalog import (
     CATALOG,
     GENERIC_OPENAI,
+    MAGPIE,
+    MAGPIE_PREFIX,
     ModelSpec,
     api_key_source,
     provider_display_name,
     resolve_api_key_env,
+    resolve_model,
 )
 from limbo.ui import recent_models
 from limbo.ui.screens.auth_dialog import AuthDialog, AuthResult
@@ -37,8 +43,14 @@ def _format_context(tokens: int) -> str:
     return f"{tokens // 1024}K"
 
 
-def provider_groups() -> list[tuple[str, list[ModelSpec]]]:
-    """Catalog models grouped by provider, in first-appearance order."""
+def provider_groups(
+    magpie_models: list[ModelSpec] | None = None,
+) -> list[tuple[str, list[ModelSpec]]]:
+    """Catalog models grouped by provider, in first-appearance order.
+
+    ``magpie_models`` (the gateway's live list) replaces the seeded Magpie
+    entries when given.
+    """
     groups: dict[str, list[ModelSpec]] = {}
     order: list[str] = []
     for spec in CATALOG.values():
@@ -46,6 +58,8 @@ def provider_groups() -> list[tuple[str, list[ModelSpec]]]:
             groups[spec.provider.id] = []
             order.append(spec.provider.id)
         groups[spec.provider.id].append(spec)
+    if magpie_models and MAGPIE.id in groups:
+        groups[MAGPIE.id] = magpie_models
     return [(pid, groups[pid]) for pid in order]
 
 
@@ -66,6 +80,7 @@ class ModelPicker(Dialog[str | None]):
         # aligned with the ListView items, in display order.
         self._entries: list[tuple[str | None, bool]] = []
         self._pending: str | None = None
+        self._magpie: list[ModelSpec] = []
 
     def compose_body(self) -> ComposeResult:
         yield Input(placeholder="搜索模型或提供商…", id="model-search")
@@ -76,6 +91,14 @@ class ModelPicker(Dialog[str | None]):
         super().on_mount()
         self.query_one(Input).focus()
         self._select_first()
+        self.run_worker(self._load_magpie(), exclusive=True)
+
+    async def _load_magpie(self) -> None:
+        live = await magpie.live_models(self._config)
+        if not live:
+            return
+        self._magpie = live
+        await self._refresh_items(self.query_one(Input).value, keep_selection=True)
 
     def _available(self, spec: ModelSpec) -> bool:
         return api_key_source(spec, self._config) is not None
@@ -89,7 +112,11 @@ class ModelPicker(Dialog[str | None]):
             haystack = f"{spec.id} {spec.provider.id} {provider_display_name(spec.provider.id)}"
             return not query or query in haystack.lower()
 
-        recent = [CATALOG[m] for m in recent_models.load() if m in CATALOG and m != self._current]
+        recent = [
+            resolve_model(m)
+            for m in recent_models.load()
+            if (m in CATALOG or m.startswith(MAGPIE_PREFIX)) and m != self._current
+        ]
         recent = [spec for spec in recent if matches(spec)]
         if recent:
             items.append(ListItem(Label("◷ 最近", markup=False), classes="recent-header",
@@ -98,7 +125,7 @@ class ModelPicker(Dialog[str | None]):
             for spec in recent:
                 items.append(self._row(spec, self._available(spec)))
 
-        for provider_id, specs in provider_groups():
+        for provider_id, specs in provider_groups(self._magpie):
             specs = [spec for spec in specs if matches(spec)]
             if not specs:
                 continue
@@ -147,9 +174,19 @@ class ModelPicker(Dialog[str | None]):
                 return
 
     async def on_input_changed(self, event: Input.Changed) -> None:
+        await self._refresh_items(event.value)
+
+    async def _refresh_items(self, query: str, keep_selection: bool = False) -> None:
         view = self.query_one(ListView)
+        selected = None
+        if keep_selection and view.index is not None and view.index < len(self._entries):
+            selected = self._entries[view.index][0]
         await view.clear()
-        await view.extend(self._items(event.value))
+        await view.extend(self._items(query))
+        for index, (model_id, _) in enumerate(self._entries):
+            if selected is not None and model_id == selected:
+                view.index = index
+                return
         self._select_first()
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
@@ -178,7 +215,7 @@ class ModelPicker(Dialog[str | None]):
             self.app.push_screen(AuthDialog(GENERIC_OPENAI), self._on_auth)
             return
         if not available:
-            spec = CATALOG[model_id]
+            spec = resolve_model(model_id)
             env = resolve_api_key_env(spec, self._config)
             hint = f"${env}" if env else "[providers] / [llm] api_key"
             self.query_one("#picker-hint", Static).update(

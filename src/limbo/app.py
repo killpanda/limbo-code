@@ -9,6 +9,7 @@ from pathlib import Path
 
 from limbo.config import load_config
 from limbo.llm.catalog import (
+    MAGPIE_PREFIX,
     missing_api_key_message,
     resolve_api_key,
     resolve_model,
@@ -135,6 +136,10 @@ def main() -> int:
         config.llm.model, level = split_model_arg(args.model)
         if level:
             config.llm.thinking_effort = level
+    if config.llm.model.startswith(MAGPIE_PREFIX):
+        from limbo.llm import magpie  # noqa: PLC0415 - only for Magpie models
+
+        magpie.load_for_startup(config.llm.model, config)
     spec = resolve_model(config.llm.model)
     if not resolve_api_key(spec, config) and not (
         sys.stdin.isatty() and sys.stdout.isatty() and _first_run_login(spec, config)
