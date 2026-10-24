@@ -187,13 +187,15 @@ directory, `limbo --resume <id-prefix>` resumes any session.
 | `codex` (OpenAI Codex) | openai-responses | `https://api.openai.com/v1` (relay expected) |
 | `magpie` ([Magpie](https://usemagpie.ai/) local gateway) | openai-completions | `http://127.0.0.1:3425/v1` |
 
-Magpie models are addressed as `magpie/<provider>/<model>` (e.g.
-`limbo -m magpie/deepseek/deepseek-v4-pro`, or a routing group such as
-`magpie/group/coder`); limbo sends the part after `magpie/` to the gateway.
-No key is needed (the placeholder `magpie` is sent unless `$MAGPIE_API_KEY`
-or `limbo auth login magpie` sets one), and `limbo models magpie` lists what
-the running gateway serves. Models that match a catalog id inherit its
-context window and thinking levels.
+Magpie models are addressed as `magpie/<upstream>/<model>` (e.g.
+`limbo -m magpie/deepseek/deepseek-flash`, or a routing group such as
+`magpie/auto/deepseek-v4-pro`); limbo sends the part after `magpie/` to the
+gateway. The model list is read from the running gateway's `/v1/models`
+(`limbo models`, the `/model` picker, and startup with a Magpie model), and
+so are each model's context window, output cap, image input, reasoning
+levels and wire format (models that only serve Responses or Messages are
+spoken to natively). No key is needed: the placeholder `magpie` is sent
+unless `$MAGPIE_API_KEY` or `limbo auth login magpie` sets one.
 
 Unknown model ids fall back to generic OpenAI-compatible defaults, and the
 model picker can connect any OpenAI-compatible endpoint. Everything can also

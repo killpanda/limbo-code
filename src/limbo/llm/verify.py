@@ -9,6 +9,7 @@ timeouts, relays without ``/models`` and other errors come back as
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
 
 import httpx
 
@@ -58,13 +59,16 @@ async def check_key(
     return KeyCheck(UNVERIFIED, f"HTTP {response.status_code}，未能确认")
 
 
-async def list_model_ids(
+
+async def list_model_entries(
     provider: ProviderSpec, key: str, base_url: str | None = None, timeout: float = 2.0
-) -> list[str]:
-    """Model ids the endpoint's ``/models`` lists; empty when unreachable.
+) -> list[dict[str, Any]]:
+    """The endpoint's ``/models`` entries (each with a string ``id``);
+    empty when unreachable.
 
     Used for gateways whose model list lives on the user's machine (Magpie),
-    so the short timeout keeps ``limbo models`` snappy when it is not running.
+    so the short timeout keeps startup and ``limbo models`` snappy when it
+    is not running.
     """
     base = base_url or provider.base_url
     if not base:
@@ -76,4 +80,6 @@ async def list_model_ids(
         data = response.json().get("data", []) if response.is_success else []
     except (httpx.HTTPError, ValueError, AttributeError):
         return []
-    return [m["id"] for m in data if isinstance(m, dict) and isinstance(m.get("id"), str)]
+    if not isinstance(data, list):
+        return []
+    return [m for m in data if isinstance(m, dict) and isinstance(m.get("id"), str)]

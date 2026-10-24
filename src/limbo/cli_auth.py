@@ -16,22 +16,19 @@ from typing import TextIO
 
 from limbo import auth
 from limbo.config import Config, load_config
+from limbo.llm import magpie
 from limbo.llm.catalog import (
     CATALOG,
     MAGPIE,
-    MAGPIE_PREFIX,
     ModelSpec,
     ProviderSpec,
     api_key_source,
     provider_display_name,
     providers,
-    resolve_api_key,
     resolve_api_key_env,
-    resolve_base_url,
-    resolve_model,
     thinking_choices,
 )
-from limbo.llm.verify import INVALID, check_key, list_model_ids
+from limbo.llm.verify import INVALID, check_key
 
 
 def _first_model(provider: ProviderSpec) -> ModelSpec:
@@ -130,22 +127,12 @@ def logout(provider_id: str, stdout: TextIO | None = None) -> int:
     return 1
 
 
-def _magpie_specs(config: Config) -> list[ModelSpec]:
-    """Models the running Magpie gateway serves, else the built-in examples."""
-    seeded = [s for s in CATALOG.values() if s.provider is MAGPIE]
-    key = resolve_api_key(seeded[0], config) or ""
-    live = asyncio.run(
-        list_model_ids(MAGPIE, key, resolve_base_url(seeded[0], config))
-    )
-    return [resolve_model(MAGPIE_PREFIX + m) for m in live] or seeded
-
-
 def list_models(config: Config, query: str | None = None, stdout: TextIO | None = None) -> int:
     stdout = stdout or sys.stdout
     current = config.llm.model
     for provider in providers():
-        if provider is MAGPIE:
-            specs = _magpie_specs(config)
+        if provider.id == MAGPIE.id:
+            specs = asyncio.run(magpie.live_models(config)) or magpie.seeded_models()
         else:
             specs = [s for s in CATALOG.values() if s.provider.id == provider.id]
         if query:
