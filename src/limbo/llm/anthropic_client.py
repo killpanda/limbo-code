@@ -107,7 +107,7 @@ class AnthropicMessagesClient:
     ) -> dict[str, Any]:
         system, request_messages = _messages_to_anthropic(messages)
         body: dict[str, Any] = {
-            "model": self.config.llm.model,
+            "model": self.spec.wire_id,
             "max_tokens": self.config.llm.max_tokens or self.spec.max_tokens,
             "messages": request_messages,
             "stream": True,

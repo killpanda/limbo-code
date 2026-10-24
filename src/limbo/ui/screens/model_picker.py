@@ -19,10 +19,12 @@ from limbo.config import Config
 from limbo.llm.catalog import (
     CATALOG,
     GENERIC_OPENAI,
+    MAGPIE_PREFIX,
     ModelSpec,
     api_key_source,
     provider_display_name,
     resolve_api_key_env,
+    resolve_model,
 )
 from limbo.ui import recent_models
 from limbo.ui.screens.auth_dialog import AuthDialog, AuthResult
@@ -89,7 +91,11 @@ class ModelPicker(Dialog[str | None]):
             haystack = f"{spec.id} {spec.provider.id} {provider_display_name(spec.provider.id)}"
             return not query or query in haystack.lower()
 
-        recent = [CATALOG[m] for m in recent_models.load() if m in CATALOG and m != self._current]
+        recent = [
+            resolve_model(m)
+            for m in recent_models.load()
+            if (m in CATALOG or m.startswith(MAGPIE_PREFIX)) and m != self._current
+        ]
         recent = [spec for spec in recent if matches(spec)]
         if recent:
             items.append(ListItem(Label("◷ 最近", markup=False), classes="recent-header",

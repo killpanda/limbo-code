@@ -185,6 +185,15 @@ directory, `limbo --resume <id-prefix>` resumes any session.
 | `kimi-coding` | anthropic-messages | `https://api.kimi.com/coding` |
 | `glm` (GLM Coding Plan) | openai-completions | `https://open.bigmodel.cn/api/coding/paas/v4` |
 | `codex` (OpenAI Codex) | openai-responses | `https://api.openai.com/v1` (relay expected) |
+| `magpie` ([Magpie](https://usemagpie.ai/) local gateway) | openai-completions | `http://127.0.0.1:3425/v1` |
+
+Magpie models are addressed as `magpie/<provider>/<model>` (e.g.
+`limbo -m magpie/deepseek/deepseek-v4-pro`, or a routing group such as
+`magpie/group/coder`); limbo sends the part after `magpie/` to the gateway.
+No key is needed (the placeholder `magpie` is sent unless `$MAGPIE_API_KEY`
+or `limbo auth login magpie` sets one), and `limbo models magpie` lists what
+the running gateway serves. Models that match a catalog id inherit its
+context window and thinking levels.
 
 Unknown model ids fall back to generic OpenAI-compatible defaults, and the
 model picker can connect any OpenAI-compatible endpoint. Everything can also
