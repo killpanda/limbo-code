@@ -1631,7 +1631,7 @@ class MainScreen(Screen[None]):
             # final chunks are rendered even if the last flush tick had not
             # fired yet — otherwise the transcript/display loses the tail.
             chat = self.query_one("#chat", ChatWidget)
-            await chat.flush_stream()
+            await chat.end_stream()
             self._update_queue_status()
             # Disabling the input mid-turn moves focus away; give it back so
             # the user can keep typing without clicking.
