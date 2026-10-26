@@ -10,7 +10,7 @@ from textual.app import App
 
 from limbo.config import Config
 from limbo.llm.client import LLMClient
-from limbo.ui import omarchy
+from limbo.ui import heap, omarchy
 from limbo.ui.clipboard import write_clipboard_text
 from limbo.ui.daily_look import base_name, daily_variant, variant_name
 from limbo.ui.key_fixes import apply_key_fixes
@@ -127,6 +127,7 @@ class LimboApp(App[None]):
             self.theme = name
 
     def on_mount(self) -> None:
+        self.set_interval(heap.TICK_SECONDS, heap.HeapKeeper().tick)
         if self._follow_omarchy:
             self.set_interval(OMARCHY_POLL_SECONDS, self._sync_omarchy_theme)
         self.push_screen(

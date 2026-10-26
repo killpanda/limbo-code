@@ -104,7 +104,7 @@ class TraceLogger:
                 if record is None:
                     return
                 try:
-                    line = json.dumps(record, ensure_ascii=False, default=str)
+                    line = _encode(record)
                 except (TypeError, ValueError) as e:
                     # Extremely defensive: `default=str` should catch
                     # everything.
@@ -166,6 +166,37 @@ class TraceLogger:
             self._file.close()
         except OSError:
             pass
+
+
+_HISTORY_KEYS = ("messages", "input")  # chat completions / responses bodies
+_SPLICE = "\u0000limbo-history\u0000"
+
+
+def _encode(record: dict[str, Any]) -> str:
+    """``json.dumps(record)``, encoding a request body's history per message.
+
+    ``json.dumps`` holds the GIL for the whole call, so one call over a
+    multi-MB ``llm_request`` body stalled the UI thread (the event loop)
+    for tens of milliseconds per model call — growing with the session —
+    even though it runs on the writer thread. Per-message calls let the
+    event loop take the GIL back in between. The output is identical.
+    """
+    body = record.get("body")
+    if isinstance(body, dict):
+        for key in _HISTORY_KEYS:
+            history = body.get(key)
+            if isinstance(history, list) and len(history) > 1:
+                head = json.dumps(
+                    {**record, "body": {**body, key: [_SPLICE]}},
+                    ensure_ascii=False,
+                    default=str,
+                )
+                items = ", ".join(
+                    json.dumps(item, ensure_ascii=False, default=str) for item in history
+                )
+                marker = json.dumps([_SPLICE], ensure_ascii=False)
+                return head.replace(marker, f"[{items}]", 1)
+    return json.dumps(record, ensure_ascii=False, default=str)
 
 
 def read_trace(path: Path) -> list[dict[str, Any]]:

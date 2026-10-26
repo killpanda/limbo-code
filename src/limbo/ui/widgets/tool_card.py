@@ -26,6 +26,7 @@ from textual.css.query import NoMatches
 from textual.widgets import RichLog, Static
 
 from limbo.ui import motion
+from limbo.ui.reflow import update_line
 
 _STATE_SYMBOLS = {
     "running": "⠋",
@@ -181,7 +182,7 @@ class ToolCard(Vertical):
 
     def _refresh_header(self) -> None:
         try:
-            self.header.update(self._header_text())
+            update_line(self.header, self._header_text())
         except NoMatches:
             pass  # Not composed yet; on_mount refreshes.
 

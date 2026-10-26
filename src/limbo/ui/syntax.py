@@ -35,6 +35,7 @@ class LimboDarkStyle(Style):
 
     styles = {
         Text: "#DDE1EC",
+        Name: "#DDE1EC",
         Comment: "italic #7F85A0",
         Keyword: "#6B9BD2",
         Keyword.Type: "#6B9BD2",
@@ -65,6 +66,7 @@ class LimboLightStyle(Style):
 
     styles = {
         Text: "#1E2433",
+        Name: "#1E2433",
         Comment: "italic #6B7186",
         Keyword: "#2F5D8F",
         Keyword.Type: "#2F5D8F",
@@ -99,7 +101,8 @@ def style_for_theme(theme: Theme) -> type[Style]:
     if theme.name == LIMBO_LIGHT.name:
         return LimboLightStyle
     v = theme.variables
-    fg = str(theme.foreground)
+    # Non-limbo Textual themes leave optional slots unset (None).
+    fg = str(theme.foreground or ("#E0E0E0" if theme.dark else "#1E1E1E"))
     primary = str(theme.primary)
     accent = str(theme.accent or theme.primary)
     tertiary = v.get("text-tertiary", fg)
@@ -107,11 +110,14 @@ def style_for_theme(theme: Theme) -> type[Style]:
     success = str(theme.success or fg)
     warning = str(theme.warning or fg)
     error = str(theme.error or fg)
+    panel = theme.panel or theme.surface or theme.background
+    if panel is None:
+        panel = "#1E1E1E" if theme.dark else "#F0F0F0"
     key = (
         theme.name, fg, primary, accent, tertiary, secondary, success, warning, error,
         v.get("diff-added", success), v.get("diff-added-bg", ""),
         v.get("diff-removed", error), v.get("diff-removed-bg", ""),
-        str(theme.panel or theme.background),
+        str(panel),
     )
     cached = _STYLE_CACHE.get(key)
     if cached is not None:
@@ -127,6 +133,9 @@ def style_for_theme(theme: Theme) -> type[Style]:
             "default_style": "",
             "styles": {
                 Text: fg,
+                # Plain names (``x``) carry no Text parent: without this
+                # Pygments falls back to #000000 — invisible on dark themes.
+                Name: fg,
                 Comment: f"italic {tertiary}",
                 Keyword: primary,
                 Keyword.Type: primary,

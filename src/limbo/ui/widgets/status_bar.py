@@ -22,6 +22,7 @@ from textual.containers import Horizontal
 from textual.widgets import Static
 
 from limbo.ui.gradient import gradient_text, ramp, theme_gradient
+from limbo.ui.reflow import update_line
 
 _SPINNER_FRAMES = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
 _DIAG = "╱" * 400
@@ -241,7 +242,7 @@ class StatusBar(Horizontal):
             badge.append(label)
             label = badge
         try:
-            self._state_label.update(label)
+            update_line(self._state_label, label)
         except Exception:  # noqa: BLE001 - not composed yet
             pass
 

@@ -17,6 +17,7 @@ from textual.widgets import Static
 
 from limbo.ui import motion
 from limbo.ui.gradient import theme_gradient
+from limbo.ui.reflow import update_line
 
 _LABELS = {
     "thinking…": "思考中",
@@ -100,7 +101,7 @@ class ActivityLine(Static):
         line.append(self._label + motion.ellipsis(self._step, clock.mode), Style(color=secondary))
         elapsed = 0.0 if self._started is None else time.monotonic() - self._started
         line.append(f"  · {elapsed:.0f}s · esc 中断", Style(color=tertiary))
-        self.update(line)
+        update_line(self, line)
 
     @property
     def label(self) -> str:

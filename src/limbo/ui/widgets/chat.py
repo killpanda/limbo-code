@@ -7,12 +7,16 @@ lines.
 Performance model (long-session UI lag):
 - Streaming output (assistant Markdown + thinking) is batched into ~12 fps
   time slices instead of re-rendering on every chunk: each tick performs at
-  most one Markdown append, one thinking refresh, and one scroll.
+  most one reply append, one thinking refresh, and one scroll.
 - Thinking is collapsed by default to a one-line title (char count); the
   full text is only rendered while expanded (a click away).
 - Old messages are pruned from the DOM beyond a window (``_MAX_DOM_MESSAGES``),
   keeping the widget tree bounded; the full history stays in ``self.messages``
   and is paged back in via the "load more" pill at the top.
+- Each assistant reply is one ``MarkdownView`` widget, streaming or not
+  (Textual's ``Markdown`` mounts one child widget per block). Textual
+  re-arranges the whole DOM on every layout refresh, so the widget count —
+  not the message count — is what makes a long session lag.
 """
 
 from __future__ import annotations
@@ -24,11 +28,16 @@ from rich.text import Text
 from textual.app import ComposeResult
 from textual.containers import Horizontal, Vertical, VerticalScroll
 from textual.css.query import NoMatches
-from textual.widgets import Markdown, Static
+from textual.geometry import Size
+from textual.widget import Widget
+from textual.widgets import Static
 
 from limbo.models import Attachment
+from limbo.ui import heap
 from limbo.ui.banner import user_icon
+from limbo.ui.reflow import update_line
 from limbo.ui.widgets.landing import Landing
+from limbo.ui.widgets.markdown_view import MarkdownView
 from limbo.ui.widgets.mode_divider import ModeDivider
 from limbo.ui.widgets.tool_card import ToolCard
 
@@ -80,7 +89,7 @@ class ThinkingBlock(Vertical):
     def refresh_display(self) -> None:
         """Re-render at most once per flush slice (see ChatWidget._tick_flush)."""
         if self._collapsed:
-            self._summary.update(self._summary_text())
+            update_line(self._summary, self._summary_text())
         else:
             self._body.update(self._text)
 
@@ -229,7 +238,12 @@ class ChatWidget(VerticalScroll):
         # Full logical message list (display order), including messages
         # currently pruned from the DOM (old-message paging).
         self.messages: list[
-            Static | Markdown | QueuedMessage | ThinkingBlock | ToolCard | Landing
+            Static
+            | MarkdownView
+            | QueuedMessage
+            | ThinkingBlock
+            | ToolCard
+            | Landing
         ] = []
         # How many of the oldest messages are pruned from the DOM.
         self._pruned_count = 0
@@ -238,16 +252,12 @@ class ChatWidget(VerticalScroll):
         self.tool_cards: dict[str, ToolCard] = {}
         # Queued steer messages keyed by steer-item id (RFC LIM-20).
         self.queued_cards: dict[str, QueuedMessage] = {}
-        self._current_assistant: Markdown | None = None
+        self._current_assistant: MarkdownView | None = None
         self._current_thinking: ThinkingBlock | None = None
         # Streaming batch buffers (flushed at _FLUSH_INTERVAL).
         self._assistant_buffer = ""
         self._thinking_dirty = False
         self._flush_timer: Any = None
-        # Re-entrancy guard for concurrent flush paths (timer tick vs
-        # explicit flush_stream): two concurrent Markdown.append calls are
-        # the block-duplication bug this widget was built to avoid.
-        self._flush_in_flight = False
         # Dedupes the "retry after mount" re-schedule of _prune so a burst
         # of messages cannot stack unlimited retry callbacks.
         self._prune_scheduled = False
@@ -282,23 +292,31 @@ class ChatWidget(VerticalScroll):
 
     async def _tick_flush(self) -> None:
         """One time slice: at most one append + one thinking refresh + one scroll."""
-        if self._flush_in_flight:
+        scrolled = False
+        if self._assistant_buffer and self._current_assistant is not None:
+            buf, self._assistant_buffer = self._assistant_buffer, ""
+            self._current_assistant.append(buf)
+            scrolled = True
+        if self._thinking_dirty and self._current_thinking is not None:
+            self._current_thinking.refresh_display()
+            self._thinking_dirty = False
+            scrolled = True
+        if scrolled:
+            self._auto_scroll()
+
+    def _close_assistant(self) -> None:
+        """Finish the streaming reply block and detach it.
+
+        Text still in the stream buffer belongs to this block: it is folded
+        in here instead of leaking into the next reply.
+        """
+        md = self._current_assistant
+        if md is None:
             return
-        self._flush_in_flight = True
-        try:
-            scrolled = False
-            if self._assistant_buffer and self._current_assistant is not None:
-                buf, self._assistant_buffer = self._assistant_buffer, ""
-                await self._current_assistant.append(buf)
-                scrolled = True
-            if self._thinking_dirty and self._current_thinking is not None:
-                self._current_thinking.refresh_display()
-                self._thinking_dirty = False
-                scrolled = True
-            if scrolled:
-                self._auto_scroll()
-        finally:
-            self._flush_in_flight = False
+        self._current_assistant = None
+        tail, self._assistant_buffer = self._assistant_buffer, ""
+        md.append(tail)
+        md.finish()
 
     def _close_thinking(self) -> None:
         """Flush any pending thinking refresh and detach the current block.
@@ -320,7 +338,7 @@ class ChatWidget(VerticalScroll):
     def add_user_message(
         self, text: str, attachments: list[Attachment] | None = None
     ) -> None:
-        self._current_assistant = None
+        self._close_assistant()
         self._close_thinking()
         msg = Static(
             user_icon() + Text(" ") + Text(f"❯ {text}"),
@@ -355,7 +373,7 @@ class ChatWidget(VerticalScroll):
         followup: bool = False,
     ) -> QueuedMessage:
         """Optimistically render a message queued for steer injection."""
-        self._current_assistant = None
+        self._close_assistant()
         self._close_thinking()
         card = QueuedMessage(item_id, text, attachments, followup=followup)
         self.queued_cards[item_id] = card
@@ -397,14 +415,14 @@ class ChatWidget(VerticalScroll):
 
     def add_mode_divider(self, label: str, *, daily: bool, animate: bool = True) -> None:
         """Mark a daily mode switch with a full-width divider (Limbo Dawn)."""
-        self._current_assistant = None
+        self._close_assistant()
         self._close_thinking()
         divider = ModeDivider(label, daily=daily, animate=animate)
         self.messages.append(divider)
         self._mount_and_scroll(divider)
 
     def add_error(self, text: str) -> None:
-        self._current_assistant = None
+        self._close_assistant()
         self._close_thinking()
         # Structured error block (RFC §6.3): ✗ marker + indented detail lines.
         lines = text.splitlines() or [""]
@@ -425,7 +443,7 @@ class ChatWidget(VerticalScroll):
         block = self._current_thinking
         if block is None:
             # Thinking after assistant text starts a new block.
-            self._current_assistant = None
+            self._close_assistant()
             block = ThinkingBlock()
             self.messages.append(block)
             self._current_thinking = block
@@ -441,57 +459,44 @@ class ChatWidget(VerticalScroll):
         self._thinking_dirty = True
 
     async def append_assistant_text(self, text: str) -> None:
-        """Append a streamed chunk to the current assistant Markdown block.
+        """Append a streamed chunk to the current assistant reply block.
 
         Chunks accumulate in a buffer flushed at the flush cadence, so a
-        fast chunk burst performs one Markdown re-render per slice instead
-        of one per chunk (Markdown.append re-renders the whole document).
+        fast chunk burst performs one re-render per slice instead of one per
+        chunk.
         """
         # Assistant text after thinking starts a new block.
         self._close_thinking()
+        self._assistant_buffer += text
         if self._current_assistant is None:
-            # markdown=None: on_mount applies the initial markdown and would
-            # wipe any chunks appended before mounting finished, so the mount
-            # must be awaited before the first append.
-            md = Markdown(classes="assistant-message")
+            # Buffered before the mount await: a block closed meanwhile (a
+            # queued steer message) still folds this chunk in.
+            md = MarkdownView(streaming=True, classes="assistant-message")
             self.messages.append(md)
             self._current_assistant = md
             await self.mount(md)
             self._prune()
-        self._assistant_buffer += text
 
     async def flush_stream(self) -> None:
         """Render any buffered streaming output immediately (tests).
 
         The 12 fps flush timer normally handles this within one interval;
         this is an escape hatch for callers that need the text on screen
-        right now (Markdown.append is async and must be awaited). A no-op
-        (empty buffers) never scrolls, and a flush already in flight is
-        skipped to avoid concurrent Markdown.append calls.
+        right now. A no-op (empty buffers) never scrolls.
         """
-        if self._flush_in_flight:
-            return
-        self._flush_in_flight = True
-        try:
-            scrolled = False
-            if self._assistant_buffer and self._current_assistant is not None:
-                buf, self._assistant_buffer = self._assistant_buffer, ""
-                await self._current_assistant.append(buf)
-                scrolled = True
-            if self._thinking_dirty and self._current_thinking is not None:
-                self._current_thinking.refresh_display()
-                self._thinking_dirty = False
-                scrolled = True
-            if scrolled:
-                self._auto_scroll()
-        finally:
-            self._flush_in_flight = False
+        await self._tick_flush()
+
+    async def end_stream(self) -> None:
+        """Turn end: render the buffered tail, then finish the last reply."""
+        await self.flush_stream()
+        self._close_assistant()
+        self._close_thinking()
 
     def add_assistant_message(self, text: str) -> None:
-        """Add a complete (non-streamed) assistant Markdown block."""
-        self._current_assistant = None
+        """Add a complete (non-streamed) assistant reply (restored history)."""
+        self._close_assistant()
         self._close_thinking()
-        md = Markdown(text, classes="assistant-message")
+        md = MarkdownView(text, classes="assistant-message")
         self.messages.append(md)
         self._mount_and_scroll(md)
 
@@ -502,7 +507,7 @@ class ChatWidget(VerticalScroll):
         is long finished, so the block is mounted whole with just its
         one-line summary visible.
         """
-        self._current_assistant = None
+        self._close_assistant()
         self._close_thinking()
         block = ThinkingBlock()
         block.append(text)
@@ -527,6 +532,8 @@ class ChatWidget(VerticalScroll):
         self._follow = True
         self._update_floater()
         self._update_load_more()
+        # The dropped widgets may be frozen by the HeapKeeper; let them go.
+        heap.release()
 
     # -- tool cards -----------------------------------------------------------
 
@@ -548,7 +555,7 @@ class ChatWidget(VerticalScroll):
         if existing is not None:
             return existing
         # Text after a tool card must start a new assistant block.
-        self._current_assistant = None
+        self._close_assistant()
         self._close_thinking()
         card = ToolCard(tool_id, name, arguments, agent_owned=agent_owned)
         self.tool_cards[tool_id] = card
@@ -579,7 +586,7 @@ class ChatWidget(VerticalScroll):
         for block in (self._current_assistant, self._current_thinking):
             if block is not None:
                 block.add_class("voided")
-        self._current_assistant = None
+        self._close_assistant()
         self._current_thinking = None
         self._thinking_dirty = False
         self.cancel_running_tool_cards()
@@ -625,7 +632,7 @@ class ChatWidget(VerticalScroll):
         saw_unmounted = False
         while to_remove < excess:
             oldest = self.messages[self._pruned_count + to_remove]
-            if not oldest._is_mounted or oldest.region.area == 0:
+            if not oldest._is_mounted or self._laid_out_size(oldest).area == 0:
                 # Still mounting / not yet laid out: region is NULL and
                 # cannot be measured or viewport-protected.
                 saw_unmounted = True
@@ -654,9 +661,12 @@ class ChatWidget(VerticalScroll):
             # drifts by one line per pruned message.
             margin = oldest.styles.margin
             removed_height += max(
-                0, oldest.region.height + margin.top + margin.bottom
+                0, self._laid_out_size(oldest).height + margin.top + margin.bottom
             )
-            self.messages[self._pruned_count].remove()
+            oldest.remove()
+            # Pruned widgets stay referenced for paging; their rendered
+            # lines would otherwise stay cached for the whole session.
+            oldest._styles_cache.clear()
             self._pruned_count += 1
         if not self._follow and removed_height > 0:
             # Compensate immediately, not via call_after_refresh: the removed
@@ -670,6 +680,19 @@ class ChatWidget(VerticalScroll):
         if saw_unmounted and not self._prune_scheduled:
             self._prune_scheduled = True
             self.call_after_refresh(self._prune_retry)
+
+    @staticmethod
+    def _laid_out_size(widget: Widget) -> Size:
+        """A widget's size from the last layout (region size, sans margin).
+
+        ``region`` of an off-screen widget makes the compositor arrange the
+        whole unclipped DOM a second time — on every prune, i.e. every new
+        message once the DOM is at its cap. The size stored by layout
+        answers the same question for anything that has been laid out on
+        screen; ``region`` stays the fallback for widgets never shown.
+        """
+        size = widget.outer_size
+        return size if size.area else widget.region.size
 
     def _prune_retry(self) -> None:
         """Re-scheduled _prune: release the dedupe flag when the callback
@@ -717,7 +740,7 @@ class ChatWidget(VerticalScroll):
         """Combined plain text of all text-like messages (for tests/debug)."""
         parts: list[str] = []
         for msg in self.messages:
-            if isinstance(msg, Markdown):
+            if isinstance(msg, MarkdownView):
                 parts.append(msg.source)
             elif isinstance(msg, QueuedMessage):
                 parts.append(msg.transcript())
