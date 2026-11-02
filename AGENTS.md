@@ -93,7 +93,7 @@ Providers/models live in `llm/catalog.rs`; unknown models get generic OpenAI-com
 
 `/model` rebuilds the client mid-session (refused while busy) and persists via `toml_edit`. Sessions resume via `--continue` / `--resume` / `/sessions`; resume repairs dangling tool calls: each call commits a `tool_intent` record before it runs, so a crashed call is re-run on the next turn if its tool is `replay_safe` (read/grep/find/ls), otherwise marked "may have partially run" (intent committed) or "did not run" (no intent). `/export [path]` merges meta + trace + messages (Markdown if `.md`). `/fork [n]` copies the active history (first n user turns) into a new session, `/handoff <note>` starts a clean linked session from a note; both record `parent_session` and leave the parent untouched.
 
-Skills: `~/.limbo/skills/<name>/SKILL.md` (user) and `<workdir>/.agents/skills/<name>/SKILL.md` (project, wins collisions); daily sessions also see the bundled pack (lowest, unpacked to `~/.limbo/daily/bundled/<version>/`) and `~/.limbo/daily/skills/` (highest), coding sessions never do — injected as an `<available_skills>` catalog in the system prompt and invocable via `/<name> [args]`.
+Skills: `~/.agents/skills/<name>/SKILL.md` (global, shared with other agents; lowest of the non-bundled), `~/.limbo/skills/<name>/SKILL.md` (user) and `<workdir>/.agents/skills/<name>/SKILL.md` (project, wins collisions); daily sessions also see the bundled pack (lowest, unpacked to `~/.limbo/daily/bundled/<version>/`) and `~/.limbo/daily/skills/` (highest), coding sessions never do — injected as an `<available_skills>` catalog in the system prompt and invocable via `/<name> [args]`.
 
 ## UI
 

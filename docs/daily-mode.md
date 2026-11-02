@@ -43,7 +43,7 @@ daily 会话按这个顺序收集 skill，同名时后者覆盖前者：
 1. **内置起步包**（`assets/daily_skills/`，从 Hermes 移植，MIT；编进二进制，第一次用时解压到 `~/.limbo/daily/bundled/<版本>/`）：pdf、docx、xlsx、powerpoint、
    grounded-citations、blocked-page-recovery、meeting-action-items、document-to-action-items、
    weekly-review-planning、youtube-content、arxiv。文档类 skill 需要的 Python 包按 skill 里的说明装。
-2. 用户 skill `~/.limbo/skills`、项目 skill `<workdir>/.agents/skills`
+2. 全局 skill `~/.agents/skills`、用户 skill `~/.limbo/skills`、项目 skill `<workdir>/.agents/skills`
 3. **daily skill** `~/.limbo/daily/skills/<name>/SKILL.md`
 
 coding 会话只看 2，看不到起步包和 daily skill。

@@ -42,6 +42,7 @@ pub async fn run_task(
         sup.set_main_busy(true);
         sup.flush_notices();
     }
+    agent.sync_skills();
     agent.learn.lock().unwrap().observe_user_text(&input);
     // Tap the event stream for the learn trigger.
     let (itx, mut irx) = tokio::sync::mpsc::unbounded_channel::<AgentEvent>();
