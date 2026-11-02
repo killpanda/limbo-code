@@ -7,9 +7,12 @@
 
 mod app;
 mod chat;
+mod clipboard;
 mod fx;
+mod game2048;
 mod input;
 mod markdown;
+mod paste;
 mod text;
 mod theme;
 mod ui;
@@ -49,9 +52,14 @@ fn restore_terminal(enhanced: bool) {
     );
 }
 
-pub async fn run(agent: Agent, config: Config) -> anyhow::Result<i32> {
+static ENHANCED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn enhanced_flag() -> bool {
+    ENHANCED.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+fn enter_terminal(enhanced: bool) -> std::io::Result<()> {
     enable_raw_mode()?;
-    let enhanced = supports_keyboard_enhancement().unwrap_or(false);
     execute!(
         stdout(),
         EnterAlternateScreen,
@@ -66,6 +74,13 @@ pub async fn run(agent: Agent, config: Config) -> anyhow::Result<i32> {
             PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
         );
     }
+    Ok(())
+}
+
+pub async fn run(agent: Agent, config: Config) -> anyhow::Result<i32> {
+    let enhanced = supports_keyboard_enhancement().unwrap_or(false);
+    ENHANCED.store(enhanced, std::sync::atomic::Ordering::Relaxed);
+    enter_terminal(enhanced)?;
     // Restore the terminal even if we panic, or the user's shell is left in
     // raw mode.
     let default_hook = std::panic::take_hook();
@@ -142,7 +157,34 @@ async fn event_loop(
                     Err(e) => anyhow::bail!("agent task failed: {e}"),
                 }
             }
+            Some(ev) = async { app.bg.as_mut().unwrap().recv().await }, if app.bg.is_some() => {
+                app.on_background(ev);
+            }
+            item = async { app.btw_rx.as_mut().unwrap().recv().await }, if app.btw_rx.is_some() => {
+                app.on_btw(item);
+            }
             _ = tick.tick() => {}
+        }
+        if let Some(seq) = app.pending_osc52.take() {
+            use std::io::Write;
+            let _ = write!(stdout(), "{seq}");
+            let _ = stdout().flush();
+        }
+        if let Some(path) = app.pending_editor.take() {
+            // Hand the terminal to $EDITOR, then take it back.
+            restore_terminal(enhanced_flag());
+            let argv = crate::memory::editor_command(&path);
+            let status = std::process::Command::new(&argv[0])
+                .args(&argv[1..])
+                .status();
+            enter_terminal(enhanced_flag())?;
+            terminal.clear()?;
+            app.dirty = true;
+            match status {
+                Ok(s) if s.success() => app.toast("记忆已保存，从下一个会话起生效"),
+                Ok(_) => app.toast("编辑器异常退出"),
+                Err(e) => app.toast(format!("无法启动编辑器 {}：{e}", argv[0])),
+            }
         }
     }
 

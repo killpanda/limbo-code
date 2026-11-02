@@ -127,6 +127,8 @@ pub struct Request {
     pub body: Value,
 }
 
+/// Called with every request body before it is sent (tracing).
+pub type RequestHook = std::sync::Arc<dyn Fn(&Value) + Send + Sync>;
 /// The client the agent talks to. Cheap to clone (reqwest's client is an
 /// `Arc` inside).
 #[derive(Clone)]
@@ -143,6 +145,8 @@ pub struct LlmClient {
     retry_base_delay: f64,
     /// Responses API prompt cache bucket (the session id).
     pub prompt_cache_key: Option<String>,
+    /// Called with every request body before it is sent (tracing).
+    pub on_request: Option<RequestHook>,
 }
 
 impl LlmClient {
@@ -170,6 +174,7 @@ impl LlmClient {
             max_retries: config.llm.max_retries,
             retry_base_delay: config.llm.retry_base_delay,
             prompt_cache_key: None,
+            on_request: None,
         })
     }
 
@@ -269,6 +274,9 @@ impl LlmClient {
         tokio::spawn(async move {
             let start = Instant::now();
             let req = client.build(&messages, &tools);
+            if let Some(hook) = &client.on_request {
+                hook(&req.body);
+            }
             let resp = match client.send(&req).await {
                 Ok(r) => r,
                 Err(e) => {

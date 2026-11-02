@@ -110,6 +110,7 @@ fn read_file(raw: &str, target: &Path, offset: Option<i64>, limit: Option<i64>) 
                 mime: Some(mime.into()),
             }]),
             error: None,
+            end_turn: false,
         };
     }
     if size > MAX_FILE_SIZE {

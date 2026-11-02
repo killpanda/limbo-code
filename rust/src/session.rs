@@ -60,6 +60,15 @@ pub struct SessionMeta {
     pub usage: HashMap<String, UsageEntry>,
     #[serde(default)]
     pub plan_mode: bool,
+    /// Daily mode (non-coding posture); restored on resume.
+    #[serde(default)]
+    pub daily_mode: bool,
+    /// Code Mode (catalog collapsed to `run_code`); restored on resume.
+    #[serde(default)]
+    pub code_mode: bool,
+    /// Active/finished closed-loop goal; restored on resume.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<crate::goal::GoalState>,
     #[serde(default)]
     pub tool_intents: bool,
     #[serde(default)]
@@ -148,10 +157,18 @@ fn unsafe_replay() -> String {
 pub struct QueuedMessageRecord {
     pub id: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::models::Attachment>,
+    /// "steer" (injected at the next consistency point) or "follow_up"
+    /// (waits until the whole task is done).
     #[serde(default = "steer_mode")]
     pub mode: String,
+    /// "user", or "subagent" for a notice delivered to the main agent.
     #[serde(default = "user_source")]
     pub source: String,
+    /// Notice ids a subagent delivery carries (dedupe across a crash).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refs: Vec<String>,
 }
 
 fn steer_mode() -> String {
@@ -256,6 +273,26 @@ pub fn save_session(
         f.flush()?;
     }
     std::fs::rename(&tmp, path)
+}
+
+/// Write a whole file atomically (temp file + rename) with mode 0600.
+pub fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let tmp = path.with_file_name(format!(".{name}.{}.tmp", crate::models::new_id()));
+    {
+        let mut f = private_open(&tmp)?;
+        f.write_all(bytes)?;
+        f.flush()?;
+    }
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp);
+    })
 }
 
 /// Append lines to an existing session (the cheap steady-state write).
@@ -607,8 +644,10 @@ mod tests {
         let q = QueuedMessageRecord {
             id: "q1".into(),
             text: "later".into(),
+            attachments: vec![],
             mode: "steer".into(),
             source: "user".into(),
+            refs: vec![],
         };
         append_lines(
             &p,
@@ -629,7 +668,7 @@ mod tests {
             .unwrap();
         let loaded = load_session_full(&p).unwrap();
         assert_eq!(loaded.meta.title, "T");
-        assert_eq!(loaded.meta.extra["goal"]["text"], "keep me");
+        assert_eq!(loaded.meta.goal.as_ref().unwrap().text, "keep me");
         assert_eq!(loaded.messages.len(), 3);
         assert_eq!(loaded.queue.len(), 1);
         assert_eq!(loaded.intents[0].call_id, "c1");
@@ -682,7 +721,7 @@ mod tests {
                 .arguments["path"],
             "."
         );
-        assert_eq!(loaded.meta.extra["daily_mode"], json!(false));
+        assert!(!loaded.meta.daily_mode);
     }
 
     #[test]

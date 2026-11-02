@@ -148,6 +148,9 @@ pub struct ToolResult {
     pub output: Option<String>,
     pub error: Option<String>,
     pub attachments: Option<Vec<Attachment>>,
+    /// The tool asks the agent to end the turn right after this batch
+    /// (`ask_user`): the user's next message is the answer.
+    pub end_turn: bool,
 }
 
 impl ToolResult {

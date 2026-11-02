@@ -15,7 +15,7 @@ use super::text::{ellipsize, str_width, wrap_line};
 use super::theme::{SPINNER, Theme, gradient_spans};
 use crate::compaction::is_summary_message;
 use crate::models::{Message, Role};
-use crate::subagent::describe_call;
+use crate::subagents::describe_call;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolStatus {

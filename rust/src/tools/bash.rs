@@ -201,6 +201,7 @@ pub async fn run_command(
             output: Some(prefix(INTERRUPTED_MSG, &output)),
             error: Some(INTERRUPTED_MSG.into()),
             attachments: None,
+            end_turn: false,
         },
         End::TimedOut => {
             let msg = format!(
@@ -212,6 +213,7 @@ pub async fn run_command(
                 output: Some(prefix(&msg, &output)),
                 error: Some(msg),
                 attachments: None,
+                end_turn: false,
             }
         }
         End::Exited(code) if code != Some(0) => {
@@ -224,6 +226,7 @@ pub async fn run_command(
                 output: Some(prefix(&msg, &output)),
                 error: Some(msg),
                 attachments: None,
+                end_turn: false,
             }
         }
         End::Exited(_) => ToolResult::ok(output),
