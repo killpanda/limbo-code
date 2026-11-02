@@ -962,6 +962,13 @@ impl App {
 
     // -- input ----------------------------------------------------------------
 
+    /// Re-scan the skill directories (skills can be added while running).
+    pub fn refresh_skills(&mut self) {
+        if let Some(a) = &self.agent {
+            self.skills = discover_skills(&a.workdir, a.daily_mode());
+        }
+    }
+
     /// Slash-command suggestions for the current input.
     pub fn command_matches(&self) -> Vec<(String, String, String)> {
         let text = &self.input.text;
@@ -1230,6 +1237,11 @@ impl App {
             KeyCode::Char(c) if !ctrl => {
                 self.input.insert(c);
                 self.cmd_selected = 0;
+                if self.input.text == "/" {
+                    // The command menu just opened: pick up skills installed
+                    // while Limbo is running.
+                    self.refresh_skills();
+                }
             }
             _ => {}
         }
@@ -1474,6 +1486,9 @@ impl App {
             if self.run_command(&cmd, &arg) {
                 self.paste.clear();
                 return;
+            }
+            if !self.skills.iter().any(|s| s.name == cmd) {
+                self.refresh_skills();
             }
             if let Some(skill) = self.skills.iter().find(|s| s.name == cmd).cloned() {
                 let mut prompt = format!(
