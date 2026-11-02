@@ -1,70 +1,27 @@
+# Packaging only: `pip install limbo-code` installs the Rust `limbo` binary.
+# maturin builds the crate and puts the binary in a platform wheel; there is
+# no Python code in the package. The version comes from Cargo.toml.
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
 [project]
 name = "limbo-code"
-dynamic = ["version"]
 description = "A minimal terminal AI coding agent"
 readme = "README.md"
-requires-python = ">=3.11"
-dependencies = [
-    # >=8.0: Theme API (App.register_theme / Theme.variables) required by
-    # limbo-dark / limbo-light themes (introduced in 0.86.0; we track 8.x).
-    "textual>=8.0",
-    "openai>=1.30",
-    "httpx>=0.27",
-    "pydantic>=2.0",
-    "toml>=0.10",
-    "tomlkit>=0.13",
-    "pygments>=2.17",
+license = "MIT"
+requires-python = ">=3.8"
+dynamic = ["version"]
+classifiers = [
+    "Environment :: Console",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Programming Language :: Rust",
 ]
 
-[project.optional-dependencies]
-# Daily mode: web_fetch reads PDF links when pypdf is present.
-daily = ["pypdf>=4.0"]
+[project.urls]
+Repository = "https://github.com/killpanda/limbo-code"
 
-[dependency-groups]
-# Dev tools live in a PEP 735 dependency group (not an extra) so `uv sync`
-# installs them by default — no `--extra`/`--group` flag needed. Always run
-# tests via `uv run python -m pytest` so a missing venv fails loudly instead
-# of silently falling through to a global pytest on PATH.
-dev = [
-    "pytest>=8.0",
-    "pytest-asyncio>=0.23",
-    "pytest-textual-snapshot>=1.0",
-    "respx>=0.21",
-    "ruff>=0.4",
-    "mypy>=1.10",
-    "types-Pygments>=2.17",
-    "pypdf>=4.0",
-]
-
-[project.scripts]
-limbo = "limbo.app:main"
-
-[build-system]
-requires = ["hatchling", "hatch-vcs"]
-build-backend = "hatchling.build"
-
-# Version is derived from git tags (e.g. tag `v0.2.0` -> version `0.2.0`).
-# Between releases, commits after the last tag get a local dev version
-# (e.g. `0.2.1.dev3+ga9a8fdf`), so PyPI uploads always need a fresh tag.
-[tool.hatch.version]
-source = "vcs"
-
-[tool.hatch.build.targets.wheel]
-packages = ["src/limbo"]
-
-[tool.ruff]
-line-length = 100
-src = ["src", "tests"]
-# Bundled daily-mode skills ported from hermes-agent: third-party scripts
-# kept as upstream wrote them.
-extend-exclude = ["src/limbo/daily_skills"]
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "W"]
-
-[tool.mypy]
-python_version = "3.11"
-strict = false
-warn_return_any = true
-warn_unused_ignores = true
-exclude = ["src/limbo/daily_skills/"]
+[tool.maturin]
+bindings = "bin"
+strip = true

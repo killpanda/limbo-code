@@ -8,13 +8,13 @@ proposals should name modules with these terms.
 - **Usage** — the provider-reported token counters on one completion. Each
   dialect reports them differently (OpenAI `prompt_tokens`, Anthropic
   `input_tokens` + cache counters, DeepSeek `prompt_cache_hit_tokens`,
-  Responses `input_tokens_details`). Normalized by `llm/usage.py` into
+  Responses `input_tokens_details`). Normalized by `llm/usage.rs` into
   `UsageTotals` (prompt / cached / total); the agent loop and compaction
   never read provider field names.
 - **Prompt-size estimation** — predicting the *next* request's prompt size:
   the last real usage figure plus the chars/4 estimate of everything
   appended since (the **watermark**). Owned by `PromptSizeEstimator` in
-  `llm/usage.py`; invalidated (reset) when compaction rewrites history.
+  `llm/usage.rs`; invalidated (reset) when compaction rewrites history.
 
 ## Conversation
 
@@ -22,7 +22,7 @@ proposals should name modules with these terms.
   response (or max_iterations). Turns are the trace unit; the session
   file is checkpointed at every consistency point inside a turn.
 - **Turn pump** — the non-UI module that runs turns back-to-back
-  (`pump.py`, `TurnPump`): pulls events out of the lazy `Agent.run()`
+  (`pump.rs`): pulls events out of the lazy `Agent.run()`
   stream, owns the single-flight busy flag (turns and `/compact`
   mini-turns alike) and the goal closed loop. The follow-up steer drain
   lives in its supervisor (stragglers past a round's boundary drain —
@@ -30,21 +30,21 @@ proposals should name modules with these terms.
   never drain. Frontends are adapters translating its events into UI
   updates.
 - **Conversation** — the live session a frontend drives
-  (`conversation.py`): the current Agent + Turn pump pair, session
+  (the TUI `App` / headless frontend): the current Agent + Turn pump pair, session
   switching (`/new`, `/sessions`, `/fork`, `/handoff`; the target loads
   before the current session closes), lifecycle reporting around each
   run, and the `/goal` verify-proposal flow. The TUI and headless
   frontends are its adapters; busy is the Turn pump's flag.
 - **Session journal** — the write side of the session file
-  (`journal.py`, `SessionJournal`): which in-memory messages are already
+  (`session.rs` + the agent's checkpoints): which in-memory messages are already
   on disk, when a checkpoint appends vs rewrites, and the record order
   that keeps a crash recoverable (summarized messages before their
   compaction record, `dequeued` after the message carrying the item). The
   Agent calls its verbs (`checkpoint`, `queued`/`dequeued`,
-  `record_intents`, `compacted`, `patch_meta`); `sessions.py` owns the
+  `record_intents`, `compacted`, `patch_meta`); `session.rs` owns the
   file format and loading.
 - **Steer** — a user message queued mid-turn, injected at consistency
-  points (loop top, turn end, run head). The `SteerQueue` (`steer.py`) owns
+  points (loop top, turn end, run head). The steer queue owns
   queueing semantics — id generation, FIFO, and the cancel boundary (an
   item can be cancelled by id only until drained); the **Turn pump** owns
   drain timing.
@@ -52,10 +52,10 @@ proposals should name modules with these terms.
   summary message, keeping the recent tail. Triggered automatically
   (loop-top, before context overflow) or manually (`/compact`).
 - **Attachment policy** — how a submitted attachment reaches the model
-  (`attachments.py`): images become multimodal blocks for vision models
-  (encoded per dialect, `llm/scaffold.py`), everything else degrades to
+  (`attachments.rs`): images become multimodal blocks for vision models
+  (encoded per dialect, `llm/mod.rs`), everything else degrades to
   text — small files inline (≤50KB), the rest as path references.
-- **Model switch** — `/model` mid-session (`model_switch.py`): validate the
+- **Model switch** — `/model` mid-session (`tui/app.rs`): validate the
   target (API key, thinking-effort compatibility), swap the client
   (converging on the latest config model), persist to config.toml. The UI
   screen is an adapter translating verdicts into chat messages.
@@ -63,7 +63,7 @@ proposals should name modules with these terms.
 ## Subagents
 
 - **Task board** — the delegated work of one main session
-  (`subagents/board.py`): tasks with status, `depends_on` (dependency
+  (`subagents/mod.rs`): tasks with status, `depends_on` (dependency
   edges: a failure notifies by default), `owner` (ownership edges: a
   failure cascades), waits, checkpoints, questions and outcomes.
   Event-sourced into the main session file; `reconcile()` is the pure
@@ -74,7 +74,7 @@ proposals should name modules with these terms.
 - **Profile** — what kind of subagent a task gets (tools, model, prompt);
   built-in, user (`~/.limbo/agents`) or project (`.agents/agents`).
 - **Supervisor** — owns the board, the running subagents and notice
-  delivery for one Conversation (`subagents/supervisor.py`).
+  delivery for one Conversation (`subagents/supervisor.rs`).
 - **Notice** — a subagent event for the main agent: result, question,
   alert, info (delivered, at most once) or progress (UI only). Delivered as
   one `<subagent_updates>` steer item; questions and alerts wake an idle

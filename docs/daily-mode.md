@@ -40,7 +40,7 @@ limbo daily --continue   # 接上一个 daily 会话
 
 daily 会话按这个顺序收集 skill，同名时后者覆盖前者：
 
-1. **内置起步包**（`src/limbo/daily_skills/`，从 Hermes 移植，MIT）：pdf、docx、xlsx、powerpoint、
+1. **内置起步包**（`assets/daily_skills/`，从 Hermes 移植，MIT；编进二进制，第一次用时解压到 `~/.limbo/daily/bundled/<版本>/`）：pdf、docx、xlsx、powerpoint、
    grounded-citations、blocked-page-recovery、meeting-action-items、document-to-action-items、
    weekly-review-planning、youtube-content、arxiv。文档类 skill 需要的 Python 包按 skill 里的说明装。
 2. 用户 skill `~/.limbo/skills`、项目 skill `<workdir>/.agents/skills`
@@ -54,7 +54,7 @@ coding 会话只看 2，看不到起步包和 daily skill。
   所有写入都落在 `~/.limbo/daily/skills`：改内置或用户 skill 时先把它复制过来再改，原文件不动；改前留 `.bak`。
 - `/learn` 在后台开一个 `skill-reviewer` 子代理（带上当前对话、只能读 skill 和调 `skill_manage`、用 cheap_model），
   把这次对话里的纠正、偏好和新技巧写进 skill，结果作为子代理通知回到对话里。
-- 自动触发（`limbo/learn_trigger.py`）：一轮正常结束（没被中断、没报错）时，同时满足下面几条才自动开一次复盘：
+- 自动触发（`src/learn.rs`）：一轮正常结束（没被中断、没报错）时，同时满足下面几条才自动开一次复盘：
   - 距上次改 skill 或上次复盘，已经有 `learn_after_rounds`（默认 10）个工具轮次（模型的一次回复算一轮，一批并行调用也只算一轮）；
   - 距上次复盘至少隔了 `learn_cooldown_turns`（默认 3）轮对话；
   - 出现了值得学的信号：用户纠正过（“不要…”“太长了”“以后…”等）、工具失败后又成功、或读过某个 SKILL.md。
@@ -73,23 +73,14 @@ coding 会话只看 2，看不到起步包和 daily skill。
 
 ## 界面：Limbo Dawn
 
-daily mode 下 TUI 换成当前主题的暖色变体 Limbo Dawn：coding 是 Dusk（蓝 → 黄的黄昏渐变），
-daily 是 Dawn（红 → 杏橙 → 黄的日出渐变）。布局、`╱` 纹理、吉祥物黄和成功/错误/diff 语义色不变。
-
-- 输入框边框上常驻 `☀ daily` 徽标，右下角是记忆条数；窄屏状态栏的字标旁有 `☀ DAILY` 色块
-- 侧栏把「修改的文件」换成「读过的网页」和「记忆」（本会话有改动时「修改的文件」照常出现）
-- 启动页、底部快捷键提示换成 daily 场景的用法
-- `/daily-mode` 切换时聊天里插一条模式分隔线，一道光扫过（`[ui] motion` 为 reduced/off 时静态）
-
-limbo 自带的三个主题用手调色板；Omarchy 和 Textual 内置主题按规则派生（渐变取 error → warning →
-accent，primary 取 warning，对比度不足时向前景推）；ANSI 主题不换色，只显示徽标。
+daily mode 下 TUI 换成暖色的 `dawn` 主题（红 → 杏橙 → 黄的日出渐变），状态栏上有 daily 徽标。
 `[daily] look = "badge"` 关掉换色、只保留徽标。
 
 ## web_fetch
 
 打开 http(s) 链接，返回正文的 Markdown（标题、列表、链接；导航、脚本、页脚去掉，
 有 `<article>`/`<main>` 时只取正文）。长页面按 `fetch_max_chars` 分段，带 `offset` 继续读。
-PDF 链接在装了 `pypdf` 时直接转成文本（`pip install 'limbo-code[daily]'`）。超长页面除了分段返回，
+PDF 链接会用系统里的 `pdftotext`（poppler）或 Python 的 `pypdf` 转成文本，两个都没装时报错提示。超长页面除了分段返回，
 全文还会存到 `<workdir>/fetched/`，可以用 read 翻。
 
 ## 配置

@@ -14,10 +14,10 @@
 你 ──/task、/agents、@名字──▶ 任务板 / 子代理（主 agent 会被告知）
 ```
 
-- **任务板**（`subagents/board.py`）是唯一真相：任务、依赖、等待、打点、
+- **任务板**（`src/subagents/mod.rs`）是唯一真相：任务、依赖、等待、打点、
   提问和结果。每次变更都作为 `{"type":"task",...}` 记录追加进主会话文件，
   重启时重放；会话重写时写一条 `snapshot` 折叠历史。
-- **Supervisor**（`subagents/supervisor.py`）根据任务板做调度：依赖都结束
+- **Supervisor**（`src/subagents/supervisor.rs`）根据任务板做调度：依赖都结束
   的任务变为就绪，按优先级 / 已有进度 / 关键路径派发到空闲槽位
   （`max_parallel`），并把通知投递给主 agent。
 - **子代理**是同进程里的另一个 `Agent`，有自己的会话文件
