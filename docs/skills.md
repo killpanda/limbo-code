@@ -37,7 +37,7 @@ description: Test-driven development workflow.
 
 | 来源 | 路径 |
 |------|------|
-| 内置 daily 起步包（仅 daily 会话） | `src/limbo/daily_skills/`（随包分发，从 Hermes 移植） |
+| 内置 daily 起步包（仅 daily 会话） | `assets/daily_skills/`（编进二进制，从 Hermes 移植） |
 | 用户级 | `~/.limbo/skills/<name>/SKILL.md` |
 | 项目级 | `<workdir>/.agents/skills/<name>/SKILL.md` |
 | Daily（仅 daily 会话） | `~/.limbo/daily/skills/<name>/SKILL.md` |
@@ -56,8 +56,6 @@ description: Test-driven development workflow.
 
 ## 代码结构
 
-- `src/limbo/skills.py` — `parse_skill_md` / `discover_skills`，纯逻辑无 UI 依赖
-- `src/limbo/ui/commands.py` — `SlashCommandRegistry`（统一菜单元数据与分发），
-  `SlashCommand.kind`（`builtin` | `skill`）
-- `src/limbo/ui/screens/main.py` — `_slash_candidates()` 委托 registry 合并内置命令与
-  skills、`_find_skill()` / `_invoke_skill()`
+- `src/skills.rs` — `parse_skill_md` / `discover_skills` / `validate_skill`，以及内置起步包的解压，纯逻辑无 UI 依赖
+- `src/tui/app.rs` — 命令面板把内置命令和 skill 合在一起列出，内置命令优先；选中 skill 时拼出发给模型的 prompt
+- `src/tools/skill_manage.rs` — daily 模式下模型改写 skill 的工具

@@ -34,29 +34,27 @@ JSONL，首行为 meta，后续为消息行。**向后兼容**：无 meta 行的
 ```
 
 - `id` 即文件名 stem（不含 `.jsonl`），`--resume` 支持 id 前缀匹配
-- 增量追加：一轮内每个一致性点追加新消息和类型化记录（`meta_patch`、`tool_intent`、`queue`、`compaction`）；只有首次保存、追加失败后或恢复时修复了悬空调用才原子重写全量（写入顺序与回退规则见 `journal.py` 的 `SessionJournal`）
+- 增量追加：一轮内每个一致性点追加新消息和类型化记录（`meta_patch`、`tool_intent`、`queue`、`compaction`）；只有首次保存、追加失败后或恢复时修复了悬空调用才原子重写全量（写入顺序与回退规则见 `src/session.rs` 和 `src/agent.rs`）
 - `title` 取首条 user 消息（折叠空白、截断 50 字符）
 - `list_sessions` 只读每个文件的首行，O(1)/文件；旧文件回退用 mtime 排序、标题为空
 
 ## 模块划分
 
 ```
-src/limbo/
-├── sessions.py                  # 纯逻辑，无 UI 依赖
-│     ├── SessionMeta            # id / workdir / model / title / created_at / updated_at / path
-│     ├── save_session(path, meta, messages)
-│     ├── load_session(path) -> (SessionMeta, list[Message])
-│     ├── list_sessions(dir, workdir=None) -> list[SessionMeta]   # updated_at 倒序
-│     ├── latest_session(dir, workdir=None) -> Path | None
-│     ├── find_session(dir, id_prefix) -> Path                    # 前缀匹配，歧义报错
-│     ├── export_markdown(meta, messages, path)
-│     └── export_jsonl(meta, messages, path, trace_path=None)     # 合并 trace 的全量导出
-├── trace.py                     # TraceLogger：追加式 JSONL 全链路日志（traces/ 子目录）
-├── agent.py                     # Agent(config, llm_client, workdir, session_dir, resume=path)
-├── app.py                       # --continue / --resume [ID]
-└── ui/
-    ├── screens/session_picker.py  # 会话选择 Modal
-    └── screens/main.py            # 斜杠命令路由：/sessions /new /export /help
+src/
+├── session.rs        # 纯逻辑，无 UI 依赖
+│     ├── SessionMeta           # id / workdir / model / title / created_at / updated_at …
+│     ├── save_session / append_lines / atomic_write / rewrite_meta_line
+│     ├── load_session_full(path) -> LoadedSession
+│     ├── list_sessions(dir, workdir) -> Vec<SessionMeta>   # updated_at 倒序
+│     ├── latest_session(dir, workdir) -> Option<PathBuf>
+│     ├── find_session(dir, id_prefix) -> PathBuf           # 前缀匹配，歧义报错
+│     └── export_markdown / JSONL 导出（合并 trace）
+├── history.rs        # tool_call ↔ result 配对、恢复时修复悬空调用
+├── trace.rs          # 追加式 JSONL 全链路日志（traces/ 子目录）
+├── agent.rs          # 一轮内的检查点：什么时候追加、什么时候整体重写
+├── main.rs           # --continue / --resume [ID]、`limbo sessions`
+└── tui/app.rs        # /sessions（Ctrl+R）/new /fork /handoff /export
 ```
 
 ## 恢复语义
@@ -114,7 +112,7 @@ append-only，崩溃/打断最多丢失写入中的一条）。`/export` 默认�
 
 | type | 关键字段 |
 |------|---------|
-| `session_start` | `trace_schema`（当前 2）、config 快照（不含 api_key）、limbo/python 版本、是否 resume |
+| `session_start` | `trace_schema`（当前 2）、config 快照（不含 api_key）、limbo 版本、是否 resume |
 | `user_message` | `turn`、`content` |
 | `llm_request` | `turn`、`iteration`、`attempt`（同一次调用的第几次 HTTP 尝试）、`body`（完整请求体：messages 含 system prompt、tools、所有参数） |
 | `llm_response` | `started_at`、`duration`、`ttft`、`finish_reason`、`usage`（原始用量，含 provider 缓存字段）、`cached_tokens`（归一化缓存命中）、`content` / `reasoning` 全文及长度、`tool_calls`（id、name、arguments） |
@@ -133,7 +131,7 @@ append-only，崩溃/打断最多丢失写入中的一条）。`/export` 默认�
 
 ## Tracing 网页查看器
 
-`/tracing-viewer` 在本机起一个只读 HTTP 服务（`src/limbo/tracing/`，仅标准库），
+`/tracing-viewer` 在本机起一个只读 HTTP 服务（`src/trace_viewer.rs`，只用 `std::net` 和线程），
 在浏览器里按「会话 → 轮次 → LLM 调用 / 工具调用」展示 trace，类似 Langfuse：
 
 - 左栏轮次列表（状态、耗时、token、错误数，可搜索 / 只看出错）；中栏瀑布图
@@ -146,15 +144,8 @@ append-only，崩溃/打断最多丢失写入中的一条）。`/export` 默认�
   cookie），并校验 Host 头。SSH 远程或无图形界面时不自动开浏览器，只打印
   链接，可用 `ssh -L <port>:127.0.0.1:<port>` 转发。
 
-模块：`index.py`（字节偏移索引 + 摘要，大字段按偏移懒加载）、`model.py`
-（扁平记录 → 会话树，纯逻辑）、`server.py`（`TraceViewer`）、`command.py`
-（TUI / headless 共用的命令逻辑）、`static/index.html`（单文件前端）。
+前端是单文件页面 `assets/trace_viewer.html`，用 `include_str!` 编进二进制；服务端按字节偏移建索引、大字段按需读取，并把扁平记录组装成会话树。
 
-## 测试接缝（seams）
+## 测试
 
-- `sessions.py`：save/load roundtrip、meta 行、旧格式兼容、列表排序与过滤、
-  前缀查找、导出
-- `Agent`：resume 后续写同一文件、系统消息重生成、悬空 tool_calls 修复、
-  标题自动填充
-- CLI：`--continue` / `--resume` 参数解析与分发
-- UI：斜杠命令路由、picker 选择、会话切换后渲染
+单元测试和代码放在一起（`#[cfg(test)] mod tests`）：`session.rs` 覆盖保存/加载往返、meta 行、旧格式兼容、列表排序与过滤、前缀查找和导出；`history.rs` 覆盖悬空调用修复；`trace_viewer.rs` 覆盖 HTTP 路由和鉴权。跑 `cargo test` 即可。

@@ -1,168 +1,129 @@
 # Limbo — Agent Guide
 
-**Limbo** is a minimal terminal AI coding agent (Python 3.11+, Textual). Users converse with an LLM in a TUI to explore, read, edit, and write code via 7 tools. A `--headless` flag runs a plain-terminal REPL frontend instead of the TUI (Herdr/script control, RFC LIM-60).
+**Limbo** is a minimal terminal AI coding agent, written in Rust (edition 2024, ratatui + tachyonfx). Users converse with an LLM in a TUI to explore, read, edit, and write code via a small set of tools. `--headless` runs a plain-terminal REPL frontend instead of the TUI (Herdr/script control), `--json` prints one JSON event per line, and `-p "<prompt>"` runs one turn and exits.
 
-**Tools execute immediately — no confirmation flow, no safety fences.** File tools are not scoped to the workdir (absolute paths and symlinks are honored as-is), there is no sensitive-file skip list, and `bash` runs every command as given (no dangerous-command filter). `ToolRegistry` runs a `before_tool`/`after_tool` hook chain (`admit()` then `run()`; the agent journals a call's intent only after `admit()` lets it through) (`tools/hooks.py`: `Block` / `Rewrite` / replace result; a raising hook blocks) that is empty by default; the only built-in hook is `/plan` (read-only plan mode: replay-safe tools and read-only bash only, also enforced on Code Mode sub-calls, persisted as `SessionMeta.plan_mode`).
+**Tools execute immediately — no confirmation flow, no safety fences.** File tools are not scoped to the workdir (absolute paths and symlinks are honored as-is), there is no sensitive-file skip list, and `bash` runs every command as given (no dangerous-command filter). `ToolRegistry` runs a list of `ToolHook`s before every call (`before_tool` returns `Err` to block; `visible` hides a tool) — empty for the main agent, filled from the profile for subagents. `/plan` is a registry flag (`plan_mode`): only non-mutating tools and read-only bash run, also enforced on Code Mode sub-calls, persisted as `SessionMeta.plan_mode`.
+
+The source is commented for people learning Rust (`🦀 Rust notes` blocks); keep that style when adding code. `docs/learning-rust.md` has the reading order.
 
 ## Quick Start
 
 ```bash
-uv sync                               # installs runtime + dev tools (PEP 735 dev group, on by default)
-uv run limbo --workdir /path/to/project   # config: ~/.limbo/config.toml
+cargo run --release -- --workdir /path/to/project   # config: ~/.limbo/config.toml
+cargo install --path .                              # install the `limbo` binary
 ```
 
-Prefer `uv` over `pip`: dev tools (pytest/ruff/mypy) are a `[dependency-groups]`
-group, NOT an extra — `pip install -e ".[dev]"` no longer exists. `pip install -e .`
-still works for a runtime-only install.
+Runtime dependencies: `rg` (ripgrep) for `grep`; `python3` only for Code Mode (`run_code`) and the daily skills' helper scripts.
 
 ## Architecture
 
 ```
-src/limbo/
-├── app.py            # CLI entry: args, config, launch
-├── config.py         # Pydantic config: llm/ui/tools/compaction/providers
-├── models.py         # Message, Attachment, ToolResult, LLMEvent
-├── agent.py          # Conversation loop (see below)
-├── attachments.py    # Attachment policy: vision gate, inline vs path-reference degrade
-├── compaction.py     # Context compaction decision/prompt logic (LIM-14)
-├── history.py        # tool_call↔result pairing + resume repair
-├── model_switch.py   # /model domain logic: validate, swap client, persist (UI is an adapter)
-├── code_mode.py      # Code Mode (/code-mode on|off): SDK rendering + CODE_ONLY instruction
-│                     # (deepseek-harness parity: catalog collapses to run_code)
-├── prompt.py         # System-prompt assembly (tools section derived from the registry)
-├── steer.py          # Mid-turn steer queue (LIM-20): queueing semantics, cancel boundary
-├── goal.py           # /goal closed-loop state machine, prompt templates, verify executor (LIM-40)
-├── pump.py           # Turn pump (frontend-agnostic, non-UI): single-flight busy flag,
-│                     # steer follow-up drain, /compact mini-turn, goal closed loop
-├── headless.py       # --headless frontend (RFC LIM-60): line-oriented REPL on the
-│                     # primary screen for Herdr (agent prompt/send-keys/read/wait);
-│                     # same TurnPump seam as the TUI, no textual import
-├── conversation.py   # Conversation: the live agent+pump pair both frontends drive —
-│                     # new/switch/fork/handoff (load before close), lifecycle reporting
-│                     # (drive), /goal verify-proposal flow, the subagent supervisor
-│                     # (subscribe/start_background/take_wake_input)
-├── sessions.py       # Session JSONL file format: records, save/load/list/export
-├── journal.py        # SessionJournal: when/in what order records reach the file
-│                     # (watermark, rewrite fallback, queue re-journal, meta patches)
-├── trace.py          # Append-only JSONL run log (sessions/traces/)
-├── tracing/          # /tracing-viewer: loopback web viewer over trace files (stdlib
-│                     # http.server; index.py offsets, model.py tree, static/index.html)
-├── integrations/     # External mux/orchestrator lifecycle reporters: base.py (protocol
-│                     # + CompositeReporter + AgentState + TurnOutcome), herdr.py,
-│                     # osc7501.py (terminal program status; TTY only, LIMBO_PROGRAM_STATUS=0
-│                     # opts out, tmux passthrough); create_reporters() fans out
-├── skills.py         # SKILL.md discovery (user + project dirs)
-├── daily_skills/     # Bundled daily starter skills (ported from hermes-agent, MIT; excluded
-│                     # from ruff/mypy)
-├── daily.py          # Daily mode notices (docs/daily-mode.md); the posture itself is
-│                     # ToolRegistry.daily_mode + prompt.py + SessionMeta.daily_mode
-├── memory.py         # Persistent memory (~/.limbo/memory/USER.md, NOTES.md): MemoryStore
-│                     # (capped, atomic batch ops, .bak), frozen per-session MemorySnapshot
-├── subagents/        # Background subagents (docs/subagents.md): board.py (event-sourced
-│                     # task board + pure reconcile()), supervisor.py (scheduler, runners,
-│                     # notice delivery, user/main verbs), tools.py (main: plan_tasks/
-│                     # task_status/task_send/answer/task_control; child: checkpoint/need/
-│                     # ask_main/finish/propose_task), profiles.py (agent profiles),
-│                     # project_scan.py (<project_facts>), hooks.py (read-only/no-edit/path
-│                     # claims), worktree.py, commands.py (/task /agents @name), events.py
-├── llm/              # catalog.py (provider/model specs), factory.py (dialect→client),
-│                     # openai_client.py, anthropic_client.py, responses_client.py, retry.py, sse.py,
-│                     # usage.py (token accounting: usage normalization + prompt-size estimation),
-│                     # scaffold.py (plumbing shared by dialect clients: credentials, retry, images)
-├── tools/            # base.py (BaseTool + path resolution + truncation), registry.py (dispatch;
-│                     # code_mode flag filters definitions() to [run_code], all_definitions() feeds
-│                     # the SDK), hooks.py (before/after tool hook chain + plan mode), mutation_queue.py (per-file locks), ignore.py (.gitignore),
-│                     # read/bash/edit/write/grep/find/ls/run_code.py (the Code Mode transport),
-│                     # web_search.py (registered only when the search provider has a key),
-│                     # daily mode only: web_fetch.py, memory.py, session_search.py,
-│                     # ask_user.py (end_turn), skill_manage.py (writes ~/.limbo/daily/skills)
-├── websearch/        # pluggable web-search backends: base.py (SearchProvider/SearchResult),
-│                     # deepseek.py (+ key inheritance from the deepseek model provider), PROVIDERS
-└── ui/               # app.py + app.tcss (ALL styles here; theme vars only, no bare hex),
-                      # theme.py (limbo-dark/-light, RFC LIM-16), daily_look.py (daily mode
-                      # "Limbo Dawn": <theme>+daily warm variant, app.set_daily_look), commands.py (slash registry
-                      # + resolve(): the single builtin-vs-skill collision site), path_input.py
-                      # ('/'-path fallback), paste_store.py (pure paste/attachment marker
-                      # state machine; the input widget is its adapter),
-                      # screens/ (main, session_picker, model_picker, game2048),
-                      # widgets/ (chat, input, status_bar, tool_card, command_menu)
+src/
+├── main.rs           # CLI (clap): args, subcommands (models/auth/sessions/daily), launch
+├── models.rs         # Message, ToolCall, ToolResult, LlmEvent (serde, the shared vocabulary)
+├── config.rs         # ~/.limbo/config.toml: every section has defaults; toml_edit rewrites keep comments
+├── auth.rs           # ~/.limbo/auth.json (0600)
+├── cli_auth.rs       # `limbo auth …` / `limbo models`, first-run key prompt
+├── llm/              # mod.rs (HTTP + retry + Decoder trait), catalog.rs (providers/models/Dialect),
+│                     # openai.rs, anthropic.rs, responses.rs (the three dialects), sse.rs,
+│                     # usage.rs (usage normalization + prompt-size estimation)
+├── agent.rs          # The conversation loop (see below)
+├── pump.rs           # Turn pump: one task = user turn + steer/follow-up drain + /compact + /goal loop
+├── goal.rs           # /goal state machine, prompt templates, verify runner
+├── compaction.rs     # Context compaction decision and summary prompt
+├── history.rs        # tool_call↔result pairing + resume repair
+├── attachments.rs    # Vision gate: images inline for vision models, path references otherwise
+├── prompt.rs         # System-prompt assembly (tools section derived from the registry)
+├── session.rs        # Session JSONL journal: records, append/rewrite, list, export, fork/handoff
+├── trace.rs          # Append-only JSONL run log (<session dir>/traces/)
+├── trace_viewer.rs   # /tracing-viewer: loopback HTTP server (std::net + threads) + assets/trace_viewer.html
+├── commands.rs       # Frontend-neutral slash-command pieces (toggles, notices, /btw)
+├── background.rs     # Process-wide channel for events outside a turn (subagents, skill reviews)
+├── skills.rs         # SKILL.md discovery; the bundled daily pack (assets/daily_skills, include_dir!)
+├── memory.rs         # ~/.limbo/memory/USER.md, NOTES.md: capped store + frozen per-session snapshot
+├── learn.rs          # /learn and the automatic skill review trigger (daily mode)
+├── recent_models.rs  # Recently used models for the picker
+├── integrations.rs   # Herdr + OSC 7501 lifecycle reporting
+├── headless.rs       # --headless / --json / -p frontends on the same pump
+├── subagents/        # mod.rs (task board), supervisor.rs (scheduler, runners, notices),
+│                     # tools.rs (plan_tasks/task_*/answer; child: checkpoint/need/ask_main/finish/propose_task),
+│                     # profiles.rs (agent profiles + <project_facts> scan), hooks.rs (read-only/no-edit/
+│                     # allow-list/path claims), worktree.rs (git worktree isolation)
+├── tools/            # mod.rs (Tool + ToolHook traits, ToolRegistry, path helpers, per-file mutation locks),
+│                     # truncate.rs, read/write/edit/bash/grep/find/ls, run_code (Code Mode transport),
+│                     # web_search (only when its provider has a key), daily mode only: web_fetch,
+│                     # memory, session_search, ask_user (ends the turn), skill_manage
+└── tui/              # mod.rs (event loop: tokio::select! over terminal/agent/background/ticks),
+                      # app.rs (state, keys, slash commands), ui.rs (drawing), chat.rs (cached
+                      # per-entry rendering), markdown.rs, text.rs (CJK-aware wrapping), input.rs,
+                      # paste.rs, clipboard.rs, theme.rs, fx.rs (tachyonfx), game2048.rs
+assets/
+├── daily_skills/     # Bundled daily starter skills (ported from hermes-agent, MIT), embedded in the binary
+└── trace_viewer.html # The /tracing-viewer page, embedded with include_str!
 ```
 
 ## Agent Loop
 
-- `Agent.run()` yields `AgentEvent`: `TextDelta`, `ThinkingDelta`, `ToolCallRequest`, `ToolResultEvent`, `ErrorEvent`, `CompactionEvent`, `UsageUpdate`, `SteerEvent`
-- Loop top: auto-compaction check → steer drain → LLM call. A provider context-overflow error (`llm.retry.is_context_overflow`: 413 or known overflow texts, never rate limits) triggers `compact(trigger="overflow")` and one resend per turn; a second overflow or a failed compaction surfaces as `ErrorEvent`. Turn ends on a tool-call-free response; `max_iterations` (default 50) cancels pending calls with placeholder results
-- Tool calls in one turn run **concurrently** (`[tools] parallel`); results stream in completion order, recorded in source order; same-file mutations serialized by `mutation_queue`
-- `finish_reason` `length`/`max_tokens` → whole batch failed without execution; the error result names the effective `max_tokens` and steers the model to write large scripts via `write` instead of re-issuing the same call. 3 consecutive length stops abort the turn with actionable guidance (trace `kind=length_stop_loop`); a text-only truncated response emits a "may be incomplete" warning
-- Mid-turn user input queues as *steer* (LIM-20): injected at loop top, or as turn-end follow-up. Alt+Enter (headless: `/queue <text>`) queues a `follow_up` instead: only `TurnPump._supervise` drains it, after the whole task (goal loop included). Every queue change is journaled in the session file (`queue` records: `queued` immediately, `dequeued` after the message carrying it is saved), so queued messages survive a crash and are restored (and re-rendered) on resume
+- The agent runs a turn and streams `AgentEvent`s (text/thinking deltas, tool call requests and results, progress, errors, compaction, usage, steer) over a channel to the frontend
+- Loop top: auto-compaction check → steer drain → LLM call. A provider context-overflow error (413 or known overflow texts, never rate limits) triggers an overflow compaction and one resend per turn; a second overflow or a failed compaction surfaces as an error. The turn ends on a tool-call-free response; `max_iterations` (default 50) cancels pending calls with placeholder results
+- Tool calls in one turn run **concurrently** (`[tools] parallel`); results are recorded in source order; same-file mutations are serialized by `tools::mutation_lock`
+- `finish_reason` `length`/`max_tokens` → the whole batch fails without execution; the error names the effective `max_tokens` and steers the model to write large files via `write`. 3 consecutive length stops abort the turn
+- Mid-turn user input queues as *steer*: injected at loop top, or as a turn-end follow-up. Alt+Enter (headless: `/queue <text>`) queues a `follow_up` instead, drained by the pump only after the whole task (goal loop included). Every queue change is journaled (`queue` records), so queued messages survive a crash and are restored on resume
 - Reasoning is stored on assistant messages and replayed per dialect (Anthropic thinking signatures, Kimi `reasoning_content`, Responses encrypted items)
-- A retryable failure after the stream started (dropped connection, 5xx, overload) resends the same request up to `max_retries` times (`RetryEvent`; the partial response is discarded and the TUI strikes it through); failures before the first event are retried inside the client (`llm/retry.py`)
-- Usage counters normalize in `llm/usage.py` (`input_tokens`+`cache_read`, `prompt_tokens`, DeepSeek cache hits) and feed the compaction trigger via `PromptSizeEstimator`; every billed call (turns, compaction summaries, `/btw`) is added to the per-`provider/model` ledger `SessionMeta.usage`, so the token counter survives resume. The Responses client sends `prompt_cache_key = session id`
+- Retryable failures before the first streamed event (429, 5xx, network) are retried inside the client with backoff; after the stream started, the request is resent up to `max_retries` times and the partial response is discarded
+- Usage counters are normalized in `llm/usage.rs` and feed the compaction trigger; every billed call is added to the per-`provider/model` ledger `SessionMeta.usage`, so the token counter survives resume
 
 ## LLM & Config
 
-Providers/models live in `llm/catalog.py`; unknown models get generic OpenAI-compatible defaults. Resolution: `[providers.<id>]` overrides → explicit `[llm]` values → catalog defaults → env-var API keys.
+Providers/models live in `llm/catalog.rs`; unknown models get generic OpenAI-compatible defaults. Resolution: `[providers.<id>]` overrides → explicit `[llm]` values → catalog defaults → `auth.json` / env-var API keys.
 
 ```toml
 [llm]        # model, api_key, base_url, temperature, max_iterations,
              # max_tokens, thinking_effort, max_retries, timeout, ...
 [tools]      # bash_enabled = true, parallel = true
 [compaction] # enabled, reserve_tokens = 16384, keep_recent_tokens = 20000
-[goal]       # max_rounds = 10, verify_timeout_ms = 600000
-[queue]      # after_failed_run = "continue" | "keep" | "withdraw" (queued
-             # messages after an LLM-error turn; keep/withdraw end the task)
-[subagents]  # enabled, auto = "off"|"suggest"|"on", max_parallel = 3, max_tasks = 12,
-             # task_token_budget, cheap_model, wake_main_on, on_dep_fail, on_resume
-[daily]      # workdir = "~/limbo-daily", model, memory, user_chars, notes_chars,
-             # memory_nudge_turns, learn_after_rounds, learn_cooldown_turns, fetch_max_chars, fetch_timeout
-[ui]         # theme, show_banner
+[goal]       # max_rounds = 10, verify_timeout_ms
+[queue]      # after_failed_run = "continue" | "keep" | "withdraw"
+[subagents]  # enabled, auto = "off"|"suggest"|"on", max_parallel, max_tasks, ...
+[daily]      # workdir = "~/limbo-daily", model, memory caps, learn trigger knobs, fetch limits
+[web_search] # provider = "deepseek", api_key, count, enabled
+[ui]         # theme (neon|aurora|ember|dawn|omarchy), motion (full|reduced|off)
 [providers.<id>]  # base_url / api_key / api_key_env / headers
 ```
 
-`/model` rebuilds the client mid-session (refused while busy) and persists via tomlkit. Sessions resume via `--continue` / `--resume` / `/sessions`; resume repairs dangling tool calls: each call commits a `tool_intent` record before it runs, so a crashed call is re-run on the next turn if its tool is `replay = "safe"` (read/grep/find/ls), otherwise marked "may have partially run" (intent committed) or "did not run" (no intent); legacy sessions without `meta.tool_intents` get the generic placeholder. Trace events: `session_start`, `user_message`, `llm_request` (full body), `llm_response`, `tool_call`, `tool_result`, `tool_recovery`, `compaction*`, `error`, `turn_end`. `/export [path]` merges meta + trace + message snapshot (Markdown if `.md`). `/fork [n]` copies the active history (first n user turns) into a new self-contained session, `/handoff <note>` starts a clean linked session from a note; both record `parent_session`/`fork_at` and leave the parent untouched. Code Mode sub-calls are traced as `tool_call`/`tool_result` with `parent_call_id`. `limbo --json` (implies `--headless`) prints every event as one JSON object per line.
+`/model` rebuilds the client mid-session (refused while busy) and persists via `toml_edit`. Sessions resume via `--continue` / `--resume` / `/sessions`; resume repairs dangling tool calls: each call commits a `tool_intent` record before it runs, so a crashed call is re-run on the next turn if its tool is `replay_safe` (read/grep/find/ls), otherwise marked "may have partially run" (intent committed) or "did not run" (no intent). `/export [path]` merges meta + trace + messages (Markdown if `.md`). `/fork [n]` copies the active history (first n user turns) into a new session, `/handoff <note>` starts a clean linked session from a note; both record `parent_session` and leave the parent untouched.
 
-Skills: `~/.limbo/skills/<name>/SKILL.md` (user) and `<workdir>/.agents/skills/<name>/SKILL.md` (project, wins collisions); daily sessions also see the bundled `src/limbo/daily_skills/` (lowest) and `~/.limbo/daily/skills/` (highest), coding sessions never do — injected as a `<available_skills>` catalog in the system prompt and invocable via `/<name> [args]`.
+Skills: `~/.limbo/skills/<name>/SKILL.md` (user) and `<workdir>/.agents/skills/<name>/SKILL.md` (project, wins collisions); daily sessions also see the bundled pack (lowest, unpacked to `~/.limbo/daily/bundled/<version>/`) and `~/.limbo/daily/skills/` (highest), coding sessions never do — injected as an `<available_skills>` catalog in the system prompt and invocable via `/<name> [args]`.
 
 ## UI
 
-Single column: status bar (state/elapsed/tokens/model/workdir/queued + rainbow 🎯GOAL badge while a goal loop runs + ⌨code badge while Code Mode is on) → scrolling chat flow (user `❯`, streaming Markdown, tool cards, errors) → input box (Enter submits, Shift+Enter newline, Alt+Enter queues a follow-up while busy (`ui/key_fixes.py` maps its modifyOtherKeys/kitty/ESC forms), paste markers, `ctrl+v` image attach) → hint line. Slash commands: `/sessions /new /fork /handoff /export /tracing-viewer /compact /model /code-mode /plan /daily-mode /memory /learn /help /2048 /goal /agents /task` + skill commands; `@<agent> text` messages a subagent. '/'-leading input that matches no command but looks like a path is sent as a normal message with existing files auto-attached (`ui/path_input.py`); a leading space forces plain text. After palette changes run `python scripts/check_contrast.py` (≥ 4.5:1).
+Single column: status bar (state/elapsed/tokens/model/workdir/queue + goal and Code Mode badges) → scrolling transcript (user messages, streaming Markdown, tool cards, errors) → prompt box (Enter submits, Shift+Enter or Ctrl+J newline, Alt+Enter queues a follow-up, collapsed paste markers, Ctrl+V clipboard paste) → hint line. `/` opens the command palette; `@<agent> text` messages a subagent. Every color comes from a `Theme` in `tui/theme.rs`; widgets never hard-code colors.
 
-`/goal <text>` starts closed-loop mode (LIM-40): the first round is a proposal round — the model explores the repo and proposes acceptance command(s) in a `<verify_proposal>` block; the user confirms in a picker (accept / edit / skip), then the goal branch of the `TurnPump` (non-UI, shared by any frontend) runs each round as a complete `Agent.run()` turn and executes the verify command; exit 0 ends the loop, otherwise the failure output is fed back verbatim into the next round until `max_rounds`, when a no-tool wrap-up turn summarizes and any user message resumes with a fresh budget. Goal state persists on `SessionMeta.goal`. Esc during verify cancels the subprocess.
+`/goal <text>` starts closed-loop mode: the first round proposes acceptance command(s) in a `<verify_proposal>` block; the user confirms (accept / edit / skip), then each round is a full agent turn followed by the verify command. Exit 0 ends the loop; otherwise the failure output is fed back into the next round until `max_rounds`, when a no-tool wrap-up turn summarizes. Goal state persists on `SessionMeta.goal`. Esc during verify kills the subprocess.
 
-Subagents (`subagents/`, docs/subagents.md): the main agent's `plan_tasks` creates tasks on the board (suggest mode: `PlanPicker` asks the user first); the `Supervisor` runs each as a child `Agent` with its own session file, gated by profile hooks. Child tools that end the turn (`need`, `ask_main`, `finish`) return `ToolResult(end_turn=True)`. Notices reach the main agent as one `source="subagent"` steer item; an idle main agent is woken through `MainWake` → `Conversation.take_wake_input()`. Board records live in the main session file (`type: "task"`), so the board survives restarts; tasks running at exit come back paused (`on_resume`).
+Subagents (docs/subagents.md): the main agent's `plan_tasks` creates tasks on the board (suggest mode asks the user first); the supervisor runs each as a child agent with its own session file, gated by profile hooks. Child tools that end the turn (`need`, `ask_main`, `finish`) return `end_turn`. Notices reach the main agent as one subagent steer item; an idle main agent is woken through the background channel. Board records live in the main session file (`type: "task"`), so the board survives restarts; tasks running at exit come back paused.
 
-Daily mode (`limbo daily` / `--daily` / `/daily-mode on|off`, docs/daily-mode.md): a session posture like Code Mode — same loop, a general-assistant system prompt, plus `web_fetch` and `memory` tools; persisted as `SessionMeta.daily_mode`, `/new` keeps the current mode. Memory is a snapshot taken when the Agent is built: `USER.md` and `NOTES.md` enter daily-mode prompts only (coding sessions never see memory); `memory` tool writes reach disk at once but the prompt changes only next session (prefix cache stays intact). `/learn` (and auto via `learn_trigger.LearnTrigger`: clean turn + `learn_after_rounds` tool rounds + cooldown + a correction/recovery/skill-use signal, backoff on "Nothing to save") plans a `skill-reviewer` fork subagent whose only write tool is `skill_manage`; daily children inherit daily mode minus `MAIN_ONLY_TOOLS`.
+Daily mode (`limbo daily` / `--daily` / `/daily-mode on|off`, docs/daily-mode.md): a session posture like Code Mode — same loop, a general-assistant system prompt, plus the daily tools; persisted as `SessionMeta.daily_mode`. Memory is a snapshot taken when the agent is built: `USER.md` and `NOTES.md` enter daily prompts only; `memory` writes reach disk at once but the prompt changes only next session (prefix cache stays intact). `/learn` (and the automatic trigger in `learn.rs`) runs a `skill-reviewer` fork subagent whose only write tool is `skill_manage`.
 
 ## Key Decisions
 
-- Async agent, sync tools via `asyncio.to_thread()`
-- Code Mode (`/code-mode on|off`): `ToolRegistry.code_mode` collapses
-  `definitions()` to `[run_code]`; `RunCodeTool` runs a model-written Python
-  program on a fresh event loop, forwarding `tools.*` sub-calls through the
-  same registry. Only the curated program output (print + return) enters
-  history — sub-calls never do. `SessionMeta.code_mode` persists the mode
-  across resume
+- tokio everywhere; tools are `async_trait` objects (`Arc<dyn Tool>`), blocking work goes through `spawn_blocking` or child processes
+- Code Mode (`/code-mode on|off`): `ToolRegistry.code_mode` collapses the catalog to `run_code`; `run_code` starts `python3` with a small bootstrap and forwards `tools.*` sub-calls back through the same registry over stdio. Only the program output (print + return) enters history. `SessionMeta.code_mode` persists the mode
 - System prompt = hardcoded tool guidelines + `<workdir>/AGENTS.md` & `~/.limbo/AGENTS.md` (XML-wrapped) + skills catalog. **This file is injected into every request — keep it accurate and lean.**
-- Session JSONL is checkpointed mid-turn (before/after each LLM request, after each tool batch): new messages are appended; full atomic rewrite (0600) only on first save, after a failed append, or when resume repaired dangling calls. Meta changes append `meta_patch` (a title change rewrites just the meta line via `rewrite_meta_line`, which keeps every other record). Compaction is non-destructive: a `compaction` record is appended, summarized messages stay in the file, and loading selects the active range from the latest record's `first_kept_entry_id`. Typed records `meta_patch` (merged over the meta line on load; goal state via `Agent.persist_meta()`) and `tool_intent` sit between message lines; unknown types are skipped. Trace holds the full-fidelity record
+- Session JSONL is checkpointed mid-turn: new messages are appended; full atomic rewrite (0600) only on first save, after a failed append, or when resume repaired dangling calls. Meta changes append `meta_patch`. Compaction is non-destructive: a `compaction` record is appended and loading selects the active range from the latest one. Unknown record types are skipped and unknown fields are preserved (`#[serde(flatten)]`). The trace holds the full-fidelity record
 
 ## Testing
 
 ```bash
-make check                          # single entrypoint: sync + tests + lint + type check
+cargo test                                  # unit tests live next to the code (#[cfg(test)] mod tests)
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings   # CI treats warnings as errors
 ```
 
-Or individually — always `python -m pytest`, never bare `uv run pytest` (which
-silently falls through to a global pytest on PATH when the venv lacks pytest):
-
-```bash
-uv sync                             # first time / after pulling; dev group is default
-uv run python -m pytest tests/ -v   # pytest-asyncio, respx HTTP mocks, pytest-textual-snapshot
-uv run ruff check src tests && uv run mypy src  # lint + type check
-uv run python -m pytest --snapshot-update  # after intentional visual changes; review the SVG diff
-```
+CI (`.github/workflows/ci.yml`) runs exactly these three.
 
 ## Adding Things
 
-- **Tool**: subclass `BaseTool` in `tools/<name>.py` (`name`/`description`/`parameters` + `run()`; use `resolve_existing()`/`resolve_creatable()`, raise `ToolError`), register in `ToolRegistry.__init__()`, wrap mutations in `mutation_lock_for(path)`, add `tests/tools/test_<name>.py`
-- **Web-search backend**: subclass `SearchProvider` in `websearch/<id>.py` with a `build(config)` factory (None when it has no key), add it to `websearch.PROVIDERS`; users pick it with `[web_search] provider`
-- **Provider/model**: add specs in `llm/catalog.py`; new wire format → implement `LLMClient` + `register_client()` in `llm/factory.py`. User-specific endpoint/key tweaks belong in `[providers.<id>]` config, not the catalog
+- **Tool**: implement `Tool` in `src/tools/<name>.rs` (`name`/`description`/`parameters` + `run()`; override `replay_safe`/`mutates`/`program_callable` when needed; resolve paths with `resolve_path`, take `mutation_lock(path)` around writes), add it to `ToolRegistry::core` or `set_daily`, and add tests in the same file
+- **Web-search backend**: extend `src/tools/web_search.rs`; users pick it with `[web_search] provider`
+- **Provider/model**: add specs in `llm/catalog.rs`; a new wire format → a new `Dialect` variant plus a module implementing `Decoder` and the request body. User-specific endpoint/key tweaks belong in `[providers.<id>]` config, not the catalog

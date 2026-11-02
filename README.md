@@ -9,8 +9,6 @@ as it goes. When the work runs long, Limbo keeps it safe: every turn is
 journaled to disk, a crash or a closed terminal picks up where it stopped, and
 you can branch, hand off, or replay any session.
 
-![Limbo](docs/assets/limbo-hero.png)
-
 ## Who it's for
 
 - **Developers who live in the terminal** and want an agent that fits next to
@@ -19,8 +17,9 @@ you can branch, hand off, or replay any session.
   any OpenAI-compatible endpoint, switchable mid-conversation.
 - **Anyone who wants to see what the agent did.** Every request, tool call, and
   token is recorded and browsable; nothing happens off-screen.
-- **Hackers who want to read the code.** Seven tools, one agent loop, plain
-  JSONL on disk. `AGENTS.md` explains every design decision.
+- **Hackers who want to read the code.** A small Rust crate: a handful of
+  tools, one agent loop, plain JSONL on disk. `AGENTS.md` explains the design,
+  and the source is commented for people learning Rust.
 
 ## What you get
 
@@ -61,14 +60,12 @@ you can branch, hand off, or replay any session.
   to `~/.limbo/auth.json` (readable only by you). `limbo auth login` verifies a
   key against the provider before saving; `limbo models` lists the catalog and
   which models are ready to use.
-- **Switch without restarting.** `Ctrl+L` (or `/model`) opens a searchable
-  picker with recent models first. Pick a model whose provider has no key yet
+- **Switch without restarting.** `/model` opens a searchable picker with
+  recent models first. Pick a model whose provider has no key yet
   and it asks for one inline. `Shift+Tab` steps through thinking levels.
 - **Three wire formats** (OpenAI completions, Anthropic messages, OpenAI
   responses) behind one catalog, with per-provider overrides for relays,
   renamed key variables, and extra headers.
-
-![The Ctrl+L model picker](docs/assets/limbo-models.png)
 
 ### Fast turns
 
@@ -87,15 +84,14 @@ you can branch, hand off, or replay any session.
 
 ### A TUI worth living in
 
-- **Limbo Dusk**, the default theme, with `limbo-dark` and `limbo-light`
-  alternatives, all checked for contrast.
-- **Follows Omarchy.** On an Omarchy desktop Limbo picks up the system theme
-  and switches live when you change it.
-- **Limbo Motion.** Subtle animation that tells the story from unsettled to
-  settled. Set `[ui] motion = "reduced"` or `"off"` if you prefer stillness
-  (SSH sessions default to reduced).
-- `Ctrl+P` command palette, image and file paste with `Ctrl+V`, collapsible
-  tool output with `Ctrl+O`.
+- Five themes: `neon` (default), `aurora`, `ember`, `dawn` (the daily-mode
+  default) and `omarchy`, which follows the Omarchy desktop theme. Switch with
+  `/theme` or `[ui] theme = "aurora"`.
+- **Motion.** Subtle animation built on tachyonfx. Set
+  `[ui] motion = "reduced"` or `"off"` if you prefer stillness (SSH sessions
+  default to reduced).
+- `/` opens the command palette, `Ctrl+V` pastes images, file paths or text,
+  `Ctrl+Y` copies the last reply, `Ctrl+O` expands or collapses tool output.
 
 ### Daily mode for everything else
 
@@ -124,10 +120,12 @@ reports its working, idle, and blocked state to the pane.
 
 ## Quick start
 
-Requires Python 3.11 or later.
+Requires Rust 1.88 or later (edition 2024) and `rg` (ripgrep) on `PATH`.
+Code Mode and the daily skills' helper scripts also need `python3`.
 
 ```bash
-pip install limbo-code
+git clone https://github.com/killpanda/limbo-code && cd limbo-code
+cargo install --path .      # installs the `limbo` binary into ~/.cargo/bin
 cd ~/code/my-project
 limbo                       # first run asks for an API key
 ```
@@ -148,14 +146,17 @@ Then just describe the task: *"find why the login test is flaky and fix it"*.
 
 | Key | Action |
 |-----|--------|
-| `Enter` / `Shift+Enter` | send / new line |
+| `Enter` / `Shift+Enter` (or `Ctrl+J`) | send / new line |
+| `Enter` while the agent works | steer: the message is delivered mid-turn |
 | `Alt+Enter` | queue a follow-up for after the current task |
-| `Esc` | interrupt |
-| `Ctrl+L` | model picker |
+| `Esc`, `Ctrl+C` | interrupt; `Ctrl+C` twice when idle quits |
 | `Shift+Tab` | cycle thinking level |
-| `Ctrl+P` | command palette |
-| `Ctrl+S` | sessions |
-| `Ctrl+O` | expand or collapse tool output |
+| `/` | command palette |
+| `Ctrl+R` | sessions |
+| `Ctrl+G` | subagent panel |
+| `Ctrl+O` / `Ctrl+T` | expand or collapse tool output / show or hide thinking |
+| `Ctrl+V` / `Ctrl+Y` | paste from the clipboard / copy the last reply |
+| `PageUp` / `PageDown`, `Ctrl+↑/↓` | scroll the conversation |
 
 | Command | What it does |
 |---------|--------------|
@@ -173,8 +174,10 @@ Then just describe the task: *"find why the login test is flaky and fix it"*.
 | `/tracing-viewer [id\|off]` | live trace of this session in your browser |
 | `!<command>` | run a shell command yourself, outside the conversation |
 
-From the shell: `limbo --continue` resumes the latest session for the current
-directory, `limbo --resume <id-prefix>` resumes any session.
+From the shell: `limbo --continue` (`-c`) resumes the latest session for the
+current directory, `limbo --resume <id-prefix>` (`-r`) resumes any session,
+`limbo sessions [--all]` lists them, and `limbo -p "<prompt>"` runs one turn
+and prints the answer.
 
 ## Models and providers
 
@@ -211,7 +214,7 @@ api_key_env = "CODEX_API_KEY"
 headers = { x-relay = "on" }
 
 [ui]
-theme = "auto"                      # Omarchy if installed, else limbo-dusk
+theme = "neon"                      # neon | aurora | ember | dawn | omarchy
 motion = "full"                     # full | reduced | off
 ```
 
@@ -226,7 +229,7 @@ active).
 
 ```toml
 [web_search]
-provider = "deepseek"    # backends live in limbo.websearch.PROVIDERS
+provider = "deepseek"    # the only backend today (src/tools/web_search.rs)
 api_key = "sk-..."       # optional: a separate key just for search
 count = 10               # default results per search
 enabled = true
@@ -256,22 +259,15 @@ bash_enabled = false     # if you need a hard stop
 ## Development
 
 ```bash
-uv sync        # dev tools are a PEP 735 group, installed by default
-make check     # sync + tests + lint + typecheck
+cargo run --release         # run from the checkout (add -- <args> for flags)
+cargo test                  # tests
+cargo fmt --check           # formatting
+cargo clippy --all-targets -- -D warnings
 ```
 
-Individually, always `python -m pytest`, never `uv run pytest` (which can fall
-through to a global pytest on `PATH`):
-
-```bash
-uv run python -m pytest tests/ -v
-uv run ruff check src tests
-uv run mypy src
-```
-
-The screenshot above is rendered from the real UI by
-`scripts/readme_hero.py` (`uv run python scripts/readme_hero.py`), so it can't
-drift from what ships.
+CI runs exactly those three checks. The crate layout and a suggested reading
+order (with notes on the Rust ideas each module shows off) are in
+[docs/learning-rust.md](docs/learning-rust.md).
 
 ## Acknowledgements
 
@@ -287,15 +283,14 @@ Limbo borrows openly from other agents. Thank you to:
   process-tree kill, ripgrep), the provider conventions and model catalog,
   compaction and the session entry model, and collapsing large pastes.
 - **[Crush](https://github.com/charmbracelet/crush)** by Charm. The Limbo
-  Dusk TUI was designed after Crush: the gradient wordmark, `╱` dialog rules,
-  Limbo Motion (its staggered entrance is borrowed directly), the `Ctrl+P`
-  command palette and the `Ctrl+S` session picker.
+  TUI was designed after Crush: the gradient wordmark, `╱` dialog rules,
+  the staggered entrance motion, the command palette and the session picker.
 - **[Hermes Agent](https://github.com/NousResearch/hermes-agent)** by Nous
   Research. Daily mode is modeled on Hermes: the `USER.md` / `NOTES.md`
   memory with its frozen per-session snapshot and the memory nudge,
   `session_search`, `ask_user`, and skill self-learning (the skill reviewer's
   prompt is adapted from Hermes). The bundled daily skills in
-  `src/limbo/daily_skills/` are ported from Hermes under the MIT license, and
+  `assets/daily_skills/` are ported from Hermes under the MIT license, and
   each keeps its `LICENSE`.
 
 ## Learn more
@@ -309,4 +304,6 @@ Limbo borrows openly from other agents. Thank you to:
   self-learning skills
 - [`docs/subagents.md`](docs/subagents.md): background subagents, the task
   board and how to steer them
+- [`docs/learning-rust.md`](docs/learning-rust.md): code map and reading
+  order for learning Rust from this codebase
 - [`design/`](design/): RFCs for headless mode, bang commands, and the UI

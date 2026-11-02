@@ -1,37 +1,86 @@
-name: Publish to PyPI
+# Release: push a tag `vX.Y.Z` that matches `version` in Cargo.toml.
+#
+# maturin puts the Rust `limbo` binary into platform wheels (no Python code
+# inside), so `pip install limbo-code` keeps working. The same binaries are
+# attached to a GitHub Release as plain tarballs.
+#
+# PyPI uses Trusted Publishing: the `limbo-code` project trusts this file
+# (`publish.yml`) in the `pypi` environment, so keep both names.
+name: Publish
 
 on:
   push:
     tags:
       - "v*"
 
+permissions:
+  contents: read
+
 jobs:
-  build:
-    name: Build sdist and wheel
+  check-version:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Tag matches Cargo.toml
+        run: |
+          crate=$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)
+          if [ "v$crate" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $crate"
+            exit 1
+          fi
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+  linux:
+    needs: check-version
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target: [x86_64, aarch64]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
         with:
-          python-version: "3.12"
-
-      - name: Install build tooling
-        run: pip install build
-
-      - name: Build distributions
-        run: python -m build
-
-      - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+          target: ${{ matrix.target }}
+          manylinux: auto
+          args: --release --out dist
+      - uses: actions/upload-artifact@v4
         with:
-          name: dist
+          name: wheels-linux-${{ matrix.target }}
           path: dist/
 
-  publish:
+  macos:
+    needs: check-version
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        target: [x86_64-apple-darwin, aarch64-apple-darwin]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          target: ${{ matrix.target }}
+          args: --release --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-macos-${{ matrix.target }}
+          path: dist/
+
+  sdist:
+    needs: check-version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: PyO3/maturin-action@v1
+        with:
+          command: sdist
+          args: --out dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/
+
+  pypi:
     name: Publish to PyPI (Trusted Publishing / OIDC)
-    needs: build
+    needs: [linux, macos, sdist]
     runs-on: ubuntu-latest
     environment:
       name: pypi
@@ -39,11 +88,38 @@ jobs:
     permissions:
       id-token: write # required for PyPI Trusted Publishing (OIDC)
     steps:
-      - name: Download artifacts
-        uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v4
         with:
-          name: dist
           path: dist/
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@release/v1
 
-      - name: Publish to PyPI
-        uses: pypa/gh-action-pypi-publish@release/v1
+  github-release:
+    needs: [linux, macos, sdist]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist/
+          merge-multiple: true
+      # Each wheel carries the binary at <name>.data/scripts/limbo; repack
+      # it as limbo-<version>-<platform tag>.tar.gz.
+      - name: Binary tarballs
+        run: |
+          mkdir -p release
+          for whl in dist/*.whl; do
+            plat=$(basename "$whl" .whl | rev | cut -d- -f1 | rev)
+            tmp=$(mktemp -d)
+            unzip -q "$whl" '*.data/scripts/limbo' -d "$tmp"
+            tar -czf "release/limbo-${GITHUB_REF_NAME}-${plat}.tar.gz" \
+              -C "$(dirname "$(find "$tmp" -name limbo -type f)")" limbo
+          done
+          ls -l release
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" release/*.tar.gz \
+            --repo "$GITHUB_REPOSITORY" --title "$GITHUB_REF_NAME" --generate-notes
