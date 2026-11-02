@@ -249,13 +249,12 @@ fn real_main() -> anyhow::Result<i32> {
                 return Ok(1);
             }
         }
-        let mut agent = match &resume {
+        // `--daily` picks the posture of a *new* session only: a resumed
+        // session keeps the mode it was saved with (/daily-mode switches it).
+        let agent = match &resume {
             Some(p) => Agent::resume(config.clone(), p, &session_dir)?,
-            None => Agent::new(config.clone(), &workdir, &session_dir)?,
+            None => Agent::create(config.clone(), &workdir, &session_dir, cli.daily)?,
         };
-        if cli.daily {
-            agent.set_daily_mode(true);
-        }
         if let Some(prompt) = cli.print {
             return Ok(headless::run_once(agent, prompt, cli.json).await);
         }

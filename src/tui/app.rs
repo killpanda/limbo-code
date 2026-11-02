@@ -1921,9 +1921,13 @@ impl App {
                 self.steer = agent.steer.clone();
                 self.sup = agent.supervisor.clone();
                 self.entries = entries_from_history(&agent.messages);
+                // The target may be in the other mode: skills and the Dawn
+                // look follow the session that is now live.
+                self.skills = discover_skills(&agent.workdir, agent.daily_mode());
                 self.agent = Some(agent);
                 self.scroll = 0;
                 self.refresh_info();
+                self.apply_look();
                 self.fx.startup(&self.theme);
             }
             Err(e) => self.notice(NoticeKind::Error, format!("无法打开会话：{e}")),
