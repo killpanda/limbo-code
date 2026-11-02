@@ -30,7 +30,10 @@ description: Test-driven development workflow.
 # 指令正文，调用时作为 prompt 注入对话
 ```
 
-- frontmatter 为简单的 `key: value` 行（支持 `name`、`description`）
+- frontmatter 读顶层的 `name`、`description`、`disable-model-invocation`；值可以是普通、
+  带引号（`"..."` / `'...'`）、缩进续行或 YAML 块标量（`>` / `|`）。嵌套在 `metadata:` 等
+  下面的同名键不算
+- description 超过 1024 字符时截断后照常列出（不再跳过）
 - 无 frontmatter 时：name 取目录名，整个文件作为正文
 
 ## 发现路径（同名时后者覆盖前者）
@@ -38,6 +41,7 @@ description: Test-driven development workflow.
 | 来源 | 路径 |
 |------|------|
 | 内置 daily 起步包（仅 daily 会话） | `assets/daily_skills/`（编进二进制，从 Hermes 移植） |
+| 全局（与其他 agent 共用，`npx skills add -g` 装在这里） | `~/.agents/skills/<name>/SKILL.md` |
 | 用户级 | `~/.limbo/skills/<name>/SKILL.md` |
 | 项目级 | `<workdir>/.agents/skills/<name>/SKILL.md` |
 | Daily（仅 daily 会话） | `~/.limbo/daily/skills/<name>/SKILL.md` |
@@ -47,7 +51,8 @@ description: Test-driven development workflow.
 ## 交互
 
 - 输入 `/` 弹出命令菜单，skills 与内置命令一同列出（skill 带 `[skill]` 标记）
-- 继续输入实时过滤；菜单在每次弹出时重新扫描，运行中新增的 skill 立即可用
+- 继续输入实时过滤；菜单在每次弹出时重新扫描，运行中新增的 skill 立即可用；
+  每轮开始前若 skill 有增删改，也会重建 system prompt 里的 `<available_skills>` 目录
 - 选中 skill：
   - **部分匹配 + Enter / Tab** → 补全为 `/<name> `，可继续输入参数
   - **完整输入 `/<name>` + Enter** → 直接无参调用

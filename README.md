@@ -239,8 +239,8 @@ enabled = true
 
 - **Project instructions.** Limbo reads `AGENTS.md` from the working directory
   and `~/.limbo/AGENTS.md` into its system prompt.
-- **Skills.** Drop a `SKILL.md` into `<project>/.agents/skills/<name>/` or
-  `~/.limbo/skills/<name>/`. The model loads it when the task matches, or you
+- **Skills.** Drop a `SKILL.md` into `<project>/.agents/skills/<name>/`,
+  `~/.limbo/skills/<name>/` or the cross-agent `~/.agents/skills/<name>/`. The model loads it when the task matches, or you
   call it as `/<name>`. See [docs/skills.md](docs/skills.md).
 
 ## Safety

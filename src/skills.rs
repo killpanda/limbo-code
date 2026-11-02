@@ -3,6 +3,8 @@
 //!
 //! Discovery (later sources win on name collisions):
 //! - bundled daily pack (daily sessions only, lowest priority)
+//! - global:  `~/.agents/skills/<name>/SKILL.md` (shared with other agents;
+//!   where `npx skills add -g` installs)
 //! - user:    `~/.limbo/skills/<name>/SKILL.md`
 //! - project: `<workdir>/.agents/skills/<name>/SKILL.md`
 //! - daily:   `~/.limbo/daily/skills/<name>/SKILL.md` (daily sessions only)
@@ -33,6 +35,10 @@ pub struct Skill {
     pub disable_model_invocation: bool,
 }
 
+/// The cross-agent global skills dir (`~/.agents/skills`).
+pub fn global_skills_dir() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".agents").join("skills"))
+}
 pub fn user_skills_dir() -> PathBuf {
     limbo_home().join("skills")
 }
@@ -79,29 +85,154 @@ fn mark_scripts_executable(dir: &Path) {
 }
 
 /// Parse `---` frontmatter (`name`, `description`, `disable-model-invocation`).
+///
+/// Only top-level keys count (a `name:` nested under `metadata:` is not the
+/// skill's name). Values may be plain, quoted (`"..."` / `'...'`), continued
+/// on indented lines, or YAML block scalars (`>`, `|`, with chomping
+/// indicators): the forms skill installers commonly write.
 pub fn parse_skill_md(text: &str, fallback: &str) -> (String, String, String, bool) {
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text);
     if let Some(rest) = text.strip_prefix("---")
         && let Some(end) = rest.find("\n---")
     {
         let header = &rest[..end];
-        let body = rest[end + 4..].trim_start_matches('\n').to_string();
+        let body = &rest[end + 4..];
+        // Drop the rest of the closing `---` line.
+        let body = body.split_once('\n').map_or("", |(_, b)| b);
+        let body = body.trim_start_matches(['\n', '\r']).to_string();
         let (mut name, mut desc, mut disable) = (fallback.to_string(), String::new(), false);
-        for line in header.lines() {
-            if let Some((k, v)) = line.split_once(':') {
-                let v = v.trim().to_string();
-                match k.trim() {
-                    "name" if !v.is_empty() => name = v,
-                    "description" => desc = v,
-                    "disable-model-invocation" => {
-                        disable = matches!(v.to_lowercase().as_str(), "true" | "yes" | "1")
-                    }
-                    _ => {}
+        for (k, v) in frontmatter_fields(header) {
+            match k.as_str() {
+                "name" if !v.is_empty() => name = v,
+                "description" => desc = v,
+                "disable-model-invocation" => {
+                    disable = matches!(v.to_lowercase().as_str(), "true" | "yes" | "1")
                 }
+                _ => {}
             }
         }
         return (name, desc, body, disable);
     }
     (fallback.to_string(), String::new(), text.to_string(), false)
+}
+
+/// Top-level `key: value` pairs of a frontmatter block, values unquoted and
+/// block scalars folded.
+fn frontmatter_fields(header: &str) -> Vec<(String, String)> {
+    let lines: Vec<&str> = header.lines().collect();
+    let indented = |l: &str| l.starts_with([' ', '\t']);
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        i += 1;
+        if indented(line) || line.trim_start().starts_with('#') {
+            continue;
+        }
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
+        let key = k.trim().to_string();
+        let v = v.trim();
+        // The indented lines (and blank lines between them) that follow.
+        let mut cont = Vec::new();
+        while i < lines.len() && (indented(lines[i]) || lines[i].trim().is_empty()) {
+            cont.push(lines[i]);
+            i += 1;
+        }
+        while cont.last().is_some_and(|l| l.trim().is_empty()) {
+            cont.pop();
+        }
+        let value = if let Some(ind) = v.strip_prefix(['>', '|']) {
+            let literal = v.starts_with('|');
+            let keep_newline = ind.contains('+');
+            block_scalar(&cont, literal, keep_newline)
+        } else if v.starts_with('"') || v.starts_with('\'') {
+            let mut joined = v.to_string();
+            for l in &cont {
+                joined.push(' ');
+                joined.push_str(l.trim());
+            }
+            unquote(&joined)
+        } else {
+            let mut joined = v.to_string();
+            for l in &cont {
+                let l = l.trim();
+                if !l.is_empty() {
+                    if !joined.is_empty() {
+                        joined.push(' ');
+                    }
+                    joined.push_str(l);
+                }
+            }
+            joined
+        };
+        out.push((key, value));
+    }
+    out
+}
+
+fn block_scalar(lines: &[&str], literal: bool, keep_newline: bool) -> String {
+    let indent = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    let body: Vec<&str> = lines
+        .iter()
+        .map(|l| l.get(indent..).unwrap_or("").trim_end())
+        .collect();
+    let mut s = if literal {
+        body.join("\n")
+    } else {
+        // Folded: single newlines become spaces, blank lines stay newlines.
+        let mut s = String::new();
+        let mut prev_blank = true;
+        for l in body {
+            if l.is_empty() {
+                s.push('\n');
+                prev_blank = true;
+            } else {
+                if !prev_blank {
+                    s.push(' ');
+                }
+                s.push_str(l);
+                prev_blank = false;
+            }
+        }
+        s
+    };
+    if keep_newline {
+        s.push('\n');
+    }
+    s.trim().to_string()
+}
+
+fn unquote(v: &str) -> String {
+    let v = v.trim();
+    if v.len() >= 2 && v.starts_with('\'') && v.ends_with('\'') {
+        return v[1..v.len() - 1].replace("''", "'");
+    }
+    if v.len() >= 2 && v.starts_with('"') && v.ends_with('"') {
+        let inner = &v[1..v.len() - 1];
+        let mut out = String::new();
+        let mut chars = inner.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some(o) => out.push(o),
+                None => out.push('\\'),
+            }
+        }
+        return out;
+    }
+    v.to_string()
 }
 
 /// Validate per the Agent Skills spec; returns error messages.
@@ -142,7 +273,16 @@ fn load_from(dir: &Path) -> Vec<Skill> {
             continue;
         };
         let fallback = e.file_name().to_string_lossy().into_owned();
-        let (name, description, body, disable) = parse_skill_md(&text, &fallback);
+        let (name, mut description, body, disable) = parse_skill_md(&text, &fallback);
+        // Many published skills run past the spec's description limit; list
+        // them with the description cut rather than hiding them.
+        if description.chars().count() > MAX_DESCRIPTION_LENGTH {
+            description = description
+                .chars()
+                .take(MAX_DESCRIPTION_LENGTH - 1)
+                .collect();
+            description.push('…');
+        }
         if !validate_skill(&name, &description).is_empty() {
             continue;
         }
@@ -159,7 +299,9 @@ fn load_from(dir: &Path) -> Vec<Skill> {
 
 /// All skills visible to a session, sorted by name.
 pub fn discover_skills(workdir: &Path, daily: bool) -> Vec<Skill> {
-    let mut sources = vec![user_skills_dir(), workdir.join(".agents/skills")];
+    let mut sources: Vec<PathBuf> = global_skills_dir().into_iter().collect();
+    sources.push(user_skills_dir());
+    sources.push(workdir.join(".agents/skills"));
     if daily {
         sources.insert(0, bundled_daily_dir());
         sources.push(daily_skills_dir());
@@ -230,6 +372,56 @@ mod tests {
             (n.as_str(), d.as_str(), b.as_str(), dis),
             ("deploy", "Ship it", "Do X", false)
         );
+    }
+
+    #[test]
+    fn frontmatter_yaml_forms() {
+        let folded = "---\nname: ste\ndescription: >\n  Report results\n  in short sentences.\nlicense: MIT\n---\nBody";
+        let (n, d, b, _) = parse_skill_md(folded, "x");
+        assert_eq!(
+            (n.as_str(), d.as_str(), b.as_str()),
+            ("ste", "Report results in short sentences.", "Body")
+        );
+
+        let literal = "---\nname: a\ndescription: |-\n  line one\n  line two\n---\n";
+        assert_eq!(parse_skill_md(literal, "x").1, "line one\nline two");
+
+        let quoted = "---\nname: lark-im\nversion: 1.0.0\ndescription: \"飞书: 收发消息 \\\"群聊\\\"\"\nmetadata:\n  name: nested\n  requires:\n    bins: [\"lark-cli\"]\n---\nBody";
+        let (n, d, _, _) = parse_skill_md(quoted, "x");
+        assert_eq!(
+            (n.as_str(), d.as_str()),
+            ("lark-im", "飞书: 收发消息 \"群聊\"")
+        );
+
+        let single = "---\nname: s\ndescription: 'it''s fine'\n---\n";
+        assert_eq!(parse_skill_md(single, "x").1, "it's fine");
+
+        let plain_multi = "---\nname: p\ndescription: first part\n  second part\n---\n";
+        assert_eq!(parse_skill_md(plain_multi, "x").1, "first part second part");
+
+        let crlf = "---\r\nname: c\r\ndescription: >\r\n  windows\r\n  file\r\n---\r\nBody";
+        let (n, d, b, _) = parse_skill_md(crlf, "x");
+        assert_eq!(
+            (n.as_str(), d.as_str(), b.as_str()),
+            ("c", "windows file", "Body")
+        );
+    }
+
+    #[test]
+    fn long_description_is_cut_not_skipped() {
+        let dir = std::env::temp_dir().join(format!("limbo-skills-{}", std::process::id()));
+        let skill = dir.join("long");
+        std::fs::create_dir_all(&skill).unwrap();
+        let desc = "x".repeat(MAX_DESCRIPTION_LENGTH + 60);
+        std::fs::write(
+            skill.join("SKILL.md"),
+            format!("---\nname: long\ndescription: \"{desc}\"\n---\nBody"),
+        )
+        .unwrap();
+        let found = load_from(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].description.chars().count(), MAX_DESCRIPTION_LENGTH);
     }
 
     #[test]

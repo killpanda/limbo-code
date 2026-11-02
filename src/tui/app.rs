@@ -281,6 +281,9 @@ pub struct App {
     pub mouse_changed: bool,
     pub toast: Option<(String, Instant)>,
     pub skills: Vec<Skill>,
+    /// Workdir and daily flag the skills were discovered for (the agent is
+    /// away while a turn runs).
+    skills_scope: (std::path::PathBuf, bool),
     pub dirty: bool,
     /// Collapsed pastes and attachment markers of the prompt box.
     pub paste: PasteStore,
@@ -320,6 +323,7 @@ impl App {
             .or_else(|| std::env::var("LIMBO_MOTION").ok());
         let entries = entries_from_history(&agent.messages);
         let skills = discover_skills(&agent.workdir, agent.daily_mode());
+        let skills_scope = (agent.workdir.clone(), agent.daily_mode());
         let sup = agent.supervisor.clone();
         let viewer = crate::trace_viewer::Viewer::new(
             agent.session_dir.clone(),
@@ -373,6 +377,7 @@ impl App {
             mouse_changed: false,
             toast: None,
             skills,
+            skills_scope,
             dirty: true,
         };
         app.refresh_info();
@@ -965,8 +970,9 @@ impl App {
     /// Re-scan the skill directories (skills can be added while running).
     pub fn refresh_skills(&mut self) {
         if let Some(a) = &self.agent {
-            self.skills = discover_skills(&a.workdir, a.daily_mode());
+            self.skills_scope = (a.workdir.clone(), a.daily_mode());
         }
+        self.skills = discover_skills(&self.skills_scope.0, self.skills_scope.1);
     }
 
     /// Slash-command suggestions for the current input.
@@ -1782,6 +1788,7 @@ impl App {
                 match parse_toggle(arg, a.daily_mode()) {
                     None => self.toast(cmds::DAILY_USAGE),
                     Some(on) if a.set_daily_mode(on) => {
+                        self.skills_scope = (a.workdir.clone(), on);
                         self.skills = discover_skills(&a.workdir, on);
                         self.notice(
                             NoticeKind::Info,

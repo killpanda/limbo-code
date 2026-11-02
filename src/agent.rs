@@ -239,6 +239,8 @@ pub struct Agent {
     persisted: HashSet<String>,
     file_created: bool,
     needs_rewrite: bool,
+    /// The skills catalog the current system prompt was built with.
+    skills_catalog: String,
     pub steer: Arc<SteerQueue>,
     rerun: Vec<ToolCall>,
     /// Last real prompt size, and the history length it was measured at.
@@ -417,6 +419,7 @@ impl Agent {
             persisted: HashSet::new(),
             file_created: false,
             needs_rewrite: false,
+            skills_catalog: String::new(),
             steer,
             rerun: Vec::new(),
             last_prompt_tokens: None,
@@ -559,8 +562,29 @@ impl Agent {
             .then(|| MemoryStore::new(memory_dir(), d.user_chars, d.notes_chars))
     }
 
+    fn current_skills_catalog(&self) -> String {
+        crate::skills::format_skills(&crate::skills::discover_skills(
+            &self.workdir,
+            self.daily_mode(),
+        ))
+    }
+
+    /// Rebuild the system prompt when skills were added, removed or changed
+    /// since it was built, so a skill installed mid-session is visible to the
+    /// model on the next turn. A no-op (prompt cache intact) otherwise.
+    pub fn sync_skills(&mut self) {
+        if self.system_override.is_some() {
+            return;
+        }
+        if self.current_skills_catalog() != self.skills_catalog {
+            self.init_system_message();
+            self.needs_rewrite = true;
+        }
+    }
+
     /// (Re)build the system prompt as message 0.
     pub fn init_system_message(&mut self) {
+        self.skills_catalog = self.current_skills_catalog();
         let extras = PromptExtras {
             memory: self.memory.as_ref(),
             blocks: self.prompt_blocks.clone(),
