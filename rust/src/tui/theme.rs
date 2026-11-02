@@ -90,14 +90,134 @@ pub const EMBER: Theme = Theme {
     gradient: [rgb(255, 210, 110), rgb(255, 140, 80), rgb(255, 80, 120)],
 };
 
+/// Limbo Dawn: the warm sunrise palette daily mode switches to
+/// (`[daily] look = "dawn"`): red → apricot → yellow.
+pub const DAWN: Theme = Theme {
+    name: "dawn",
+    bg: rgb(21, 18, 26),
+    panel: rgb(28, 24, 34),
+    panel_hi: rgb(38, 32, 41),
+    fg: rgb(238, 230, 225),
+    dim: rgb(185, 173, 180),
+    faint: rgb(142, 130, 144),
+    accent: rgb(245, 160, 110),
+    accent2: rgb(237, 88, 83),
+    accent3: rgb(253, 231, 92),
+    ok: rgb(150, 230, 140),
+    warn: rgb(253, 200, 92),
+    err: rgb(255, 99, 110),
+    code: rgb(246, 201, 166),
+    user: rgb(246, 201, 166),
+    gradient: [rgb(237, 88, 83), rgb(245, 160, 110), rgb(253, 231, 92)],
+};
+
 pub const THEMES: [Theme; 3] = [NEON, AURORA, EMBER];
 
 pub fn by_name(name: Option<&str>) -> Theme {
+    if name == Some("omarchy")
+        && let Some(t) = omarchy()
+    {
+        return t;
+    }
+    if name == Some("dawn") {
+        return DAWN;
+    }
     THEMES
         .iter()
         .copied()
         .find(|t| Some(t.name) == name)
         .unwrap_or(NEON)
+}
+
+// -- Omarchy ---------------------------------------------------------------------
+
+fn hex(v: Option<&toml::Value>) -> Option<Color> {
+    let s = v?.as_str()?.trim().trim_start_matches('#');
+    let s = s.get(..6)?;
+    let n = u32::from_str_radix(s, 16).ok()?;
+    Some(rgb((n >> 16) as u8, (n >> 8) as u8, n as u8))
+}
+
+/// `rgba(26a269ee) rgba(2ec27eee) 45deg` → its colors.
+fn parse_gradient(spec: Option<&toml::Value>) -> Vec<Color> {
+    let Some(s) = spec.and_then(|v| v.as_str()) else {
+        return vec![];
+    };
+    let re = regex::Regex::new(r"rgba?\(\s*([0-9A-Fa-f]{6})").unwrap();
+    let mut out: Vec<Color> = re
+        .captures_iter(s)
+        .filter_map(|c| hex(Some(&toml::Value::String(c[1].to_string()))))
+        .collect();
+    if out.is_empty() {
+        out = s
+            .split_whitespace()
+            .filter_map(|p| hex(Some(&toml::Value::String(p.into()))))
+            .collect();
+    }
+    out
+}
+
+/// Follow the Omarchy system theme (`~/.local/state/omarchy/current/theme/
+/// colors.toml`), with optional `limbo.toml` overrides next to it.
+pub fn omarchy() -> Option<Theme> {
+    let base = dirs::home_dir()?.join(".local/state/omarchy/current/theme");
+    let colors: toml::Table = std::fs::read_to_string(base.join("colors.toml"))
+        .ok()?
+        .parse()
+        .ok()?;
+    let pick = |keys: &[&str]| keys.iter().find_map(|k| hex(colors.get(*k)));
+    let bg = pick(&["background", "color0"])?;
+    let fg = pick(&["foreground", "color7"])?;
+    let accent = pick(&["accent", "blue", "color4"]).unwrap_or(fg);
+    let yellow = pick(&["yellow", "color3"]).unwrap_or(accent);
+    let red = pick(&["red", "color1"]).unwrap_or(accent);
+    let green = pick(&["green", "color2"]).unwrap_or(accent);
+    let magenta = pick(&["magenta", "color5"]).unwrap_or(accent);
+    let orange = pick(&["orange", "yellow", "color3"]).unwrap_or(yellow);
+    let mut grad = parse_gradient(colors.get("hyprland_active_border"));
+    if grad.len() < 2 {
+        grad = vec![accent, yellow];
+    }
+    let (from, to) = (grad[0], *grad.last().unwrap());
+    let mut t = Theme {
+        name: "omarchy",
+        bg,
+        panel: lerp(bg, fg, 0.05),
+        panel_hi: lerp(bg, fg, 0.10),
+        fg,
+        dim: lerp(fg, bg, 0.34),
+        faint: lerp(fg, bg, 0.52),
+        accent,
+        accent2: magenta,
+        accent3: yellow,
+        ok: green,
+        warn: orange,
+        err: red,
+        code: orange,
+        user: lerp(fg, accent, 0.45),
+        gradient: [from, lerp(from, to, 0.5), to],
+    };
+    if let Ok(text) = std::fs::read_to_string(base.join("limbo.toml"))
+        && let Ok(o) = text.parse::<toml::Table>()
+    {
+        let set = |slot: &mut Color, key: &str| {
+            if let Some(c) = hex(o.get(key)) {
+                *slot = c;
+            }
+        };
+        set(&mut t.accent, "primary");
+        set(&mut t.accent3, "accent");
+        set(&mut t.ok, "success");
+        set(&mut t.warn, "warning");
+        set(&mut t.err, "error");
+        set(&mut t.dim, "text-secondary");
+        set(&mut t.faint, "text-tertiary");
+        set(&mut t.user, "user-message-fg");
+        set(&mut t.gradient[0], "grad-from");
+        set(&mut t.gradient[1], "grad-mid");
+        set(&mut t.gradient[2], "grad-to");
+    }
+    Some(t)
 }
 
 impl Theme {

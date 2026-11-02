@@ -315,13 +315,19 @@ impl Config {
                     cfg.compaction.reserve_tokens = 16_384;
                 }
                 if cfg.daily.look != "dawn" && cfg.daily.look != "badge" {
-                    warnings.push(format!("daily look={:?} is unknown; reset to 'dawn'", cfg.daily.look));
+                    warnings.push(format!(
+                        "daily look={:?} is unknown; reset to 'dawn'",
+                        cfg.daily.look
+                    ));
                     cfg.daily.look = "dawn".into();
                 }
                 if cfg.web_search.count < 1 {
                     cfg.web_search.count = 10;
                 }
-                if !matches!(cfg.queue.after_failed_run.as_str(), "continue" | "keep" | "withdraw") {
+                if !matches!(
+                    cfg.queue.after_failed_run.as_str(),
+                    "continue" | "keep" | "withdraw"
+                ) {
                     cfg.queue.after_failed_run = "continue".into();
                 }
                 for (field, value, default) in [
@@ -330,7 +336,9 @@ impl Config {
                     ("fetch_max_chars", &mut cfg.daily.fetch_max_chars, 20_000),
                 ] {
                     if *value < 100 {
-                        warnings.push(format!("daily {field}={value} is too small; reset to {default}"));
+                        warnings.push(format!(
+                            "daily {field}={value} is too small; reset to {default}"
+                        ));
                         *value = default;
                     }
                 }
@@ -371,6 +379,31 @@ pub fn save_model_to_config(model: &str, path: Option<&Path>) -> anyhow::Result<
     Ok(())
 }
 
+/// Persist `[llm] thinking_effort` (None removes it).
+pub fn save_thinking_to_config(level: Option<&str>, path: Option<&Path>) -> anyhow::Result<()> {
+    let path = path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(default_config_path);
+    let text = std::fs::read_to_string(&path).unwrap_or_default();
+    let mut doc: toml_edit::DocumentMut = text.parse()?;
+    if !doc.contains_table("llm") {
+        doc["llm"] = toml_edit::table();
+    }
+    match level {
+        Some(l) => doc["llm"]["thinking_effort"] = toml_edit::value(l),
+        None => {
+            if let Some(t) = doc["llm"].as_table_mut() {
+                t.remove("thinking_effort");
+            }
+        }
+    }
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(&path, doc.to_string())?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -392,6 +425,22 @@ mod tests {
                 .unwrap();
         assert_eq!(cfg.providers["glm"].base_url.as_deref(), Some("https://x"));
         assert_eq!(cfg.providers["glm"].headers["A"], "b");
+    }
+
+    #[test]
+    fn save_thinking_sets_and_removes() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("config.toml");
+        std::fs::write(&p, "# keep\n[llm]\nmodel = \"x\"\n").unwrap();
+        save_thinking_to_config(Some("high"), Some(&p)).unwrap();
+        let t = std::fs::read_to_string(&p).unwrap();
+        assert!(t.contains("# keep") && t.contains("thinking_effort = \"high\""));
+        save_thinking_to_config(None, Some(&p)).unwrap();
+        assert!(
+            !std::fs::read_to_string(&p)
+                .unwrap()
+                .contains("thinking_effort")
+        );
     }
 
     #[test]

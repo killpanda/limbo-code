@@ -114,7 +114,12 @@ impl Tool for WebFetchTool {
             }
         } else {
             let raw = String::from_utf8_lossy(&body).into_owned();
-            let looks_html = raw.chars().take(2000).collect::<String>().to_lowercase().contains("<html");
+            let looks_html = raw
+                .chars()
+                .take(2000)
+                .collect::<String>()
+                .to_lowercase()
+                .contains("<html");
             if ctype.contains("html") || (ctype.is_empty() && looks_html) {
                 let (t, x) = html_to_text(&raw, &final_url);
                 title = t;
@@ -168,7 +173,14 @@ impl WebFetchTool {
         Ok((final_url, ctype, body))
     }
 
-    fn page(&self, workdir: &Path, url: &str, title: &str, text: &str, offset: usize) -> Result<String, String> {
+    fn page(
+        &self,
+        workdir: &Path,
+        url: &str,
+        title: &str,
+        text: &str,
+        offset: usize,
+    ) -> Result<String, String> {
         let chars: Vec<char> = text.chars().collect();
         let total = chars.len();
         if offset > 0 && offset >= total {
@@ -385,7 +397,10 @@ fn parse_attrs(inner: &str) -> Vec<(String, String)> {
         while i < chars.len() && !chars[i].is_whitespace() && chars[i] != '=' && chars[i] != '/' {
             i += 1;
         }
-        let key: String = chars[start..i].iter().collect::<String>().to_ascii_lowercase();
+        let key: String = chars[start..i]
+            .iter()
+            .collect::<String>()
+            .to_ascii_lowercase();
         while i < chars.len() && chars[i].is_whitespace() {
             i += 1;
         }
@@ -609,9 +624,15 @@ impl Extractor {
         };
         let empty_links = regex::Regex::new(r"\[\s*\]\([^)]*\)").unwrap();
         let t = empty_links.replace_all(&chosen, "");
-        let t = regex::Regex::new(r"[ \t]+\n").unwrap().replace_all(&t, "\n");
-        let t = regex::Regex::new(r"\n[ \t]+").unwrap().replace_all(&t, "\n");
-        let t = regex::Regex::new(r"\n{3,}").unwrap().replace_all(&t, "\n\n");
+        let t = regex::Regex::new(r"[ \t]+\n")
+            .unwrap()
+            .replace_all(&t, "\n");
+        let t = regex::Regex::new(r"\n[ \t]+")
+            .unwrap()
+            .replace_all(&t, "\n");
+        let t = regex::Regex::new(r"\n{3,}")
+            .unwrap()
+            .replace_all(&t, "\n\n");
         t.trim().to_string()
     }
 }
@@ -661,6 +682,9 @@ mod tests {
 
     #[test]
     fn entities() {
-        assert_eq!(decode_entities("a&lt;b&#x4e2d;&#20013;&bogus;"), "a<b中中&bogus;");
+        assert_eq!(
+            decode_entities("a&lt;b&#x4e2d;&#20013;&bogus;"),
+            "a<b中中&bogus;"
+        );
     }
 }

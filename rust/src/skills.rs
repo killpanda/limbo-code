@@ -62,7 +62,11 @@ pub fn bundled_daily_dir() -> PathBuf {
 
 fn mark_scripts_executable(dir: &Path) {
     use std::os::unix::fs::PermissionsExt;
-    for entry in ignore::WalkBuilder::new(dir).hidden(false).build().flatten() {
+    for entry in ignore::WalkBuilder::new(dir)
+        .hidden(false)
+        .build()
+        .flatten()
+    {
         let p = entry.path();
         if p.extension().is_some_and(|e| e == "py" || e == "sh")
             && let Ok(meta) = std::fs::metadata(p)

@@ -67,7 +67,10 @@ impl DeepSeekSearch {
                 .pointer("/error/message")
                 .and_then(Value::as_str)
                 .unwrap_or("");
-            let parts: Vec<&str> = [hint, detail].into_iter().filter(|p| !p.is_empty()).collect();
+            let parts: Vec<&str> = [hint, detail]
+                .into_iter()
+                .filter(|p| !p.is_empty())
+                .collect();
             let suffix = if parts.is_empty() {
                 String::new()
             } else {
@@ -75,12 +78,22 @@ impl DeepSeekSearch {
             };
             return Err(format!("DeepSeek search failed (HTTP {status}){suffix}"));
         }
-        let items = body.get("results").and_then(Value::as_array).cloned().unwrap_or_default();
+        let items = body
+            .get("results")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
         Ok(items
             .iter()
             .filter(|i| i.is_object())
             .map(|i| {
-                let t = |k: &str| i.get(k).and_then(Value::as_str).unwrap_or("").trim().to_string();
+                let t = |k: &str| {
+                    i.get(k)
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .trim()
+                        .to_string()
+                };
                 let opt = |k: &str| Some(t(k)).filter(|s| !s.is_empty());
                 SearchResult {
                     title: t("title"),
@@ -117,7 +130,10 @@ pub fn build_provider(config: &Config) -> Option<DeepSeekSearch> {
         return None;
     }
     let key = resolve_search_key(config)?;
-    let base = s.base_url.clone().unwrap_or_else(|| DEEPSEEK_BASE_URL.into());
+    let base = s
+        .base_url
+        .clone()
+        .unwrap_or_else(|| DEEPSEEK_BASE_URL.into());
     Some(DeepSeekSearch {
         api_key: key,
         url: format!("{}/tools/search", base.trim_end_matches('/')),
@@ -131,7 +147,11 @@ pub fn format_results(results: &[SearchResult]) -> String {
         .enumerate()
         .map(|(i, r)| {
             let mut lines = vec![
-                format!("[{}] {}", i + 1, if r.title.is_empty() { &r.url } else { &r.title }),
+                format!(
+                    "[{}] {}",
+                    i + 1,
+                    if r.title.is_empty() { &r.url } else { &r.title }
+                ),
                 r.url.clone(),
             ];
             let meta: Vec<&str> = [r.site_name.as_deref(), r.date.as_deref()]
@@ -190,7 +210,10 @@ impl Tool for WebSearchTool {
         true
     }
     async fn run(&self, args: Value, _ctx: &ToolContext) -> ToolResult {
-        let Some(query) = arg_str(&args, "query").map(str::trim).filter(|q| !q.is_empty()) else {
+        let Some(query) = arg_str(&args, "query")
+            .map(str::trim)
+            .filter(|q| !q.is_empty())
+        else {
             return ToolResult::err("query must be a non-empty string");
         };
         let n = query.chars().count();
@@ -228,7 +251,10 @@ mod tests {
             site_name: Some("rust-lang".into()),
             date: None,
         }]);
-        assert_eq!(out, "[1] Rust\nhttps://rust-lang.org\nrust-lang\nA language");
+        assert_eq!(
+            out,
+            "[1] Rust\nhttps://rust-lang.org\nrust-lang\nA language"
+        );
     }
 
     #[test]

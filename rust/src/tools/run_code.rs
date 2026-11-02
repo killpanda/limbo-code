@@ -279,7 +279,10 @@ impl Tool for RunCodeTool {
         }
         let timeout = match args.get("timeout") {
             None | Some(Value::Null) => DEFAULT_TIMEOUT_SECONDS,
-            Some(v) => match v.as_f64().or_else(|| v.as_str().and_then(|s| s.parse().ok())) {
+            Some(v) => match v
+                .as_f64()
+                .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
+            {
                 Some(t) if t > 0.0 => t,
                 Some(_) => return ToolResult::err("run_code: timeout must be > 0"),
                 None => return ToolResult::err("run_code: invalid timeout"),
@@ -292,7 +295,12 @@ impl Tool for RunCodeTool {
     }
 }
 
-async fn run_program(code: &str, timeout: f64, registry: &ToolRegistry, ctx: &ToolContext) -> ToolResult {
+async fn run_program(
+    code: &str,
+    timeout: f64,
+    registry: &ToolRegistry,
+    ctx: &ToolContext,
+) -> ToolResult {
     let params: serde_json::Map<String, Value> = registry
         .program_definitions()
         .iter()
@@ -401,7 +409,11 @@ async fn run_program(code: &str, timeout: f64, registry: &ToolRegistry, ctx: &To
                 .collect()
         })
         .unwrap_or_default();
-    if let Some(v) = done.get("value").and_then(Value::as_str).filter(|v| !v.is_empty()) {
+    if let Some(v) = done
+        .get("value")
+        .and_then(Value::as_str)
+        .filter(|v| !v.is_empty())
+    {
         parts.push(v.to_string());
     }
     let mut output = if parts.is_empty() {
@@ -410,7 +422,8 @@ async fn run_program(code: &str, timeout: f64, registry: &ToolRegistry, ctx: &To
         parts.join("\n")
     };
     if output.chars().count() > MAX_RESULT_CHARS {
-        output = output.chars().take(MAX_RESULT_CHARS).collect::<String>() + "\n[Output truncated.]";
+        output =
+            output.chars().take(MAX_RESULT_CHARS).collect::<String>() + "\n[Output truncated.]";
     }
     ToolResult::ok(output)
 }
@@ -440,7 +453,11 @@ mod tests {
                     a, b = await asyncio.gather(tools.ls(path='.'), tools.read({'path': 'a.txt'}))\nreturn {'n': 2}";
         let code = format!("import asyncio\n{code}");
         let r = reg
-            .execute("run_code", json!({"code": code, "description": "test"}), &ctx)
+            .execute(
+                "run_code",
+                json!({"code": code, "description": "test"}),
+                &ctx,
+            )
             .await;
         let out = r.output.clone().unwrap_or_else(|| r.error.clone().unwrap());
         assert!(r.success, "{out}");
@@ -456,12 +473,23 @@ mod tests {
         let reg = ToolRegistry::core(true);
         let ctx = ToolContext::simple(std::env::temp_dir());
         let r = reg
-            .execute("run_code", json!({"code": "print('x')\nraise ValueError('boom')", "description": "t"}), &ctx)
+            .execute(
+                "run_code",
+                json!({"code": "print('x')\nraise ValueError('boom')", "description": "t"}),
+                &ctx,
+            )
             .await;
         let e = r.error.unwrap();
-        assert!(e.contains("ValueError") && e.contains("boom") && e.contains("Captured output"), "{e}");
+        assert!(
+            e.contains("ValueError") && e.contains("boom") && e.contains("Captured output"),
+            "{e}"
+        );
         let r = reg
-            .execute("run_code", json!({"code": "while True: pass", "description": "t", "timeout": 0.5}), &ctx)
+            .execute(
+                "run_code",
+                json!({"code": "while True: pass", "description": "t", "timeout": 0.5}),
+                &ctx,
+            )
             .await;
         assert!(r.error.unwrap().contains("timeout"));
     }

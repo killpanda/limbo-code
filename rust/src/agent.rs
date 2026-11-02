@@ -30,20 +30,20 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::attachments::build_user_content;
 use crate::compaction::{
     self, build_summary_prompt, find_split_point, is_summary_message, make_summary_message,
     summary_body,
 };
-use crate::attachments::build_user_content;
 use crate::config::Config;
 use crate::history;
-use crate::memory::{MEMORY_NUDGE, MemorySnapshot, MemoryStore, memory_dir};
 use crate::llm::usage::{estimate_tokens, normalize_usage};
 use crate::llm::{LlmClient, LlmError};
+use crate::memory::{MEMORY_NUDGE, MemorySnapshot, MemoryStore, memory_dir};
 use crate::models::{Attachment, LlmEvent, Message, Role, ToolCall, ToolResult, new_id};
 use crate::prompt::{PromptExtras, build_system_prompt_with};
 use crate::session::{self, CompactionRecord, LoadedSession, QueuedMessageRecord, SessionMeta};
-use crate::subagent::TaskTool;
+use crate::subagents::Supervisor;
 use crate::tools::{ToolContext, ToolRegistry};
 use crate::trace::{TRACE_SCHEMA, TraceLogger, trace_path_for, utc_now_iso};
 
@@ -90,10 +90,40 @@ pub enum AgentEvent {
     },
     /// A queued message was injected into the conversation.
     Steer(String),
+    /// A neutral notice (e.g. a background skill review started).
+    Info(String),
     Warning(String),
     Error(String),
     Interrupted,
     TurnEnd,
+    // -- task-level events (the pump) --
+    GoalVerifyStarted {
+        command: String,
+        round: u32,
+        max_rounds: u32,
+    },
+    GoalVerifyResult {
+        exit_code: Option<i32>,
+        output_tail: String,
+        timed_out: bool,
+        cancelled: bool,
+        round: u32,
+        max_rounds: u32,
+    },
+    GoalPassed {
+        rounds: u32,
+    },
+    GoalExhausted {
+        rounds: u32,
+    },
+    GoalResumed {
+        max_rounds: u32,
+    },
+    /// The run failed and `[queue] after_failed_run` held (or withdrew) the queue.
+    QueueHeld {
+        policy: String,
+        texts: Vec<String>,
+    },
 }
 
 pub type EventTx = mpsc::UnboundedSender<AgentEvent>;
@@ -108,47 +138,91 @@ pub struct SteerQueue {
     path: Mutex<Option<PathBuf>>,
 }
 
+pub const STEER: &str = "steer";
+pub const FOLLOW_UP: &str = "follow_up";
+
 impl SteerQueue {
-    pub fn push(&self, text: String) {
+    /// Queue a user message (steer: next consistency point; follow_up:
+    /// after the whole task).
+    pub fn push_item(
+        &self,
+        text: String,
+        attachments: Vec<Attachment>,
+        mode: &str,
+        source: &str,
+        refs: Vec<String>,
+    ) -> String {
         let item = QueuedMessageRecord {
             id: new_id(),
             text,
-            mode: "steer".into(),
-            source: "user".into(),
+            attachments,
+            mode: mode.into(),
+            source: source.into(),
+            refs,
         };
         if let Some(p) = self.path.lock().unwrap().as_ref() {
             let _ = session::append_lines(p, &[session::queued_record(&item)]);
         }
+        let id = item.id.clone();
         self.items.lock().unwrap().push_back(item);
+        id
     }
-    fn drain(&self) -> Vec<QueuedMessageRecord> {
-        self.items.lock().unwrap().drain(..).collect()
-    }
-    /// Remove the most recently queued message (the TUI puts it back into
-    /// the input box).
-    pub fn pop_last(&self) -> Option<String> {
-        let item = self.items.lock().unwrap().pop_back()?;
-        if let Some(p) = self.path.lock().unwrap().as_ref() {
-            let _ = session::append_lines(
-                p,
-                &[session::dequeued_record(std::slice::from_ref(&item.id))],
-            );
+
+    pub fn journal_dequeued(&self, ids: &[String]) {
+        if ids.is_empty() {
+            return;
         }
+        if let Some(p) = self.path.lock().unwrap().as_ref() {
+            let _ = session::append_lines(p, &[session::dequeued_record(ids)]);
+        }
+    }
+
+    /// Take the queued items of `modes` (FIFO). The caller journals them as
+    /// dequeued once the message carrying them is on disk.
+    pub fn drain_modes(&self, modes: &[&str]) -> Vec<QueuedMessageRecord> {
+        let mut items = self.items.lock().unwrap();
+        let (take, keep): (Vec<_>, Vec<_>) = items
+            .drain(..)
+            .partition(|i| modes.contains(&i.mode.as_str()));
+        items.extend(keep);
+        take
+    }
+
+    fn drain(&self) -> Vec<QueuedMessageRecord> {
+        self.drain_modes(&[STEER])
+    }
+
+    /// Remove the most recently queued user message (the TUI puts it back
+    /// into the input box).
+    pub fn pop_last(&self) -> Option<String> {
+        let item = {
+            let mut items = self.items.lock().unwrap();
+            let pos = items.iter().rposition(|i| i.source == "user")?;
+            items.remove(pos)?
+        };
+        self.journal_dequeued(std::slice::from_ref(&item.id));
         Some(item.text)
     }
+
+    /// Cancel one queued item by id (false once it was drained).
+    pub fn cancel(&self, id: &str) -> Option<QueuedMessageRecord> {
+        let item = {
+            let mut items = self.items.lock().unwrap();
+            let pos = items.iter().position(|i| i.id == id)?;
+            items.remove(pos)?
+        };
+        self.journal_dequeued(std::slice::from_ref(&item.id));
+        Some(item)
+    }
+
     pub fn len(&self) -> usize {
         self.items.lock().unwrap().len()
     }
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }
-    pub fn texts(&self) -> Vec<String> {
-        self.items
-            .lock()
-            .unwrap()
-            .iter()
-            .map(|i| i.text.clone())
-            .collect()
+    pub fn items(&self) -> Vec<QueuedMessageRecord> {
+        self.items.lock().unwrap().iter().cloned().collect()
     }
 }
 
@@ -187,6 +261,15 @@ pub struct Agent {
     pub was_interrupted: bool,
     /// Extra system-prompt blocks (project facts, subagent instructions).
     pub prompt_blocks: Vec<String>,
+    /// The task board of this (main) session.
+    pub supervisor: Option<Arc<Supervisor>>,
+    /// Cache-parity fork children: the tool list sent to the model (the
+    /// registry and its hooks still decide what runs).
+    pub advertised_tools: Option<Vec<Value>>,
+    /// Cache-parity fork children: the main session's system prompt verbatim.
+    pub system_override: Option<String>,
+    /// Daily mode: when to start a skill review by itself.
+    pub learn: Arc<Mutex<crate::learn::LearnTrigger>>,
 }
 
 impl Agent {
@@ -197,6 +280,7 @@ impl Agent {
         let meta = SessionMeta::new(id.clone(), workdir, client.model_id());
         let path = session_dir.join(format!("{id}.jsonl"));
         let mut agent = Self::assemble(config, client, workdir, session_dir, meta, path);
+        agent.attach_supervisor();
         agent.init_system_message();
         agent.log_session_start(false);
         Ok(agent)
@@ -245,12 +329,17 @@ impl Agent {
         });
         agent.messages = rec.messages;
         agent.rerun = rec.rerun;
+        for q in queue {
+            agent.steer.items.lock().unwrap().push_back(q);
+        }
+        if agent.meta.role != "subagent" {
+            agent.attach_supervisor();
+        } else {
+            agent.is_subagent = true;
+        }
         agent.init_system_message();
         if rec.repaired {
             agent.needs_rewrite = true;
-        }
-        for q in queue {
-            agent.steer.items.lock().unwrap().push_back(q);
         }
         agent.log_session_start(true);
         Ok(agent)
@@ -295,12 +384,14 @@ impl Agent {
     ) -> Self {
         let mut registry = ToolRegistry::for_config(&config);
         registry.session_dir = session_dir.to_path_buf();
-        if config.subagents.enabled {
-            registry.add(Arc::new(TaskTool::new(config.clone())));
-        }
         client.prompt_cache_key = Some(meta.id.clone());
         let memory = config.daily.memory.then(|| {
-            MemoryStore::new(memory_dir(), config.daily.user_chars, config.daily.notes_chars).snapshot()
+            MemoryStore::new(
+                memory_dir(),
+                config.daily.user_chars,
+                config.daily.notes_chars,
+            )
+            .snapshot()
         });
         let trace = if cfg!(test) {
             TraceLogger::disabled()
@@ -309,6 +400,10 @@ impl Agent {
         };
         let steer = Arc::new(SteerQueue::default());
         *steer.path.lock().unwrap() = Some(path.clone());
+        let learn = Arc::new(Mutex::new(crate::learn::LearnTrigger::new(
+            config.daily.learn_after_rounds,
+            config.daily.learn_cooldown_turns,
+        )));
         Self {
             config,
             client,
@@ -337,6 +432,59 @@ impl Agent {
             last_run_failed: false,
             was_interrupted: false,
             prompt_blocks: Vec::new(),
+            supervisor: None,
+            advertised_tools: None,
+            system_override: None,
+            learn,
+        }
+    }
+
+    /// Open the task board of the current session (main sessions only).
+    fn attach_supervisor(&mut self) {
+        if let Some(old) = self.supervisor.take() {
+            old.stop();
+        }
+        let blocks_before = self.prompt_blocks.len();
+        self.prompt_blocks
+            .retain(|b| !b.starts_with(crate::subagents::supervisor::MAIN_PROMPT));
+        for name in [
+            "plan_tasks",
+            "task_status",
+            "task_send",
+            "answer",
+            "task_control",
+        ] {
+            self.registry.remove(name);
+        }
+        if !self.config.subagents.enabled || self.is_subagent {
+            return;
+        }
+        let sup = Supervisor::new(
+            self.config.clone(),
+            &self.workdir,
+            &self.session_path,
+            self.client.model_id(),
+            self.steer.clone(),
+        );
+        let tools = sup.main_tools();
+        if !tools.is_empty() {
+            for t in tools {
+                self.registry.add(t);
+            }
+            self.prompt_blocks.push(sup.main_prompt());
+        }
+        let _ = blocks_before;
+        self.supervisor = Some(sup);
+    }
+
+    /// Give the board what a fork child inherits.
+    pub fn sync_supervisor(&self) {
+        if let Some(sup) = &self.supervisor {
+            sup.sync_main(
+                &self.messages,
+                self.registry.definitions(),
+                self.daily_mode(),
+            );
         }
     }
 
@@ -404,12 +552,11 @@ impl Agent {
     pub fn code_mode(&self) -> bool {
         self.registry.code_mode
     }
-    pub fn system_prompt(&self) -> String {
-        self.messages
-            .first()
-            .filter(|m| m.role == Role::System)
-            .map(|m| m.text().to_string())
-            .unwrap_or_default()
+    /// The memory store `/memory` shows (None when `[daily] memory = false`).
+    pub fn memory_store(&self) -> Option<MemoryStore> {
+        let d = &self.config.daily;
+        d.memory
+            .then(|| MemoryStore::new(memory_dir(), d.user_chars, d.notes_chars))
     }
 
     /// (Re)build the system prompt as message 0.
@@ -418,7 +565,11 @@ impl Agent {
             memory: self.memory.as_ref(),
             blocks: self.prompt_blocks.clone(),
         };
-        let sys = Message::system(build_system_prompt_with(&self.registry, &self.workdir, &extras));
+        let text = match &self.system_override {
+            Some(t) => t.clone(),
+            None => build_system_prompt_with(&self.registry, &self.workdir, &extras),
+        };
+        let sys = Message::system(text);
         match self.messages.first_mut() {
             Some(m) if m.role == Role::System => {
                 m.content = sys.content;
@@ -702,12 +853,20 @@ impl Agent {
     }
 
     fn inject_steer(&mut self, item: QueuedMessageRecord, tx: &EventTx) {
-        let _ = tx.send(AgentEvent::Steer(item.text.clone()));
+        if item.source == "user" {
+            let _ = tx.send(AgentEvent::Steer(item.text.clone()));
+        }
         self.trace.log(
             "user_message",
             json!({"turn": self.turn_count, "steer": true, "followup": false, "id": item.id, "content": item.text}),
         );
-        self.messages.push(Message::user(item.text));
+        let (content, images) =
+            build_user_content(&item.text, &item.attachments, self.client.spec.vision);
+        let mut m = Message::user(content);
+        if !images.is_empty() {
+            m.attachments = Some(images);
+        }
+        self.messages.push(m);
         // Mark it dequeued only once the message carrying it is on disk.
         self.checkpoint();
         self.journal(&[session::dequeued_record(&[item.id])]);
@@ -718,9 +877,7 @@ impl Agent {
             workdir: self.workdir.clone(),
             cancel: cancel.clone(),
             call_id: call_id.to_string(),
-            session_path: Some(self.session_path.clone()),
             events: Some(tx.clone()),
-            plan_mode: self.registry.plan_mode,
             registry: Some(self.registry.clone()),
         }
     }
@@ -855,6 +1012,12 @@ impl Agent {
                 break;
             }
             length_stops = 0;
+            if calls
+                .iter()
+                .any(|c| matches!(c.name(), "plan_tasks" | "task_control"))
+            {
+                self.sync_supervisor();
+            }
             self.execute_tool_calls(&calls, tx, cancel).await;
             self.checkpoint();
             if cancel.is_cancelled() {
@@ -885,7 +1048,10 @@ impl Agent {
         tx: &EventTx,
         cancel: &CancellationToken,
     ) -> Result<bool, LlmError> {
-        let tools = self.registry.definitions();
+        let tools = self
+            .advertised_tools
+            .clone()
+            .unwrap_or_else(|| self.registry.definitions());
         let max_retries = self.config.llm.max_retries;
         let mut attempt = 0;
         loop {
@@ -1322,6 +1488,7 @@ impl Agent {
         self.rerun.clear();
         self.last_prompt_tokens = None;
         self.prompt_watermark = 0;
+        self.attach_supervisor();
         self.init_system_message();
     }
 

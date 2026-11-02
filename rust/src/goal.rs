@@ -215,8 +215,12 @@ pub fn build_initial_prompt(state: &GoalState) -> String {
 }
 
 /// Self-prompt for the next round: failure output fed back verbatim.
+/// `state` is already advanced past the failed verify (`next_state`), so
+/// `rounds_completed` is the number of the round that just failed. (The
+/// Python version adds one more here and reports round 2 after the first
+/// failure.)
 pub fn build_goal_prompt(state: &GoalState, result: &VerifyResult) -> String {
-    let round = state.rounds_completed + 1;
+    let round = state.rounds_completed.max(1);
     let outcome = if result.timed_out {
         format!("验收命令 `{}` 执行超时，未完成。", state.verify_command)
     } else {

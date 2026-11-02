@@ -113,7 +113,8 @@ fn plan_one(
         }
         let content = require(op, "content")?;
         check_skill_md(content, name)?;
-        plan.staged.insert(skill_dir.join("SKILL.md"), content.into());
+        plan.staged
+            .insert(skill_dir.join("SKILL.md"), content.into());
         plan.created.push(name.into());
         return Ok(());
     }
@@ -128,7 +129,10 @@ fn plan_one(
             .entry(name.into())
             .or_insert_with(|| e.path.parent().unwrap_or(root).to_path_buf());
     }
-    let raw = op.get("file_path").and_then(Value::as_str).unwrap_or("SKILL.md");
+    let raw = op
+        .get("file_path")
+        .and_then(Value::as_str)
+        .unwrap_or("SKILL.md");
     let rel = relative(raw, action == "patch")?;
     let target = skill_dir.join(&rel);
     if action == "write_file" {
@@ -185,7 +189,10 @@ fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
 
 fn write_file(path: &Path, text: &str) -> std::io::Result<()> {
     if path.exists() {
-        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let _ = std::fs::copy(path, path.with_file_name(format!("{name}.bak")));
     }
     crate::session::atomic_write(path, text.as_bytes())
@@ -223,7 +230,11 @@ impl Tool for SkillManageTool {
         })
     }
     async fn run(&self, args: Value, ctx: &ToolContext) -> ToolResult {
-        let Some(ops) = args.get("operations").and_then(Value::as_array).filter(|o| !o.is_empty()) else {
+        let Some(ops) = args
+            .get("operations")
+            .and_then(Value::as_array)
+            .filter(|o| !o.is_empty())
+        else {
             return ToolResult::err("operations must be a non-empty list");
         };
         let root = daily_skills_dir();
@@ -267,7 +278,11 @@ impl Tool for SkillManageTool {
             touched.into_iter().collect::<Vec<_>>().join(", "),
             root.display()
         )];
-        let copied: Vec<&String> = plan.copies.keys().filter(|n| !plan.created.contains(n)).collect();
+        let copied: Vec<&String> = plan
+            .copies
+            .keys()
+            .filter(|n| !plan.created.contains(n))
+            .collect();
         if !copied.is_empty() {
             lines.push(format!(
                 "Copied {} into the daily skills dir first; the copy now replaces the original by name.",

@@ -67,7 +67,11 @@ impl Tool for MemoryTool {
                 } else {
                     String::new()
                 };
-                let file = if target == "user" { "USER.md" } else { "NOTES.md" };
+                let file = if target == "user" {
+                    "USER.md"
+                } else {
+                    "NOTES.md"
+                };
                 ToolResult::ok(format!(
                     "Updated {file} ({} entries, {used}{cap} chars). Done; takes effect next session.",
                     entries.len()

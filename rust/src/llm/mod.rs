@@ -127,6 +127,8 @@ pub struct Request {
     pub body: Value,
 }
 
+/// Called with every request body before it is sent (tracing).
+pub type RequestHook = std::sync::Arc<dyn Fn(&Value) + Send + Sync>;
 /// The client the agent talks to. Cheap to clone (reqwest's client is an
 /// `Arc` inside).
 #[derive(Clone)]
@@ -144,7 +146,7 @@ pub struct LlmClient {
     /// Responses API prompt cache bucket (the session id).
     pub prompt_cache_key: Option<String>,
     /// Called with every request body before it is sent (tracing).
-    pub on_request: Option<std::sync::Arc<dyn Fn(&Value) + Send + Sync>>,
+    pub on_request: Option<RequestHook>,
 }
 
 impl LlmClient {

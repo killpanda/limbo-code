@@ -1,5 +1,6 @@
 //! TUI application state: keys, slash commands, agent events.
 
+use crate::integrations::{Reporters, State, TurnOutcome};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -9,14 +10,23 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use super::chat::{Entry, EntryKind, NoticeKind, ToolStatus, entries_from_history};
+use super::clipboard;
 use super::fx::Fx;
+use super::game2048::{Dir, Game};
 use super::input::Input;
+use super::paste::{self, PasteStore};
 use super::theme::{self, THEMES, Theme};
-use crate::agent::{Agent, AgentEvent, EventTx, SteerQueue};
+use crate::agent::{Agent, AgentEvent, EventTx, FOLLOW_UP, STEER, SteerQueue};
+use crate::background::BackgroundEvent;
+use crate::commands::{self as cmds, parse_toggle};
 use crate::config::{self, Config};
+use crate::goal::{GoalCommand, parse_goal_args};
 use crate::llm::catalog;
-use crate::skills::{Skill, discover_skills};
+use crate::models::Attachment;
+use crate::pump;
 use crate::session::{self, SessionMeta};
+use crate::skills::{Skill, discover_skills};
+use crate::subagents::Supervisor;
 
 /// What the agent is doing right now (drives the status bar).
 #[derive(Debug, Clone, PartialEq)]
@@ -38,6 +48,10 @@ pub struct Info {
     pub context_window: u64,
     pub session_total: u64,
     pub plan_mode: bool,
+    pub daily_mode: bool,
+    pub code_mode: bool,
+    /// `🎯 2/8` while a goal is live.
+    pub goal: Option<String>,
     pub thinking: Option<String>,
     pub workdir: String,
 }
@@ -54,10 +68,46 @@ pub enum Popup {
         selected: usize,
         filter: String,
     },
+    /// After a /goal proposal round: pick the verify command.
+    VerifyPicker {
+        items: Vec<String>,
+        selected: usize,
+    },
+    /// A /btw side answer (never enters the session).
+    Btw {
+        question: String,
+        answer: String,
+        done: bool,
+        scroll: u16,
+    },
+    /// Read-only text (/task, /agents scan, /memory …).
+    Text {
+        title: String,
+        body: String,
+        scroll: u16,
+    },
+    Game(Box<Game>),
+    /// Paste-a-key dialog for a provider with no key (from the model
+    /// picker); the key is checked before it is saved to auth.json.
+    Auth {
+        provider: String,
+        model: String,
+        input: String,
+        status: Option<String>,
+        checking: bool,
+    },
+    /// The subagent board: tasks on the left, the selected one's transcript.
+    Agents {
+        selected: usize,
+        scroll: u16,
+    },
 }
 
+pub const VERIFY_EDIT: &str = "✏️ 自己输入/编辑命令…";
+pub const VERIFY_SKIP: &str = "⏭️ 跳过（不自动验收）";
+
 pub enum Job {
-    Turn(String),
+    Turn(String, Vec<Attachment>),
     Compact,
 }
 
@@ -114,13 +164,73 @@ pub const COMMANDS: &[SlashCommand] = &[
         help: "只读计划模式",
     },
     SlashCommand {
+        name: "goal",
+        args: "<目标>|clear",
+        help: "目标闭环：验收命令不过就继续改",
+    },
+    SlashCommand {
+        name: "queue",
+        args: "<文本>",
+        help: "排队到当前任务全部完成后（同 alt+enter）",
+    },
+    SlashCommand {
+        name: "code-mode",
+        args: "[on|off]",
+        help: "让模型写 Python 批量调用工具",
+    },
+    SlashCommand {
+        name: "daily-mode",
+        args: "[on|off]",
+        help: "日常助理模式：网页、记忆、历史会话",
+    },
+    SlashCommand {
+        name: "memory",
+        args: "[edit [user|notes]]",
+        help: "查看/编辑长期记忆（daily）",
+    },
+    SlashCommand {
+        name: "learn",
+        args: "",
+        help: "后台复盘，把经验写进 skill（daily）",
+    },
+    SlashCommand {
+        name: "btw",
+        args: "<问题>",
+        help: "侧问：不打断任务、不进历史",
+    },
+    SlashCommand {
+        name: "agents",
+        args: "[scan|init]",
+        help: "子代理面板 · 项目画像 · 生成项目角色",
+    },
+    SlashCommand {
+        name: "task",
+        args: "[id|动作 id]",
+        help: "任务板：查看、批准、暂停、取消、重试…",
+    },
+    SlashCommand {
+        name: "tracing-viewer",
+        args: "[id|off]",
+        help: "在浏览器里看本会话的 trace",
+    },
+    SlashCommand {
+        name: "copy",
+        args: "",
+        help: "复制最后一条回复到剪贴板",
+    },
+    SlashCommand {
+        name: "2048",
+        args: "",
+        help: "等待时玩一局 2048",
+    },
+    SlashCommand {
         name: "export",
         args: "[path]",
         help: "导出对话为 Markdown",
     },
     SlashCommand {
         name: "theme",
-        args: "[neon|aurora|ember]",
+        args: "[neon|aurora|ember|dawn|omarchy]",
         help: "切换主题",
     },
     SlashCommand {
@@ -170,6 +280,31 @@ pub struct App {
     pub toast: Option<(String, Instant)>,
     pub skills: Vec<Skill>,
     pub dirty: bool,
+    /// Collapsed pastes and attachment markers of the prompt box.
+    pub paste: PasteStore,
+    /// The task that just ran was a /goal proposal round.
+    proposing: bool,
+    /// The next submission is the (edited) verify command.
+    pub editing_verify: bool,
+    /// `[queue] after_failed_run` held the queue: do not auto-continue.
+    queue_held: bool,
+    pub bg: Option<mpsc::UnboundedReceiver<BackgroundEvent>>,
+    /// The task board (kept while the agent is away running a turn).
+    pub sup: Option<Arc<Supervisor>>,
+    pub btw_rx: Option<mpsc::UnboundedReceiver<Result<String, String>>>,
+    /// `/memory edit`: the event loop suspends the TUI and opens an editor.
+    pub pending_editor: Option<std::path::PathBuf>,
+    /// OSC 52 copy request for the event loop to write.
+    pub pending_osc52: Option<String>,
+    /// The user's theme (daily mode may swap in Dawn on top of it).
+    base_theme: Theme,
+    /// History at the start of the running task (for /btw while busy).
+    busy_snapshot: Option<(crate::llm::LlmClient, Vec<crate::models::Message>)>,
+    viewer: crate::trace_viewer::Viewer,
+    /// Herdr / OSC 7501 lifecycle reports.
+    reporters: std::sync::Arc<Reporters>,
+    outcome: TurnOutcome,
+    reported_session: String,
 }
 
 impl App {
@@ -183,7 +318,31 @@ impl App {
             .or_else(|| std::env::var("LIMBO_MOTION").ok());
         let entries = entries_from_history(&agent.messages);
         let skills = discover_skills(&agent.workdir, agent.daily_mode());
+        let sup = agent.supervisor.clone();
+        let viewer = crate::trace_viewer::Viewer::new(
+            agent.session_dir.clone(),
+            Some(agent.workdir.clone()),
+        );
         let mut app = Self {
+            base_theme: theme,
+            busy_snapshot: None,
+            paste: PasteStore::default(),
+            proposing: false,
+            editing_verify: false,
+            queue_held: false,
+            bg: crate::background::take_receiver(),
+            sup,
+            btw_rx: None,
+            pending_editor: None,
+            pending_osc52: None,
+            viewer,
+            reporters: {
+                let r = std::sync::Arc::new(Reporters::from_env(true));
+                crate::integrations::install_exit_hooks(r.clone());
+                r
+            },
+            outcome: TurnOutcome::default(),
+            reported_session: String::new(),
             theme,
             fx: Fx::new(motion.as_deref()),
             config,
@@ -214,6 +373,20 @@ impl App {
             dirty: true,
         };
         app.refresh_info();
+        app.apply_look();
+        if let Some(sup) = &app.sup
+            && !sup.interrupted_on_load.is_empty()
+            && app.config.subagents.on_resume != "auto"
+        {
+            let ids = sup.interrupted_on_load.join("、");
+            app.notice(
+                NoticeKind::Warn,
+                format!(
+                    "{} 个子任务在上次退出时中断（{ids}），已暂停；/task resume all 继续",
+                    sup.interrupted_on_load.len()
+                ),
+            );
+        }
         if !app.steer.is_empty() {
             app.notice(
                 NoticeKind::Info,
@@ -231,10 +404,36 @@ impl App {
     }
 
     pub fn queued(&self) -> Vec<String> {
-        self.steer.texts()
+        self.steer
+            .items()
+            .into_iter()
+            .filter(|i| i.source == "user")
+            .map(|i| {
+                if i.mode == FOLLOW_UP {
+                    format!("⏭ {}", i.text)
+                } else {
+                    i.text
+                }
+            })
+            .collect()
+    }
+
+    /// `2 运行中 · 1 待确认` for the status bar.
+    pub fn tasks_label(&self) -> String {
+        self.sup
+            .as_ref()
+            .map(|s| s.counts_label())
+            .unwrap_or_default()
     }
 
     fn refresh_info(&mut self) {
+        if let Some(a) = &self.agent
+            && a.session_id() != self.reported_session
+        {
+            self.reported_session = a.session_id().to_string();
+            self.reporters
+                .report_session(&self.reported_session, a.session_path());
+        }
         if let Some(a) = &self.agent {
             self.info = Info {
                 model: a.client.model_id().to_string(),
@@ -244,9 +443,31 @@ impl App {
                 context_window: a.context_window(),
                 session_total: a.session_total_tokens(),
                 plan_mode: a.plan_mode(),
+                daily_mode: a.daily_mode(),
+                code_mode: a.code_mode(),
+                goal: pump::live_goal(a).map(|g| {
+                    if g.verify_command.is_empty() {
+                        "🎯 goal".to_string()
+                    } else {
+                        format!("🎯 {}/{}", g.rounds_completed, g.max_rounds)
+                    }
+                }),
                 thinking: a.client.thinking_effort.clone(),
                 workdir: a.workdir.display().to_string(),
             };
+        }
+    }
+
+    /// Daily mode's look: Dawn swaps the palette, "badge" only shows a pill.
+    fn apply_look(&mut self) {
+        let dawn = self.info.daily_mode && self.config.daily.look != "badge";
+        let next = if dawn { theme::DAWN } else { self.base_theme };
+        if next.name != self.theme.name {
+            self.theme = next;
+            for e in &mut self.entries {
+                e.touch();
+            }
+            self.fx.theme_changed(&self.theme);
         }
     }
 
@@ -278,6 +499,11 @@ impl App {
         let cancel = self.cancel.clone();
         let tx = self.tx.clone();
         self.busy_since = Some(Instant::now());
+        self.sup = agent.supervisor.clone();
+        self.busy_snapshot = Some((agent.client.clone(), agent.messages.clone()));
+        self.note_session_of(&agent);
+        self.outcome = TurnOutcome::default();
+        self.reporters.report(State::Working, None);
         self.activity = if matches!(job, Job::Compact) {
             Activity::Compacting
         } else {
@@ -287,7 +513,7 @@ impl App {
         // The agent moves into the task and comes back when it finishes.
         self.job = Some(tokio::spawn(async move {
             match job {
-                Job::Turn(text) => agent.run(text, vec![], &tx, &cancel).await,
+                Job::Turn(text, atts) => pump::run_task(&mut agent, text, atts, &tx, &cancel).await,
                 Job::Compact => {
                     agent.compact("manual", &tx, &cancel).await;
                     agent.checkpoint();
@@ -329,11 +555,175 @@ impl App {
         }
         self.refresh_info();
         self.fx.turn_done(&self.theme);
-        // Something was queued after the turn's last drain: keep going.
-        if !self.steer.is_empty() {
-            self.start_job(Job::Turn(String::new()));
+        let o = std::mem::take(&mut self.outcome);
+        self.reporters.report(o.state, o.message.as_deref());
+        if std::mem::take(&mut self.proposing) {
+            self.confirm_proposal();
+        }
+        // Something was queued after the task's last drain: keep going.
+        if !self.queue_held
+            && self.popup.is_none()
+            && self.steer.items().iter().any(|i| i.source == "user")
+        {
+            self.start_job(Job::Turn(String::new(), vec![]));
+        } else {
+            self.maybe_wake_main();
         }
         self.dirty = true;
+    }
+
+    /// After a proposal round: show the verify picker (or say why not).
+    fn confirm_proposal(&mut self) {
+        let Some(agent) = &self.agent else { return };
+        if pump::live_goal(agent).is_none() {
+            return;
+        }
+        match pump::take_proposal(agent) {
+            Some(list) if list.is_empty() => self.notice(NoticeKind::Info, cmds::NO_VERIFY_GATE),
+            found => {
+                let mut items = found.unwrap_or_default();
+                if items.is_empty() {
+                    self.notice(
+                        NoticeKind::Warn,
+                        "未能解析模型的验收提议，可以自己输入验收命令",
+                    );
+                }
+                items.push(VERIFY_EDIT.into());
+                items.push(VERIFY_SKIP.into());
+                self.popup = Some(Popup::VerifyPicker { items, selected: 0 });
+                self.fx.popup_opened();
+                self.reporters
+                    .report(State::Blocked, Some("等待确认 /goal 验收命令"));
+            }
+        }
+    }
+
+    fn on_auth_checked(
+        &mut self,
+        provider: &str,
+        model: &str,
+        key: &str,
+        detail: String,
+        error: bool,
+    ) {
+        if let Some(Popup::Auth {
+            status, checking, ..
+        }) = &mut self.popup
+        {
+            if error {
+                // A definite rejection keeps the dialog open.
+                *checking = false;
+                *status = Some(format!("✗ {detail}"));
+                return;
+            }
+        } else {
+            return; // dialog closed meanwhile
+        }
+        self.popup = None;
+        if let Err(e) = crate::auth::save(provider, key, None) {
+            self.notice(NoticeKind::Error, format!("保存 key 失败：{e}"));
+            return;
+        }
+        self.notice(
+            NoticeKind::Info,
+            format!(
+                "已保存 {} 的 key {}（{detail}）",
+                catalog::provider_display_name(provider),
+                crate::auth::mask(key)
+            ),
+        );
+        self.set_model(model);
+    }
+
+    /// Report the session identity when it changed since the last report.
+    fn note_session_of(&mut self, agent: &Agent) {
+        if agent.session_id() != self.reported_session {
+            self.reported_session = agent.session_id().to_string();
+            self.reporters
+                .report_session(&self.reported_session, agent.session_path());
+        }
+    }
+
+    fn skip_verify(&mut self) {
+        self.notice(NoticeKind::Info, cmds::VERIFY_SKIPPED);
+        self.reporters.report(State::Idle, None);
+    }
+
+    fn accept_verify(&mut self, command: &str) {
+        let Some(agent) = self.agent.as_mut() else {
+            return;
+        };
+        if let Some(prompt) = pump::set_verify(agent, command) {
+            self.notice(NoticeKind::Info, format!("验收方式已确认：{command}"));
+            self.refresh_info();
+            self.start_job(Job::Turn(prompt, vec![]));
+        }
+    }
+
+    /// Start a main-agent turn for subagent notices queued while idle.
+    fn maybe_wake_main(&mut self) {
+        if self.busy() || self.popup.is_some() || self.editing_verify {
+            return;
+        }
+        let Some(text) = self.sup.as_ref().and_then(|s| s.take_wake_input()) else {
+            return;
+        };
+        self.notice(NoticeKind::Info, "◆ 子代理有新进展，交给主 agent 处理");
+        self.start_job(Job::Turn(text, vec![]));
+    }
+
+    pub fn on_background(&mut self, ev: BackgroundEvent) {
+        self.dirty = true;
+        if let BackgroundEvent::AuthChecked {
+            provider,
+            model,
+            key,
+            detail,
+            error,
+        } = ev
+        {
+            return self.on_auth_checked(&provider, &model, &key, detail, error);
+        }
+        match ev {
+            BackgroundEvent::Notice { kind, text } if !text.is_empty() => {
+                let (k, icon) = match kind.as_str() {
+                    "result" => (NoticeKind::Info, "✓"),
+                    "alert" => (NoticeKind::Warn, "⚠"),
+                    "question" => (NoticeKind::Warn, "?"),
+                    _ => (NoticeKind::Info, "◆"),
+                };
+                self.notice(k, format!("{icon} {text}"));
+            }
+            BackgroundEvent::PlanProposed(ids) => {
+                self.notice(
+                    NoticeKind::Info,
+                    format!("◆ 子任务计划待确认（{}）：/task 查看 · /task approve all 开始 · /task reject all 放弃", ids.join(", ")),
+                );
+            }
+            BackgroundEvent::MainWake => self.maybe_wake_main(),
+            BackgroundEvent::AuthChecked { .. } => {}
+            _ => {}
+        }
+    }
+
+    pub fn on_btw(&mut self, item: Option<Result<String, String>>) {
+        self.dirty = true;
+        let Some(Popup::Btw { answer, done, .. }) = &mut self.popup else {
+            self.btw_rx = None;
+            return;
+        };
+        match item {
+            Some(Ok(t)) => answer.push_str(&t),
+            Some(Err(e)) => {
+                answer.push_str(&format!("\n\n✗ {e}"));
+                *done = true;
+                self.btw_rx = None;
+            }
+            None => {
+                *done = true;
+                self.btw_rx = None;
+            }
+        }
     }
 
     // -- agent events ----------------------------------------------------------
@@ -362,6 +752,7 @@ impl App {
 
     pub fn on_agent_event(&mut self, ev: AgentEvent) {
         self.dirty = true;
+        self.outcome.observe(&ev);
         match ev {
             AgentEvent::TurnStart => self.activity = Activity::Thinking,
             AgentEvent::Text(t) => {
@@ -515,6 +906,7 @@ impl App {
                 self.close_live();
                 self.entries.push(Entry::new(EntryKind::User { text: t }));
             }
+            AgentEvent::Info(t) => self.notice(NoticeKind::Info, t),
             AgentEvent::Warning(t) => self.notice(NoticeKind::Warn, t),
             AgentEvent::Error(t) => {
                 self.notice(NoticeKind::Error, t);
@@ -522,6 +914,39 @@ impl App {
             }
             AgentEvent::Interrupted => self.notice(NoticeKind::Warn, "已打断"),
             AgentEvent::TurnEnd => self.close_live(),
+            ref goal_ev => {
+                let kind = match goal_ev {
+                    AgentEvent::GoalVerifyResult { exit_code, .. } if *exit_code != Some(0) => {
+                        NoticeKind::Warn
+                    }
+                    AgentEvent::GoalExhausted { .. } | AgentEvent::QueueHeld { .. } => {
+                        NoticeKind::Warn
+                    }
+                    _ => NoticeKind::Info,
+                };
+                if let AgentEvent::QueueHeld { .. } = goal_ev {
+                    self.queue_held = true;
+                }
+                if let AgentEvent::GoalVerifyStarted { .. } = goal_ev {
+                    self.activity = Activity::Tool("verify".into());
+                }
+                // Mirror the goal badge while the agent is away.
+                match goal_ev {
+                    AgentEvent::GoalVerifyResult {
+                        round, max_rounds, ..
+                    } => {
+                        self.info.goal = Some(format!("🎯 {round}/{max_rounds}"));
+                    }
+                    AgentEvent::GoalPassed { .. } => self.info.goal = Some("🎯 ✓".into()),
+                    _ => {}
+                }
+                if let Some(line) = cmds::goal_event_line(goal_ev) {
+                    self.notice(kind, line);
+                }
+                if let AgentEvent::GoalPassed { .. } = goal_ev {
+                    self.fx.turn_done(&self.theme);
+                }
+            }
         }
     }
 
@@ -559,8 +984,67 @@ impl App {
     }
 
     pub fn on_paste(&mut self, text: String) {
-        self.input.insert_str(&text);
         self.dirty = true;
+        if let Some(Popup::Models { filter, .. }) = &mut self.popup {
+            filter.push_str(text.trim());
+            return;
+        }
+        if self.popup.is_some() {
+            return;
+        }
+        let text = paste::clean(&text);
+        // Dragged-in files arrive as a paste of their paths.
+        if let Some(paths) = paste::dropped_paths(&text) {
+            for p in paths {
+                let marker = self.paste.add_file(&p);
+                self.input.insert_str(&format!("{marker} "));
+            }
+            return;
+        }
+        let shown = self.paste.collapse(&text);
+        self.input.insert_str(&shown);
+    }
+
+    /// Ctrl+V: images and files from the OS clipboard become attachments.
+    fn paste_clipboard(&mut self) {
+        match clipboard::read() {
+            clipboard::Clip::Image { data, ext } => match clipboard::save_image(&data, &ext) {
+                Ok(path) => {
+                    let marker = self.paste.add_image(&path, &ext);
+                    self.input.insert_str(&format!("{marker} "));
+                    if !self.agent.as_ref().is_none_or(|a| a.client.spec.vision) {
+                        self.toast("当前模型不支持图片，发送时会附上文件路径");
+                    }
+                }
+                Err(e) => self.toast(format!("保存剪贴板图片失败：{e}")),
+            },
+            clipboard::Clip::Files(paths) => {
+                for p in paths {
+                    let marker = self.paste.add_file(&p);
+                    self.input.insert_str(&format!("{marker} "));
+                }
+            }
+            clipboard::Clip::Text(t) => self.on_paste(t),
+            clipboard::Clip::Empty => self.toast("剪贴板是空的（或没有 wl-paste/xclip/pbpaste）"),
+        }
+    }
+
+    /// Copy the last assistant reply (native tool, else OSC 52).
+    fn copy_last_reply(&mut self) {
+        let text = self.entries.iter().rev().find_map(|e| match &e.kind {
+            EntryKind::Assistant { text, .. } if !text.trim().is_empty() => Some(text.clone()),
+            _ => None,
+        });
+        let Some(text) = text else {
+            self.toast("还没有可复制的回复");
+            return;
+        };
+        if clipboard::write_text(&text) {
+            self.toast("已复制最后一条回复");
+        } else {
+            self.pending_osc52 = Some(clipboard::osc52(&text));
+            self.toast("已通过终端（OSC 52）复制");
+        }
     }
 
     pub fn on_mouse(&mut self, m: MouseEvent) {
@@ -608,6 +1092,11 @@ impl App {
                 }
             }
             KeyCode::Char('d') if ctrl && self.input.is_empty() => self.quit = true,
+            KeyCode::Esc if self.editing_verify => {
+                self.editing_verify = false;
+                self.input.take();
+                self.skip_verify();
+            }
             KeyCode::Esc => {
                 if self.busy() {
                     self.cancel.cancel();
@@ -644,8 +1133,16 @@ impl App {
             KeyCode::Down if ctrl || alt => self.scroll_by(-1),
             KeyCode::Home if ctrl => self.scroll = self.max_scroll,
             KeyCode::End if ctrl => self.scroll = 0,
-            KeyCode::Enter if shift || alt => self.input.insert('\n'),
+            KeyCode::Enter if shift => self.input.insert('\n'),
+            KeyCode::Enter if alt => {
+                // Alt+Enter: a follow-up that waits for the whole task.
+                let text = self.input.take();
+                self.submit_follow_up(text);
+            }
             KeyCode::Char('j') if ctrl => self.input.insert('\n'),
+            KeyCode::Char('v') if ctrl => self.paste_clipboard(),
+            KeyCode::Char('y') if ctrl => self.copy_last_reply(),
+            KeyCode::Char('g') if ctrl => self.open_agents(),
             KeyCode::Enter => {
                 let matches = self.command_matches();
                 if !matches.is_empty() {
@@ -709,7 +1206,23 @@ impl App {
             KeyCode::Char('u') if ctrl => self.input.kill_line(),
             KeyCode::Char('w') if ctrl => self.input.delete_word(),
             KeyCode::Backspace if alt || ctrl => self.input.delete_word(),
-            KeyCode::Backspace => self.input.backspace(),
+            KeyCode::Backspace => {
+                // A collapsed paste marker goes away in one keystroke.
+                let byte = self
+                    .input
+                    .text
+                    .char_indices()
+                    .nth(self.input.cursor)
+                    .map_or(self.input.text.len(), |(b, _)| b);
+                let text = self.input.text.clone();
+                if let Some((start, end)) = self.paste.marker_ending_at(&text, byte) {
+                    let removed = text[start..end].chars().count();
+                    self.input.text.replace_range(start..end, "");
+                    self.input.cursor -= removed;
+                } else {
+                    self.input.backspace();
+                }
+            }
             KeyCode::Delete => self.input.delete(),
             KeyCode::Char(c) if !ctrl => {
                 self.input.insert(c);
@@ -723,6 +1236,94 @@ impl App {
         let Some(popup) = &mut self.popup else { return };
         match popup {
             Popup::Help => self.popup = None,
+            Popup::VerifyPicker { items, selected } => match key.code {
+                KeyCode::Up => *selected = selected.saturating_sub(1),
+                KeyCode::Down => *selected = (*selected + 1).min(items.len().saturating_sub(1)),
+                KeyCode::Esc => {
+                    self.popup = None;
+                    self.skip_verify();
+                }
+                KeyCode::Enter => {
+                    let choice = items[*selected].clone();
+                    let first = items.first().filter(|c| *c != VERIFY_EDIT).cloned();
+                    self.popup = None;
+                    if choice == VERIFY_SKIP {
+                        self.skip_verify();
+                    } else if choice == VERIFY_EDIT {
+                        self.editing_verify = true;
+                        self.input.set(first.unwrap_or_default());
+                        self.toast("编辑验收命令后回车确认（esc 取消）");
+                    } else {
+                        self.accept_verify(&choice);
+                    }
+                }
+                _ => {}
+            },
+            Popup::Btw { scroll, .. } | Popup::Text { scroll, .. } => match key.code {
+                KeyCode::Up | KeyCode::Char('k') => *scroll = scroll.saturating_sub(1),
+                KeyCode::Down | KeyCode::Char('j') => *scroll += 1,
+                KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
+                KeyCode::PageDown | KeyCode::Char(' ') => *scroll += 10,
+                _ => {
+                    // Closing /btw discards the answer (and its stream).
+                    self.btw_rx = None;
+                    self.popup = None;
+                }
+            },
+            Popup::Game(game) => match key.code {
+                KeyCode::Up | KeyCode::Char('w') => {
+                    game.slide(Dir::Up);
+                }
+                KeyCode::Down | KeyCode::Char('s') => {
+                    game.slide(Dir::Down);
+                }
+                KeyCode::Left | KeyCode::Char('a') => {
+                    game.slide(Dir::Left);
+                }
+                KeyCode::Right | KeyCode::Char('d') => {
+                    game.slide(Dir::Right);
+                }
+                KeyCode::Char('r') => **game = Game::seeded(),
+                KeyCode::Esc | KeyCode::Char('q') => self.popup = None,
+                _ => {}
+            },
+            Popup::Agents { selected, scroll } => {
+                let tasks = self.sup.as_ref().map(|s| s.tasks()).unwrap_or_default();
+                match key.code {
+                    KeyCode::Up => {
+                        *selected = selected.saturating_sub(1);
+                        *scroll = 0;
+                    }
+                    KeyCode::Down => {
+                        *selected = (*selected + 1).min(tasks.len().saturating_sub(1));
+                        *scroll = 0;
+                    }
+                    KeyCode::PageUp => *scroll = scroll.saturating_sub(10),
+                    KeyCode::PageDown => *scroll += 10,
+                    KeyCode::Char(c @ ('a' | 'x' | 'p' | 'r' | 'y' | 'n')) => {
+                        if let (Some(sup), Some(t)) = (&self.sup, tasks.get(*selected)) {
+                            let action = match c {
+                                'a' | 'y' => "approve",
+                                'n' => "reject",
+                                'x' => "cancel",
+                                'p' if t.status == "paused" => "resume",
+                                'p' => "pause",
+                                _ => "retry",
+                            };
+                            let msg =
+                                sup.control(&t.id, action, "", None, false, None, None, "user");
+                            self.toast(msg);
+                        }
+                    }
+                    KeyCode::Char('@') => {
+                        if let Some(t) = tasks.get(*selected) {
+                            self.input.set(format!("@{} ", t.id));
+                            self.popup = None;
+                        }
+                    }
+                    _ => self.popup = None,
+                }
+            }
             Popup::Sessions {
                 items,
                 selected,
@@ -739,6 +1340,53 @@ impl App {
                     if let Some(path) = items.get(*selected).and_then(|m| m.path.clone()) {
                         self.popup = None;
                         self.switch_session(&path);
+                    }
+                }
+                _ => {}
+            },
+            Popup::Auth {
+                provider,
+                model,
+                input,
+                status,
+                checking,
+            } => match key.code {
+                KeyCode::Esc => self.popup = None,
+                _ if *checking => {}
+                KeyCode::Backspace => {
+                    input.pop();
+                }
+                KeyCode::Char(c) => input.push(c),
+                KeyCode::Enter => {
+                    let key = input.trim().to_string();
+                    if key.is_empty() {
+                        *status = Some("先粘贴一个 key".into());
+                    } else {
+                        *checking = true;
+                        *status = Some("验证中…".into());
+                        let (provider, model) = (provider.clone(), model.clone());
+                        tokio::spawn(async move {
+                            let Some(p) = crate::cli_auth::providers()
+                                .into_iter()
+                                .find(|p| p.id == provider)
+                            else {
+                                return;
+                            };
+                            let (detail, error) = match crate::cli_auth::check_key(&p, &key, None)
+                                .await
+                            {
+                                crate::cli_auth::KeyCheck::Valid => ("key 有效".to_string(), false),
+                                crate::cli_auth::KeyCheck::Unverified(d) => (d, false),
+                                crate::cli_auth::KeyCheck::Invalid(d) => (d, true),
+                            };
+                            crate::background::emit(BackgroundEvent::AuthChecked {
+                                provider,
+                                model,
+                                key,
+                                detail,
+                                error,
+                            });
+                        });
                     }
                 }
                 _ => {}
@@ -770,7 +1418,21 @@ impl App {
                     let model = choice.unwrap_or_else(|| filter.clone());
                     self.popup = None;
                     if !model.is_empty() {
-                        self.set_model(&model);
+                        let spec = catalog::resolve_model(&model);
+                        if catalog::resolve_api_key(&spec, &self.config).is_none() {
+                            // No key yet: log in first, then switch.
+                            self.popup = Some(Popup::Auth {
+                                provider: spec.provider.id.to_string(),
+                                model,
+                                input: String::new(),
+                                status: catalog::resolve_api_key_env(&spec, &self.config)
+                                    .map(|e| format!("也可以设置环境变量 ${e}")),
+                                checking: false,
+                            });
+                            self.fx.popup_opened();
+                        } else {
+                            self.set_model(&model);
+                        }
                     }
                 }
                 _ => {}
@@ -781,19 +1443,33 @@ impl App {
     // -- commands ----------------------------------------------------------------
 
     fn submit(&mut self, text: String) {
-        let trimmed = text.trim();
+        let trimmed = text.trim().to_string();
+        if self.editing_verify {
+            self.editing_verify = false;
+            self.paste.clear();
+            if trimmed.is_empty() {
+                self.skip_verify();
+            } else {
+                self.accept_verify(&trimmed);
+            }
+            return;
+        }
         if trimmed.is_empty() {
             return;
         }
         self.cmd_selected = 0;
+        self.queue_held = false;
         if let Some(rest) = trimmed.strip_prefix('/')
             && !rest.starts_with('/')
             && !rest.starts_with(' ')
+            && !text.starts_with(' ')
         {
             let (cmd, arg) = rest
                 .split_once(char::is_whitespace)
                 .map_or((rest, ""), |(c, a)| (c, a.trim()));
-            if self.run_command(cmd, arg) {
+            let (cmd, arg) = (cmd.to_string(), arg.to_string());
+            if self.run_command(&cmd, &arg) {
+                self.paste.clear();
                 return;
             }
             if let Some(skill) = self.skills.iter().find(|s| s.name == cmd).cloned() {
@@ -804,28 +1480,102 @@ impl App {
                     skill.path.display()
                 );
                 if !arg.is_empty() {
-                    prompt.push_str(&format!("\n\n## 用户输入\n\n{arg}"));
+                    let (expanded, _) = self.paste.expand(&arg);
+                    prompt.push_str(&format!("\n\n## 用户输入\n\n{expanded}"));
                 }
-                return self.send_prompt(trimmed.to_string(), prompt);
+                let atts = self.paste.live_attachments(&arg);
+                self.paste.clear();
+                return self.send_prompt(trimmed, prompt, atts, STEER);
             }
             // Not a command: a path like /etc/hosts is sent as text.
-            if !std::path::Path::new(cmd).exists() && !cmd.contains('/') {
+            if !paste::looks_like_path(&trimmed) {
                 self.toast(format!("未知命令 /{cmd}，输入 /help 查看命令"));
                 return;
             }
         }
-        self.send_prompt(text.clone(), text);
+        // @name talks to one subagent directly.
+        if let Some(sup) = &self.sup
+            && let Some(reply) = crate::subagents::direct_message(sup, &trimmed)
+        {
+            self.paste.clear();
+            self.notice(NoticeKind::Info, format!("➤ {reply}"));
+            return;
+        }
+        let (prompt, atts) = self.take_message(&text);
+        self.send_prompt(text, prompt, atts, STEER);
     }
 
-    fn send_prompt(&mut self, display: String, prompt: String) {
+    /// Expand collapsed pastes and collect the message's attachments.
+    fn take_message(&mut self, text: &str) -> (String, Vec<Attachment>) {
+        let (expanded, invalid) = self.paste.expand(text);
+        if !invalid.is_empty() {
+            self.toast("有粘贴内容已失效，按原样发送了占位符");
+        }
+        let mut atts = self.paste.live_attachments(text);
+        for a in paste::attachments_from_text(&expanded) {
+            if !atts.iter().any(|x| x.path == a.path) {
+                atts.push(a);
+            }
+        }
+        self.paste.clear();
+        (expanded, atts)
+    }
+
+    /// Alt+Enter / `/queue`: wait for the whole task, not just the next step.
+    fn submit_follow_up(&mut self, text: String) {
+        if text.trim().is_empty() {
+            return;
+        }
+        if !self.busy() {
+            return self.submit(text);
+        }
+        let (prompt, atts) = self.take_message(&text);
+        self.steer
+            .push_item(prompt, atts, FOLLOW_UP, "user", vec![]);
+        self.toast("已排队，当前任务全部完成后发送（↑ 撤回）");
+    }
+
+    fn send_prompt(&mut self, display: String, prompt: String, atts: Vec<Attachment>, mode: &str) {
         if self.busy() {
-            self.steer.push(prompt);
+            self.steer.push_item(prompt, atts, mode, "user", vec![]);
             self.toast("已排队，将在当前步骤后发送（↑ 撤回）");
             return;
         }
+        let shown = if atts.is_empty() {
+            display
+        } else {
+            format!(
+                "{display}\n📎 {}",
+                atts.iter()
+                    .map(|a| a.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" · ")
+            )
+        };
         self.entries
-            .push(Entry::new(EntryKind::User { text: display }));
-        self.start_job(Job::Turn(prompt));
+            .push(Entry::new(EntryKind::User { text: shown }));
+        self.start_job(Job::Turn(prompt, atts));
+    }
+
+    pub fn open_agents(&mut self) {
+        if self.sup.is_none() {
+            self.toast("子代理已关闭（[subagents] enabled = false）");
+            return;
+        }
+        self.popup = Some(Popup::Agents {
+            selected: 0,
+            scroll: 0,
+        });
+        self.fx.popup_opened();
+    }
+
+    fn text_popup(&mut self, title: &str, body: String) {
+        self.popup = Some(Popup::Text {
+            title: title.into(),
+            body,
+            scroll: 0,
+        });
+        self.fx.popup_opened();
     }
 
     /// Returns true when `cmd` was a built-in command.
@@ -841,6 +1591,11 @@ impl App {
                 | "plan"
                 | "export"
                 | "sessions"
+                | "goal"
+                | "code-mode"
+                | "daily-mode"
+                | "memory"
+                | "learn"
         );
         if needs_agent && self.busy() {
             if COMMANDS.iter().any(|c| c.name == cmd) {
@@ -885,6 +1640,7 @@ impl App {
             "new" => {
                 if let Some(a) = &mut self.agent {
                     a.new_session();
+                    self.sup = a.supervisor.clone();
                 }
                 self.entries.clear();
                 self.refresh_info();
@@ -973,15 +1729,180 @@ impl App {
                     prompt = a.handoff_prompt(arg);
                     let meta = a.handoff_meta();
                     a.reset_to(meta);
+                    self.sup = a.supervisor.clone();
                 }
                 self.entries.clear();
                 self.refresh_info();
                 self.notice(NoticeKind::Info, "已交接到新会话");
-                self.send_prompt(format!("/handoff {arg}"), prompt);
+                self.send_prompt(format!("/handoff {arg}"), prompt, vec![], STEER);
+            }
+            "queue" => {
+                if arg.is_empty() {
+                    self.toast("用法：/queue <文本>");
+                } else {
+                    self.submit_follow_up(arg.to_string());
+                }
+            }
+            "goal" => self.cmd_goal(arg),
+            "code-mode" => {
+                let Some(a) = self.agent.as_mut() else {
+                    return true;
+                };
+                match parse_toggle(arg, a.code_mode()) {
+                    None => self.toast(cmds::CODE_MODE_USAGE),
+                    Some(on) if a.set_code_mode(on) => {
+                        self.notice(NoticeKind::Info, cmds::code_mode_notice(on))
+                    }
+                    Some(on) => self.toast(cmds::unchanged_notice("Code mode ", on)),
+                }
+                self.refresh_info();
+            }
+            "daily-mode" => {
+                let Some(a) = self.agent.as_mut() else {
+                    return true;
+                };
+                match parse_toggle(arg, a.daily_mode()) {
+                    None => self.toast(cmds::DAILY_USAGE),
+                    Some(on) if a.set_daily_mode(on) => {
+                        self.skills = discover_skills(&a.workdir, on);
+                        self.notice(
+                            NoticeKind::Info,
+                            if on {
+                                cmds::DAILY_DIVIDER_ON
+                            } else {
+                                cmds::DAILY_DIVIDER_OFF
+                            },
+                        );
+                        self.notice(NoticeKind::Info, cmds::daily_toggle_notice(on));
+                    }
+                    Some(on) => self.toast(cmds::unchanged_notice("Daily mode ", on)),
+                }
+                self.refresh_info();
+                self.apply_look();
+            }
+            "memory" | "learn" if !self.agent.as_ref().is_some_and(|a| a.daily_mode()) => {
+                self.toast(cmds::daily_only_notice(&format!("/{cmd}")));
+            }
+            "memory" => {
+                let Some(a) = self.agent.as_ref() else {
+                    return true;
+                };
+                match crate::memory::parse_memory_command(arg) {
+                    Err(()) => self.toast(crate::memory::MEMORY_USAGE),
+                    Ok(target) => {
+                        let store = a.memory_store();
+                        match (target, &store) {
+                            (Some(t), Some(st)) => {
+                                let path = st.path(&t);
+                                if let Some(parent) = path.parent() {
+                                    let _ = std::fs::create_dir_all(parent);
+                                }
+                                self.pending_editor = Some(path);
+                            }
+                            _ => {
+                                let body =
+                                    crate::memory::describe(store.as_ref(), a.memory.as_ref());
+                                self.text_popup("长期记忆", body);
+                            }
+                        }
+                    }
+                }
+            }
+            "learn" => {
+                if let Some(a) = self.agent.as_mut() {
+                    let msg = crate::learn::start_review(a, false);
+                    self.notice(NoticeKind::Info, msg);
+                }
+            }
+            "btw" => {
+                if arg.is_empty() {
+                    self.toast("用法：/btw <问题>");
+                    return true;
+                }
+                let Some((client, history)) = self.snapshot() else {
+                    return true;
+                };
+                self.btw_rx = Some(cmds::btw_query(&client, &history, arg));
+                self.popup = Some(Popup::Btw {
+                    question: arg.to_string(),
+                    answer: String::new(),
+                    done: false,
+                    scroll: 0,
+                });
+                self.fx.popup_opened();
+            }
+            "agents" => match &self.sup {
+                None => self.toast("子代理已关闭（[subagents] enabled = false）"),
+                Some(_) if arg.is_empty() => self.open_agents(),
+                Some(sup) => {
+                    let body = crate::subagents::agents_command(sup, arg);
+                    self.text_popup("子代理", body);
+                }
+            },
+            "task" => match &self.sup {
+                None => self.toast("子代理已关闭（[subagents] enabled = false）"),
+                Some(sup) => {
+                    let body = crate::subagents::task_command(sup, arg);
+                    if body.lines().count() <= 2 {
+                        self.notice(NoticeKind::Info, body);
+                    } else {
+                        self.text_popup("任务板", body);
+                    }
+                }
+            },
+            "tracing-viewer" => {
+                let id = self.info.session_id.clone();
+                let msg = self.viewer.command(arg, Some(&id));
+                self.notice(NoticeKind::Info, msg);
+            }
+            "copy" => self.copy_last_reply(),
+            "2048" => {
+                self.popup = Some(Popup::Game(Box::new(Game::seeded())));
+                self.fx.popup_opened();
             }
             _ => return false,
         }
         true
+    }
+
+    /// The model client and history a /btw side question runs over.
+    fn snapshot(&self) -> Option<(crate::llm::LlmClient, Vec<crate::models::Message>)> {
+        if let Some(a) = &self.agent {
+            return Some((a.client.clone(), a.messages.clone()));
+        }
+        self.busy_snapshot.clone()
+    }
+
+    fn cmd_goal(&mut self, arg: &str) {
+        let Some(agent) = self.agent.as_mut() else {
+            return;
+        };
+        match parse_goal_args(arg) {
+            GoalCommand::Query => match pump::live_goal(agent) {
+                None => self.toast("当前没有 goal（/goal <目标> 开始）"),
+                Some(g) => {
+                    let body = cmds::goal_status_text(g);
+                    self.text_popup("Goal", body);
+                }
+            },
+            GoalCommand::Clear => {
+                if pump::clear_goal(agent) {
+                    self.notice(NoticeKind::Info, "已退出 goal 模式");
+                } else {
+                    self.toast("当前没有 goal");
+                }
+                self.refresh_info();
+            }
+            GoalCommand::Set(text) => {
+                let prompt = pump::set_goal(agent, &text);
+                self.proposing = true;
+                self.entries.push(Entry::new(EntryKind::User {
+                    text: format!("/goal {text}"),
+                }));
+                self.refresh_info();
+                self.start_job(Job::Turn(prompt, vec![]));
+            }
+        }
     }
 
     fn switch_session(&mut self, path: &std::path::Path) {
@@ -991,7 +1912,11 @@ impl App {
         cfg.llm.model = old.client.model_id().to_string();
         match Agent::resume(cfg, path, &dir) {
             Ok(agent) => {
+                if let Some(old) = self.agent.as_ref().and_then(|a| a.supervisor.clone()) {
+                    old.stop();
+                }
                 self.steer = agent.steer.clone();
+                self.sup = agent.supervisor.clone();
                 self.entries = entries_from_history(&agent.messages);
                 self.agent = Some(agent);
                 self.scroll = 0;
@@ -1017,20 +1942,33 @@ impl App {
     }
 
     fn open_models(&mut self) {
-        let items: Vec<(String, String)> = catalog::catalog()
-            .values()
-            .map(|s| {
-                let key = if catalog::resolve_api_key(s, &self.config).is_some() {
-                    "●"
-                } else {
-                    "○"
-                };
-                (
-                    s.id.clone(),
-                    format!("{key} {}", catalog::provider_display_name(s.provider.id)),
-                )
-            })
+        let recent = crate::recent_models::load();
+        let label = |s: &catalog::ModelSpec, tag: &str| {
+            let key = if catalog::resolve_api_key(s, &self.config).is_some() {
+                "●"
+            } else {
+                "○"
+            };
+            (
+                s.id.clone(),
+                format!(
+                    "{key} {}{tag}",
+                    catalog::provider_display_name(s.provider.id)
+                ),
+            )
+        };
+        // Recently used models first, then the rest of the catalog.
+        let mut items: Vec<(String, String)> = recent
+            .iter()
+            .filter_map(|id| catalog::catalog().get(id))
+            .map(|s| label(s, " · 最近"))
             .collect();
+        items.extend(
+            catalog::catalog()
+                .values()
+                .filter(|s| !recent.contains(&s.id))
+                .map(|s| label(s, "")),
+        );
         let selected = items
             .iter()
             .position(|(id, _)| *id == self.info.model)
@@ -1045,8 +1983,11 @@ impl App {
 
     fn set_model(&mut self, model: &str) {
         let Some(a) = &mut self.agent else { return };
+        let previous = a.client.spec.id.clone();
         match a.set_model(model) {
             Ok(()) => {
+                crate::recent_models::push(&previous);
+                crate::recent_models::push(model);
                 let saved = config::save_model_to_config(model, None).is_ok();
                 self.config.llm.model = model.to_string();
                 self.refresh_info();
@@ -1074,6 +2015,8 @@ impl App {
         let i = choices.iter().position(|c| *c == cur).unwrap_or(0);
         let next = choices[(i + 1) % choices.len()].clone();
         a.set_thinking(next.clone());
+        let _ = config::save_thinking_to_config(next.as_deref(), None);
+        self.config.llm.thinking_effort = next.clone();
         self.refresh_info();
         self.toast(format!(
             "思考强度：{}",
@@ -1089,7 +2032,13 @@ impl App {
     pub fn shutdown(&mut self) {
         if let Some(a) = &mut self.agent {
             a.checkpoint();
+            a.trace.flush();
         }
+        if let Some(sup) = &self.sup {
+            sup.stop();
+        }
+        self.viewer.stop();
+        self.reporters.release();
     }
 }
 

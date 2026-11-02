@@ -64,7 +64,10 @@ impl MemorySnapshot {
                 .iter()
                 .map(|e| format!("- {}", xml_escape(e)))
                 .collect();
-            sections.push(format!("<agent_notes>\n{}\n</agent_notes>", items.join("\n")));
+            sections.push(format!(
+                "<agent_notes>\n{}\n</agent_notes>",
+                items.join("\n")
+            ));
         }
         if sections.is_empty() {
             return None;
@@ -122,7 +125,9 @@ impl MemoryStore {
     /// Apply `operations` all-or-nothing; the cap is checked on the result.
     pub fn apply(&self, target: &str, operations: &[Value]) -> Result<Vec<String>, String> {
         let Some(file) = file_for(target) else {
-            return Err(format!("Unknown target {target:?}; use one of: user, notes"));
+            return Err(format!(
+                "Unknown target {target:?}; use one of: user, notes"
+            ));
         };
         if operations.is_empty() {
             return Err("No operations given".into());
@@ -173,8 +178,14 @@ fn numbered(entries: &[String]) -> String {
         .join("\n")
 }
 
-fn apply_one(mut entries: Vec<String>, op: &Value, index: Option<usize>) -> Result<Vec<String>, String> {
-    let w = index.map(|i| format!("operation {i}: ")).unwrap_or_default();
+fn apply_one(
+    mut entries: Vec<String>,
+    op: &Value,
+    index: Option<usize>,
+) -> Result<Vec<String>, String> {
+    let w = index
+        .map(|i| format!("operation {i}: "))
+        .unwrap_or_default();
     let Some(op) = op.as_object() else {
         return Err(format!("{w}each operation must be an object"));
     };
@@ -215,7 +226,11 @@ fn apply_one(mut entries: Vec<String>, op: &Value, index: Option<usize>) -> Resu
     match matches.len() {
         0 => return Err(format!("{w}no entry contains {old:?}")),
         1 => {}
-        n => return Err(format!("{w}{n} entries contain {old:?}; quote more of the entry")),
+        n => {
+            return Err(format!(
+                "{w}{n} entries contain {old:?}; quote more of the entry"
+            ));
+        }
     }
     let i = matches[0];
     if action == "remove" {

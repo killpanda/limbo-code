@@ -11,7 +11,10 @@ pub const MAX_OPTIONS: usize = 6;
 
 /// What the user sees: the question and its numbered options.
 pub fn format_question(args: &Value) -> String {
-    let mut lines = vec![format!("❓ {}", arg_str(args, "question").unwrap_or("").trim())];
+    let mut lines = vec![format!(
+        "❓ {}",
+        arg_str(args, "question").unwrap_or("").trim()
+    )];
     if let Some(opts) = args.get("options").and_then(Value::as_array) {
         for (i, o) in opts.iter().enumerate() {
             lines.push(format!("  {}. {}", i + 1, o.as_str().unwrap_or("")));

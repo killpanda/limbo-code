@@ -39,11 +39,16 @@ pub struct PromptExtras<'a> {
     pub blocks: Vec<String>,
 }
 
+#[cfg(test)]
 pub fn build_system_prompt(registry: &ToolRegistry, workdir: &Path) -> String {
     build_system_prompt_with(registry, workdir, &PromptExtras::default())
 }
 
-pub fn build_system_prompt_with(registry: &ToolRegistry, workdir: &Path, extras: &PromptExtras) -> String {
+pub fn build_system_prompt_with(
+    registry: &ToolRegistry,
+    workdir: &Path,
+    extras: &PromptExtras,
+) -> String {
     let daily = registry.daily_mode;
     let mut s = String::from(if daily { DAILY_INTRO } else { BASE_INTRO });
     s.push_str("Available tools:");
@@ -80,7 +85,11 @@ pub fn build_system_prompt_with(registry: &ToolRegistry, workdir: &Path, extras:
         s.push_str("\n- Delegate self-contained research or side work to a subagent with task; run several in parallel when they are independent");
     }
     s.push('\n');
-    s.push_str(if daily { DAILY_GUIDELINES_TAIL } else { GUIDELINES_TAIL });
+    s.push_str(if daily {
+        DAILY_GUIDELINES_TAIL
+    } else {
+        GUIDELINES_TAIL
+    });
     if registry.code_mode {
         s.push_str("\n\n");
         s.push_str(crate::tools::run_code::CODE_ONLY_INSTRUCTION);
@@ -91,9 +100,7 @@ pub fn build_system_prompt_with(registry: &ToolRegistry, workdir: &Path, extras:
         s.push_str("\n\n");
         s.push_str(PLAN_MODE_INSTRUCTION);
     }
-    if daily
-        && let Some(block) = extras.memory.and_then(|m| m.render())
-    {
+    if daily && let Some(block) = extras.memory.and_then(|m| m.render()) {
         s.push_str(&block);
     }
     s.push_str(&format!(

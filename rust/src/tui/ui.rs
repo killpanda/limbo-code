@@ -9,8 +9,10 @@ use ratatui::widgets::{
 };
 
 use super::app::{Activity, App, COMMANDS, Popup, fmt_tokens};
+use super::game2048;
 use super::text::{ellipsize, str_width};
 use super::theme::{SPINNER, Theme, gradient_at, gradient_spans, lerp, logo_lines};
+use ratatui::widgets::Wrap;
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let t = app.theme;
@@ -81,15 +83,33 @@ fn draw_status(f: &mut Frame, app: &App, area: Rect) {
         chip,
         Style::default().fg(color).add_modifier(Modifier::BOLD),
     ));
+    let pill = |text: String, bg: ratatui::style::Color| {
+        [
+            Span::raw("  "),
+            Span::styled(
+                text,
+                Style::default()
+                    .fg(t.bg)
+                    .bg(bg)
+                    .add_modifier(Modifier::BOLD),
+            ),
+        ]
+    };
     if app.info.plan_mode {
-        left.push(Span::raw("  "));
-        left.push(Span::styled(
-            " PLAN ",
-            Style::default()
-                .fg(t.bg)
-                .bg(t.warn)
-                .add_modifier(Modifier::BOLD),
-        ));
+        left.extend(pill(" PLAN ".into(), t.warn));
+    }
+    if app.info.daily_mode {
+        left.extend(pill(" ☀ DAILY ".into(), t.accent3));
+    }
+    if app.info.code_mode {
+        left.extend(pill(" ⌘ CODE ".into(), t.accent2));
+    }
+    if let Some(g) = &app.info.goal {
+        left.extend(pill(format!(" {g} "), t.ok));
+    }
+    let tasks = app.tasks_label();
+    if !tasks.is_empty() {
+        left.extend(pill(format!(" ◆ {tasks} "), t.accent));
     }
 
     // Right side: model · context gauge · session tokens.
@@ -376,7 +396,8 @@ fn draw_hint(f: &mut Frame, app: &App, area: Rect) {
     let keys: &[(&str, &str)] = if app.busy() {
         &[
             ("esc", "打断"),
-            ("enter", "排队"),
+            ("enter", "插话"),
+            ("alt+enter", "任务后再发"),
             ("ctrl+o", "工具"),
             ("ctrl+t", "思考"),
             ("pgup", "滚动"),
@@ -386,6 +407,7 @@ fn draw_hint(f: &mut Frame, app: &App, area: Rect) {
             ("enter", "发送"),
             ("shift+enter", "换行"),
             ("/", "命令"),
+            ("ctrl+v", "贴图"),
             ("ctrl+r", "会话"),
             ("ctrl+o", "工具"),
             ("ctrl+t", "思考"),
@@ -713,6 +735,331 @@ fn draw_popup(f: &mut Frame, app: &mut App, area: Rect) {
                 })
                 .collect();
             f.render_widget(Paragraph::new(lines), list);
+            r
+        }
+        Popup::VerifyPicker { items, selected } => {
+            let r = centered(area, 80, (items.len() + 6) as u16);
+            f.render_widget(Clear, r);
+            let block = popup_block(&t, "🎯 确认验收方式", "↑↓ 选择 · enter 确认 · esc 跳过");
+            let inner = block.inner(r).inner(Margin {
+                horizontal: 1,
+                vertical: 0,
+            });
+            f.render_widget(block, r);
+            let mut lines = vec![
+                Line::from(Span::styled(
+                    "模型提议用下面的命令判断目标是否达成（退出码 0 = 通过）：",
+                    Style::default().fg(t.dim),
+                )),
+                Line::default(),
+            ];
+            for (i, item) in items.iter().enumerate() {
+                let sel = i == *selected;
+                let bg = if sel { t.panel_hi } else { t.panel };
+                let is_cmd = i + 2 < items.len();
+                lines.push(Line::from(vec![
+                    Span::styled(
+                        if sel { "▸ " } else { "  " },
+                        Style::default().fg(t.accent).bg(bg),
+                    ),
+                    Span::styled(
+                        ellipsize(item, inner.width.saturating_sub(4) as usize),
+                        Style::default()
+                            .fg(if sel {
+                                t.accent
+                            } else if is_cmd {
+                                t.code
+                            } else {
+                                t.dim
+                            })
+                            .bg(bg)
+                            .add_modifier(if is_cmd {
+                                Modifier::BOLD
+                            } else {
+                                Modifier::empty()
+                            }),
+                    ),
+                ]));
+            }
+            f.render_widget(Paragraph::new(lines), inner);
+            r
+        }
+        Popup::Auth {
+            provider,
+            model,
+            input,
+            status,
+            checking,
+        } => {
+            let r = centered(area, 64, 9);
+            f.render_widget(Clear, r);
+            let name = crate::llm::catalog::provider_display_name(provider);
+            let footer = if *checking {
+                "验证中… · esc 取消"
+            } else {
+                "enter 验证并保存 · esc 取消"
+            };
+            let block = popup_block(&t, &format!("🔑 登录 {name}"), footer);
+            let inner = block.inner(r).inner(Margin {
+                horizontal: 1,
+                vertical: 0,
+            });
+            f.render_widget(block, r);
+            // Never draw the key itself: a masked preview is enough.
+            let masked = if input.is_empty() {
+                String::new()
+            } else {
+                crate::auth::mask(input)
+            };
+            let lines = vec![
+                Line::from(Span::styled(
+                    format!("模型 {model} 需要 {name} 的 API key，保存到 ~/.limbo/auth.json"),
+                    Style::default().fg(t.dim),
+                )),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("key ❯ ", Style::default().fg(t.accent)),
+                    Span::styled(masked, Style::default().fg(t.fg)),
+                    Span::styled("▍", Style::default().fg(t.accent)),
+                ]),
+                Line::from(""),
+                Line::from(Span::styled(
+                    status.clone().unwrap_or_default(),
+                    Style::default().fg(if status.as_deref().is_some_and(|s| s.starts_with('✗')) {
+                        t.err
+                    } else {
+                        t.dim
+                    }),
+                )),
+            ];
+            f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+            r
+        }
+        Popup::Btw {
+            question,
+            answer,
+            done,
+            scroll,
+        } => {
+            let r = centered(area, 90, area.height.saturating_sub(6).max(10));
+            f.render_widget(Clear, r);
+            let footer = if *done {
+                "任意键关闭（答案不会进入会话）"
+            } else {
+                "回答中… · 任意键关闭（答案不会进入会话）"
+            };
+            let block = popup_block(&t, &format!("💬 btw · {}", ellipsize(question, 60)), footer);
+            let inner = block.inner(r).inner(Margin {
+                horizontal: 1,
+                vertical: 0,
+            });
+            f.render_widget(block, r);
+            let body = if answer.is_empty() && !*done {
+                format!(
+                    "{} 思考中…",
+                    super::theme::SPINNER[app.frame % super::theme::SPINNER.len()]
+                )
+            } else {
+                answer.clone()
+            };
+            let lines =
+                super::markdown::render(&body, &t, inner.width as usize, Style::default().fg(t.fg));
+            f.render_widget(
+                Paragraph::new(lines)
+                    .wrap(Wrap { trim: false })
+                    .scroll((*scroll, 0)),
+                inner,
+            );
+            r
+        }
+        Popup::Text {
+            title,
+            body,
+            scroll,
+        } => {
+            let h = (body.lines().count() as u16 + 4).clamp(6, area.height.saturating_sub(4));
+            let r = centered(area, 100, h);
+            f.render_widget(Clear, r);
+            let block = popup_block(&t, title, "↑↓ 滚动 · 任意键关闭");
+            let inner = block.inner(r).inner(Margin {
+                horizontal: 1,
+                vertical: 0,
+            });
+            f.render_widget(block, r);
+            f.render_widget(
+                Paragraph::new(body.clone())
+                    .style(Style::default().fg(t.fg))
+                    .wrap(Wrap { trim: false })
+                    .scroll((*scroll, 0)),
+                inner,
+            );
+            r
+        }
+        Popup::Game(game) => {
+            let r = centered(area, 4 * 9 + 6, 4 * 4 + 6);
+            f.render_widget(Clear, r);
+            let title = format!("2048 · 分数 {}", game.score);
+            let footer = if game.over() {
+                "游戏结束 · R 重开 · Esc 关闭"
+            } else if game.won {
+                "🎉 2048！继续玩 · R 重开 · Esc"
+            } else {
+                "方向键/WASD · R 重开 · Esc 关闭"
+            };
+            let block = popup_block(&t, &title, footer);
+            let inner = block.inner(r).inner(Margin {
+                horizontal: 1,
+                vertical: 1,
+            });
+            f.render_widget(block, r);
+            let mut lines = vec![];
+            for row in game.grid.iter() {
+                for sub in 0..4 {
+                    let mut spans = vec![];
+                    for v in row.iter() {
+                        let level = if *v == 0 {
+                            0.0
+                        } else {
+                            (v.trailing_zeros() as f32 / 11.0).min(1.0)
+                        };
+                        let bg = if *v == 0 {
+                            t.panel_hi
+                        } else {
+                            gradient_at(&t.gradient, level)
+                        };
+                        let text = if sub == 1 && *v != 0 {
+                            format!("{v:^8}")
+                        } else {
+                            " ".repeat(8)
+                        };
+                        let text = if sub == 3 { " ".repeat(8) } else { text };
+                        let style = if sub == 3 {
+                            Style::default().bg(t.panel)
+                        } else {
+                            Style::default()
+                                .fg(t.bg)
+                                .bg(bg)
+                                .add_modifier(Modifier::BOLD)
+                        };
+                        spans.push(Span::styled(text, style));
+                        spans.push(Span::styled(" ", Style::default().bg(t.panel)));
+                    }
+                    lines.push(Line::from(spans));
+                }
+            }
+            let _ = game2048::SIZE;
+            f.render_widget(Paragraph::new(lines), inner);
+            r
+        }
+        Popup::Agents { selected, scroll } => {
+            let r = centered(
+                area,
+                area.width.saturating_sub(6),
+                area.height.saturating_sub(4),
+            );
+            f.render_widget(Clear, r);
+            let block = popup_block(
+                &t,
+                "◆ 子代理",
+                "↑↓ 选择 · a 批准 · n 拒绝 · p 暂停/恢复 · x 取消 · r 重试 · @ 发消息 · 其他键关闭",
+            );
+            let inner = block.inner(r).inner(Margin {
+                horizontal: 1,
+                vertical: 0,
+            });
+            f.render_widget(block, r);
+            let Some(sup) = app.sup.clone() else { return };
+            let tasks = sup.tasks();
+            let [list, detail] =
+                Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
+                    .areas(inner);
+            let sel = (*selected).min(tasks.len().saturating_sub(1));
+            let mut lines: Vec<Line> = vec![];
+            if tasks.is_empty() {
+                lines.push(Line::from(Span::styled(
+                    "任务板是空的。让主 agent 用 plan_tasks 派活，或 /agents scan 看项目画像。",
+                    Style::default().fg(t.faint),
+                )));
+            }
+            for (i, task) in tasks.iter().enumerate() {
+                let s_ = i == sel;
+                let bg = if s_ { t.panel_hi } else { t.panel };
+                let color = match task.status.as_str() {
+                    "running" => t.accent,
+                    "done" => t.ok,
+                    "failed" => t.err,
+                    "waiting" | "proposed" | "paused" => t.warn,
+                    _ => t.dim,
+                };
+                let icon = match task.status.as_str() {
+                    "running" => super::theme::SPINNER[app.frame % super::theme::SPINNER.len()],
+                    "done" => "✓",
+                    "failed" => "✗",
+                    "cancelled" => "⊘",
+                    "waiting" => "?",
+                    "paused" => "⏸",
+                    "proposed" => "◇",
+                    _ => "○",
+                };
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{icon} "), Style::default().fg(color).bg(bg)),
+                    Span::styled(
+                        format!("{:<4}", task.id),
+                        Style::default().fg(t.faint).bg(bg),
+                    ),
+                    Span::styled(
+                        ellipsize(
+                            &format!("{} · {}", task.profile, task.title),
+                            list.width.saturating_sub(16) as usize,
+                        ),
+                        Style::default().fg(if s_ { t.accent } else { t.fg }).bg(bg),
+                    ),
+                    Span::styled(
+                        format!(
+                            " {}",
+                            crate::subagents::supervisor::status_label(&task.status)
+                        ),
+                        Style::default().fg(color).bg(bg),
+                    ),
+                ]));
+                let act = sup.activity(&task.id);
+                if task.status == "running" && !act.is_empty() {
+                    lines.push(Line::from(Span::styled(
+                        format!("     {act}"),
+                        Style::default().fg(t.faint).bg(bg),
+                    )));
+                }
+            }
+            f.render_widget(Paragraph::new(lines), list);
+            if let Some(task) = tasks.get(sel) {
+                let mut body = sup.status_text(Some(&task.id));
+                let transcript = sup.transcript(&task.id, 30);
+                if !transcript.is_empty() {
+                    body.push_str("\n\n── 记录 ──");
+                    for (role, text) in transcript {
+                        let first: String = text
+                            .lines()
+                            .next()
+                            .unwrap_or("")
+                            .chars()
+                            .take(200)
+                            .collect();
+                        body.push_str(&format!("\n[{role}] {first}"));
+                    }
+                }
+                f.render_widget(
+                    Paragraph::new(body)
+                        .style(Style::default().fg(t.dim))
+                        .wrap(Wrap { trim: false })
+                        .scroll((*scroll, 0))
+                        .block(
+                            Block::default()
+                                .borders(Borders::LEFT)
+                                .border_style(Style::default().fg(t.faint)),
+                        ),
+                    detail,
+                );
+            }
             r
         }
     };

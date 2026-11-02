@@ -47,12 +47,8 @@ pub struct ToolContext {
     pub cancel: CancellationToken,
     /// The id of the call being run (subagents use it for their session file).
     pub call_id: String,
-    /// The calling agent's session file (subagents live next to it).
-    pub session_path: Option<PathBuf>,
     /// Where live progress goes (subagent activity shown in the tool card).
     pub events: Option<crate::agent::EventTx>,
-    /// Plan mode: subagents are forced read-only too.
-    pub plan_mode: bool,
     /// The registry running this call (`run_code` dispatches through it).
     pub registry: Option<ToolRegistry>,
 }
@@ -65,9 +61,7 @@ impl ToolContext {
             workdir: workdir.into(),
             cancel: CancellationToken::new(),
             call_id: "call".into(),
-            session_path: None,
             events: None,
-            plan_mode: false,
             registry: None,
         }
     }
@@ -106,7 +100,6 @@ pub trait Tool: Send + Sync {
 /// A gate in front of every call (subagent profiles: read-only, no-edit,
 /// path claims). `Err` blocks the call with that message.
 pub trait ToolHook: Send + Sync {
-    fn name(&self) -> &str;
     fn before_tool(&self, tool: &dyn Tool, args: &Value) -> Result<(), String>;
     /// Whether the tool is listed at all (hidden tools are also blocked).
     fn visible(&self, _tool: &dyn Tool) -> bool {
@@ -115,7 +108,13 @@ pub trait ToolHook: Send + Sync {
 }
 
 /// Tools only daily mode registers.
-pub const DAILY_TOOLS: [&str; 5] = ["web_fetch", "memory", "session_search", "ask_user", "skill_manage"];
+pub const DAILY_TOOLS: [&str; 5] = [
+    "web_fetch",
+    "memory",
+    "session_search",
+    "ask_user",
+    "skill_manage",
+];
 
 /// The tools available in a session.
 #[derive(Clone)]
@@ -175,13 +174,6 @@ impl ToolRegistry {
         r
     }
 
-    /// Only the read-only tools (used by read-only subagents).
-    pub fn read_only() -> Self {
-        let mut r = Self::core(false);
-        r.tools.retain(|t| t.replay_safe());
-        r
-    }
-
     /// Add or remove the daily tools.
     pub fn set_daily(&mut self, enabled: bool, config: &crate::config::Config) {
         self.daily_mode = enabled;
@@ -226,6 +218,7 @@ impl ToolRegistry {
     }
 
     /// Model-facing tool names.
+    #[cfg(test)]
     pub fn names(&self) -> Vec<&'static str> {
         self.model_facing().map(|t| t.name()).collect()
     }

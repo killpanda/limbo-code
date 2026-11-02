@@ -157,10 +157,18 @@ fn unsafe_replay() -> String {
 pub struct QueuedMessageRecord {
     pub id: String,
     pub text: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<crate::models::Attachment>,
+    /// "steer" (injected at the next consistency point) or "follow_up"
+    /// (waits until the whole task is done).
     #[serde(default = "steer_mode")]
     pub mode: String,
+    /// "user", or "subagent" for a notice delivered to the main agent.
     #[serde(default = "user_source")]
     pub source: String,
+    /// Notice ids a subagent delivery carries (dedupe across a crash).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refs: Vec<String>,
 }
 
 fn steer_mode() -> String {
@@ -636,8 +644,10 @@ mod tests {
         let q = QueuedMessageRecord {
             id: "q1".into(),
             text: "later".into(),
+            attachments: vec![],
             mode: "steer".into(),
             source: "user".into(),
+            refs: vec![],
         };
         append_lines(
             &p,

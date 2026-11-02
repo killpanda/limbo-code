@@ -49,17 +49,13 @@ enum Msg {
 /// Cheap to clone; every clone writes to the same file.
 #[derive(Clone)]
 pub struct TraceLogger {
-    pub path: PathBuf,
     tx: Option<Arc<Mutex<mpsc::Sender<Msg>>>>,
 }
 
 impl TraceLogger {
     /// A logger that drops everything (tests, failed opens).
     pub fn disabled() -> Self {
-        Self {
-            path: PathBuf::new(),
-            tx: None,
-        }
+        Self { tx: None }
     }
 
     pub fn open(path: PathBuf) -> Self {
@@ -79,7 +75,7 @@ impl TraceLogger {
             Ok::<_, std::io::Error>(f)
         })();
         let Ok(file) = file else {
-            return Self { path, tx: None };
+            return Self { tx: None };
         };
         let (tx, rx) = mpsc::channel::<Msg>();
         std::thread::Builder::new()
@@ -101,7 +97,6 @@ impl TraceLogger {
             })
             .ok();
         Self {
-            path,
             tx: Some(Arc::new(Mutex::new(tx))),
         }
     }
@@ -135,6 +130,7 @@ impl TraceLogger {
 }
 
 /// Read all records, skipping malformed lines.
+#[cfg(test)]
 pub fn read_trace(path: &Path) -> Vec<Value> {
     std::fs::read_to_string(path)
         .unwrap_or_default()

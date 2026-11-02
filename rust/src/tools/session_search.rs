@@ -55,7 +55,12 @@ fn load(path: &Path) -> Option<Session> {
         }
     }
     let meta = meta?;
-    let s = |k: &str| meta.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    let s = |k: &str| {
+        meta.get(k)
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string()
+    };
     Some(Session {
         id: Some(s("id")).filter(|i| !i.is_empty()).unwrap_or_else(|| {
             path.file_stem()
@@ -64,14 +69,21 @@ fn load(path: &Path) -> Option<Session> {
         }),
         title: s("title"),
         date: s("created_at").chars().take(10).collect(),
-        daily: meta.get("daily_mode").and_then(Value::as_bool).unwrap_or(false),
+        daily: meta
+            .get("daily_mode")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
         messages,
     })
 }
 
 fn snippet(text: &str, terms: &[String]) -> String {
     let low = text.to_lowercase();
-    let at_byte = terms.iter().filter_map(|t| low.find(t.as_str())).min().unwrap_or(0);
+    let at_byte = terms
+        .iter()
+        .filter_map(|t| low.find(t.as_str()))
+        .min()
+        .unwrap_or(0);
     // lowercase may shift byte offsets; map via char count of the prefix
     let at = low[..at_byte.min(low.len())].chars().count();
     let chars: Vec<char> = text.chars().collect();
@@ -106,7 +118,7 @@ impl SessionSearchTool {
                 (m, p)
             })
             .collect();
-        files.sort_by(|a, b| b.0.cmp(&a.0));
+        files.sort_by_key(|f| std::cmp::Reverse(f.0)); // newest first
         files.into_iter().take(MAX_FILES).map(|(_, p)| p).collect()
     }
 
@@ -117,7 +129,10 @@ impl SessionSearchTool {
                 .map(|s| s.to_string_lossy().into_owned())
                 .unwrap_or_default()
         };
-        let matches: Vec<&PathBuf> = files.iter().filter(|p| stem(p).starts_with(reference)).collect();
+        let matches: Vec<&PathBuf> = files
+            .iter()
+            .filter(|p| stem(p).starts_with(reference))
+            .collect();
         if matches.is_empty() {
             return ToolResult::err(format!("no session matches {reference:?}"));
         }
@@ -158,14 +173,22 @@ impl SessionSearchTool {
             "session {} · {} · {}",
             session.id,
             session.date,
-            if session.title.is_empty() { "(untitled)" } else { &session.title }
+            if session.title.is_empty() {
+                "(untitled)"
+            } else {
+                &session.title
+            }
         )];
         for (i, (role, content)) in shown {
             let mut text: String = content.chars().take(READ_CHARS).collect();
             if content.chars().count() > READ_CHARS {
                 text.push('…');
             }
-            let label = if i >= 0 { format!("[{i}] ") } else { String::new() };
+            let label = if i >= 0 {
+                format!("[{i}] ")
+            } else {
+                String::new()
+            };
             lines.push(format!("{label}{role}: {text}"));
         }
         ToolResult::ok(truncate_output(lines.join("\n\n"), MAX_OUTPUT_BYTES))
@@ -200,10 +223,16 @@ impl Tool for SessionSearchTool {
         true
     }
     async fn run(&self, args: Value, _ctx: &ToolContext) -> ToolResult {
-        if let Some(id) = arg_str(&args, "session_id").map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(id) = arg_str(&args, "session_id")
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             return self.read(id, arg_i64(&args, "around"));
         }
-        let Some(query) = arg_str(&args, "query").map(str::trim).filter(|q| !q.is_empty()) else {
+        let Some(query) = arg_str(&args, "query")
+            .map(str::trim)
+            .filter(|q| !q.is_empty())
+        else {
             return ToolResult::err("give query (words to find) or session_id (a session to read)");
         };
         let terms: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
@@ -230,7 +259,11 @@ impl Tool for SessionSearchTool {
                 "session {} · {} · {}{}",
                 session.id,
                 session.date,
-                if session.title.is_empty() { "(untitled)" } else { &session.title },
+                if session.title.is_empty() {
+                    "(untitled)"
+                } else {
+                    &session.title
+                },
                 if session.daily { "" } else { " · coding" }
             )];
             for (i, (role, content)) in hits.iter().take(3) {
@@ -271,7 +304,9 @@ mod tests {
              {\"role\":\"assistant\",\"content\":\"Sure, Kyoto in April is lovely\"}\n",
         )
         .unwrap();
-        let t = SessionSearchTool { dir: dir.path().into() };
+        let t = SessionSearchTool {
+            dir: dir.path().into(),
+        };
         let ctx = ToolContext::simple(dir.path());
         let r = t.run(json!({"query": "kyoto SPRING"}), &ctx).await;
         let out = r.output.unwrap();
