@@ -12,9 +12,13 @@
 //! - `headless`   — plain-terminal and JSON frontends
 
 mod agent;
+mod attachments;
 mod auth;
 mod compaction;
 mod config;
+mod goal;
+mod memory;
+mod skills;
 mod headless;
 mod history;
 mod llm;
@@ -23,6 +27,7 @@ mod prompt;
 mod session;
 mod subagent;
 mod tools;
+mod trace;
 mod tui;
 
 use std::path::PathBuf;

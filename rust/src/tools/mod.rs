@@ -11,17 +11,25 @@
 //! - `Arc` = atomically reference-counted pointer: many owners, freed when
 //!   the last one goes away. Tools are shared between concurrent calls.
 
+pub mod ask_user;
 pub mod bash;
 pub mod edit;
 pub mod find;
 pub mod grep;
 pub mod ls;
+pub mod memory;
 pub mod read;
+pub mod run_code;
+pub mod session_search;
+pub mod skill_manage;
 pub mod truncate;
+pub mod web_fetch;
+pub mod web_search;
 pub mod write;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
@@ -45,6 +53,8 @@ pub struct ToolContext {
     pub events: Option<crate::agent::EventTx>,
     /// Plan mode: subagents are forced read-only too.
     pub plan_mode: bool,
+    /// The registry running this call (`run_code` dispatches through it).
+    pub registry: Option<ToolRegistry>,
 }
 
 impl ToolContext {
@@ -58,6 +68,7 @@ impl ToolContext {
             session_path: None,
             events: None,
             plan_mode: false,
+            registry: None,
         }
     }
     pub fn progress(&self, line: impl Into<String>) {
@@ -84,14 +95,41 @@ pub trait Tool: Send + Sync {
     fn mutates(&self) -> bool {
         !self.replay_safe()
     }
+    /// Whether a `run_code` program may call it. Tools that drive live
+    /// session state (the task board) stay native tools beside `run_code`.
+    fn program_callable(&self) -> bool {
+        true
+    }
     async fn run(&self, args: Value, ctx: &ToolContext) -> ToolResult;
 }
+
+/// A gate in front of every call (subagent profiles: read-only, no-edit,
+/// path claims). `Err` blocks the call with that message.
+pub trait ToolHook: Send + Sync {
+    fn name(&self) -> &str;
+    fn before_tool(&self, tool: &dyn Tool, args: &Value) -> Result<(), String>;
+    /// Whether the tool is listed at all (hidden tools are also blocked).
+    fn visible(&self, _tool: &dyn Tool) -> bool {
+        true
+    }
+}
+
+/// Tools only daily mode registers.
+pub const DAILY_TOOLS: [&str; 5] = ["web_fetch", "memory", "session_search", "ask_user", "skill_manage"];
 
 /// The tools available in a session.
 #[derive(Clone)]
 pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
     pub plan_mode: bool,
+    pub daily_mode: bool,
+    /// Code Mode: the model sees only `run_code` (plus non-programmable tools).
+    pub code_mode: bool,
+    pub hooks: Vec<Arc<dyn ToolHook>>,
+    /// Set when the `memory` tool ran (daily memory nudge bookkeeping).
+    pub memory_written: Arc<AtomicBool>,
+    /// Where `session_search` looks.
+    pub session_dir: PathBuf,
 }
 
 pub const PLAN_MODE_INSTRUCTION: &str = "Plan mode is on: you are read-only. Explore with read/grep/find/ls; \
@@ -99,7 +137,7 @@ edit, write and bash are blocked. Finish by presenting a concrete, step-by-step 
 mode off (/plan off) before anything is changed.";
 
 impl ToolRegistry {
-    /// The seven core tools (bash optional).
+    /// The seven core tools (bash optional) plus `run_code`.
     pub fn core(bash_enabled: bool) -> Self {
         let mut tools: Vec<Arc<dyn Tool>> = vec![
             Arc::new(read::ReadTool),
@@ -112,10 +150,29 @@ impl ToolRegistry {
         tools.push(Arc::new(grep::GrepTool));
         tools.push(Arc::new(find::FindTool));
         tools.push(Arc::new(ls::LsTool));
+        tools.push(Arc::new(run_code::RunCodeTool));
         Self {
             tools,
             plan_mode: false,
+            daily_mode: false,
+            code_mode: false,
+            hooks: Vec::new(),
+            memory_written: Arc::new(AtomicBool::new(false)),
+            session_dir: crate::config::limbo_home().join("sessions"),
         }
+    }
+
+    /// The full catalog for a config: core tools plus `web_search` when the
+    /// search provider has a key.
+    pub fn for_config(config: &crate::config::Config) -> Self {
+        let mut r = Self::core(config.tools.bash_enabled);
+        if let Some(provider) = web_search::build_provider(config) {
+            r.add(Arc::new(web_search::WebSearchTool::new(
+                provider,
+                config.web_search.count,
+            )));
+        }
+        r
     }
 
     /// Only the read-only tools (used by read-only subagents).
@@ -125,39 +182,97 @@ impl ToolRegistry {
         r
     }
 
+    /// Add or remove the daily tools.
+    pub fn set_daily(&mut self, enabled: bool, config: &crate::config::Config) {
+        self.daily_mode = enabled;
+        self.tools.retain(|t| !DAILY_TOOLS.contains(&t.name()));
+        if !enabled {
+            return;
+        }
+        let d = &config.daily;
+        self.tools.push(Arc::new(web_fetch::WebFetchTool {
+            max_chars: d.fetch_max_chars,
+            timeout: d.fetch_timeout,
+        }));
+        if d.memory {
+            self.tools.push(Arc::new(memory::MemoryTool {
+                store: crate::memory::MemoryStore::new(
+                    crate::memory::memory_dir(),
+                    d.user_chars,
+                    d.notes_chars,
+                ),
+            }));
+        }
+        self.tools.push(Arc::new(session_search::SessionSearchTool {
+            dir: self.session_dir.clone(),
+        }));
+        self.tools.push(Arc::new(ask_user::AskUserTool));
+        self.tools.push(Arc::new(skill_manage::SkillManageTool));
+    }
+
     pub fn add(&mut self, tool: Arc<dyn Tool>) {
         self.tools.retain(|t| t.name() != tool.name());
         self.tools.push(tool);
+    }
+
+    pub fn remove(&mut self, name: &str) {
+        if name != "run_code" {
+            self.tools.retain(|t| t.name() != name);
+        }
     }
 
     pub fn get(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools.iter().find(|t| t.name() == name).cloned()
     }
 
+    /// Model-facing tool names.
     pub fn names(&self) -> Vec<&'static str> {
-        self.visible().map(|t| t.name()).collect()
+        self.model_facing().map(|t| t.name()).collect()
     }
 
-    fn visible(&self) -> impl Iterator<Item = &Arc<dyn Tool>> {
-        self.tools
-            .iter()
-            .filter(move |t| !self.plan_mode || !t.mutates())
+    /// Every registered tool name (programmable ones included).
+    pub fn all_names(&self) -> Vec<&'static str> {
+        self.tools.iter().map(|t| t.name()).collect()
+    }
+
+    fn allowed(&self, t: &Arc<dyn Tool>) -> bool {
+        (!self.plan_mode || !t.mutates()) && self.hooks.iter().all(|h| h.visible(t.as_ref()))
+    }
+
+    fn model_facing(&self) -> impl Iterator<Item = &Arc<dyn Tool>> {
+        self.tools.iter().filter(move |t| {
+            let shown = if self.code_mode {
+                t.name() == "run_code" || !t.program_callable()
+            } else {
+                t.name() != "run_code"
+            };
+            shown && self.allowed(t)
+        })
+    }
+
+    fn definition(t: &Arc<dyn Tool>) -> Value {
+        json!({
+            "type": "function",
+            "function": {"name": t.name(), "description": t.description(), "parameters": t.parameters()},
+        })
     }
 
     /// OpenAI-style function definitions for the request.
     pub fn definitions(&self) -> Vec<Value> {
-        self.visible()
-            .map(|t| {
-                json!({
-                    "type": "function",
-                    "function": {"name": t.name(), "description": t.description(), "parameters": t.parameters()},
-                })
-            })
+        self.model_facing().map(Self::definition).collect()
+    }
+
+    /// Everything a `run_code` program may call (the SDK section).
+    pub fn program_definitions(&self) -> Vec<Value> {
+        self.tools
+            .iter()
+            .filter(|t| t.name() != "run_code" && t.program_callable() && self.allowed(t))
+            .map(Self::definition)
             .collect()
     }
 
-    /// Run one call. Unknown tools and plan-mode blocks become error results
-    /// the model can read and react to.
+    /// Run one call. Unknown tools, plan-mode and hook blocks become error
+    /// results the model can read and react to.
     pub async fn execute(&self, name: &str, args: Value, ctx: &ToolContext) -> ToolResult {
         let Some(tool) = self.get(name) else {
             return ToolResult::err(format!("Unknown tool: {name}"));
@@ -168,12 +283,24 @@ impl ToolRegistry {
                  present the plan; the user leaves plan mode with /plan off before anything is changed."
             ));
         }
+        for h in &self.hooks {
+            if let Err(e) = h.before_tool(tool.as_ref(), &args) {
+                return ToolResult::err(e);
+            }
+        }
         if let Some(err) = args.get("parse_error").and_then(Value::as_str) {
             return ToolResult::err(format!(
                 "Tool arguments were not valid JSON ({err}). Re-issue the call with valid JSON arguments."
             ));
         }
-        tool.run(args, ctx).await
+        if name == "memory" {
+            self.memory_written.store(true, Ordering::SeqCst);
+        }
+        let mut ctx = ctx.clone();
+        if ctx.registry.is_none() {
+            ctx.registry = Some(self.clone());
+        }
+        tool.run(args, &ctx).await
     }
 }
 

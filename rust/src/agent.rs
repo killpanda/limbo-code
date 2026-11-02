@@ -26,7 +26,7 @@ use std::sync::{Arc, Mutex};
 
 use futures::StreamExt;
 use futures::stream::FuturesUnordered;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -34,15 +34,18 @@ use crate::compaction::{
     self, build_summary_prompt, find_split_point, is_summary_message, make_summary_message,
     summary_body,
 };
+use crate::attachments::build_user_content;
 use crate::config::Config;
 use crate::history;
+use crate::memory::{MEMORY_NUDGE, MemorySnapshot, MemoryStore, memory_dir};
 use crate::llm::usage::{estimate_tokens, normalize_usage};
 use crate::llm::{LlmClient, LlmError};
 use crate::models::{Attachment, LlmEvent, Message, Role, ToolCall, ToolResult, new_id};
-use crate::prompt::build_system_prompt;
+use crate::prompt::{PromptExtras, build_system_prompt_with};
 use crate::session::{self, CompactionRecord, LoadedSession, QueuedMessageRecord, SessionMeta};
 use crate::subagent::TaskTool;
 use crate::tools::{ToolContext, ToolRegistry};
+use crate::trace::{TRACE_SCHEMA, TraceLogger, trace_path_for, utc_now_iso};
 
 const MAX_CONSECUTIVE_LENGTH_STOPS: u32 = 3;
 
@@ -170,6 +173,20 @@ pub struct Agent {
     last_finish_reason: Option<String>,
     /// Subagents send progress here when this agent is itself a child.
     pub is_subagent: bool,
+    /// The memory this session's prompt was built with (None: memory off).
+    pub memory: Option<MemorySnapshot>,
+    turns_since_memory: u32,
+    pub trace: TraceLogger,
+    turn_count: u32,
+    iteration: u32,
+    /// The last turn ended because a tool asked for it (`ask_user`).
+    pub ended_by_tool: bool,
+    /// The last turn ended with an error (after retries).
+    pub last_run_failed: bool,
+    /// The last turn was interrupted by the user.
+    pub was_interrupted: bool,
+    /// Extra system-prompt blocks (project facts, subagent instructions).
+    pub prompt_blocks: Vec<String>,
 }
 
 impl Agent {
@@ -181,6 +198,7 @@ impl Agent {
         let path = session_dir.join(format!("{id}.jsonl"));
         let mut agent = Self::assemble(config, client, workdir, session_dir, meta, path);
         agent.init_system_message();
+        agent.log_session_start(false);
         Ok(agent)
     }
 
@@ -213,6 +231,10 @@ impl Agent {
             path.to_path_buf(),
         );
         agent.registry.plan_mode = meta.plan_mode;
+        if meta.daily_mode {
+            agent.registry.set_daily(true, &agent.config);
+        }
+        agent.registry.code_mode = meta.code_mode;
         agent.file_created = true;
         agent.persisted = raw_message_ids.into_iter().collect();
         agent.compactions = compactions;
@@ -230,6 +252,7 @@ impl Agent {
         for q in queue {
             agent.steer.items.lock().unwrap().push_back(q);
         }
+        agent.log_session_start(true);
         Ok(agent)
     }
 
@@ -270,11 +293,20 @@ impl Agent {
         meta: SessionMeta,
         path: PathBuf,
     ) -> Self {
-        let mut registry = ToolRegistry::core(config.tools.bash_enabled);
+        let mut registry = ToolRegistry::for_config(&config);
+        registry.session_dir = session_dir.to_path_buf();
         if config.subagents.enabled {
             registry.add(Arc::new(TaskTool::new(config.clone())));
         }
         client.prompt_cache_key = Some(meta.id.clone());
+        let memory = config.daily.memory.then(|| {
+            MemoryStore::new(memory_dir(), config.daily.user_chars, config.daily.notes_chars).snapshot()
+        });
+        let trace = if cfg!(test) {
+            TraceLogger::disabled()
+        } else {
+            TraceLogger::open(trace_path_for(&path))
+        };
         let steer = Arc::new(SteerQueue::default());
         *steer.path.lock().unwrap() = Some(path.clone());
         Self {
@@ -296,7 +328,54 @@ impl Agent {
             prompt_watermark: 0,
             last_finish_reason: None,
             is_subagent: false,
+            memory,
+            turns_since_memory: 0,
+            trace,
+            turn_count: 0,
+            iteration: 0,
+            ended_by_tool: false,
+            last_run_failed: false,
+            was_interrupted: false,
+            prompt_blocks: Vec::new(),
         }
+    }
+
+    fn resolved_llm_fields(&self) -> Value {
+        json!({
+            "model": self.client.spec.id,
+            "provider": self.client.spec.provider.id,
+            "api": format!("{:?}", self.client.spec.provider.dialect),
+            "base_url": crate::llm::catalog::resolve_base_url(&self.client.spec, &self.config),
+            "context_window": self.client.spec.context_window,
+            "max_tokens": self.client.max_tokens,
+            "thinking_effort": self.client.thinking_effort,
+        })
+    }
+
+    fn log_session_start(&self, resumed: bool) {
+        self.trace.log(
+            "session_start",
+            json!({
+                "trace_schema": TRACE_SCHEMA,
+                "session_id": self.meta.id,
+                "workdir": self.workdir.display().to_string(),
+                "resumed": resumed,
+                "restored_messages": if resumed { self.messages.len().saturating_sub(1) } else { 0 },
+                "limbo_version": env!("CARGO_PKG_VERSION"),
+                "runtime": "rust",
+                "platform": std::env::consts::OS,
+                "config": {
+                    "model": self.config.llm.model,
+                    "base_url": self.config.llm.base_url,
+                    "temperature": self.config.llm.temperature,
+                    "max_tokens": self.config.llm.max_tokens,
+                    "max_iterations": self.config.llm.max_iterations,
+                    "thinking_effort": self.config.llm.thinking_effort,
+                },
+                "resolved": self.resolved_llm_fields(),
+                "role": self.meta.role,
+            }),
+        );
     }
 
     // -- accessors ------------------------------------------------------------
@@ -319,10 +398,27 @@ impl Agent {
     pub fn plan_mode(&self) -> bool {
         self.registry.plan_mode
     }
+    pub fn daily_mode(&self) -> bool {
+        self.registry.daily_mode
+    }
+    pub fn code_mode(&self) -> bool {
+        self.registry.code_mode
+    }
+    pub fn system_prompt(&self) -> String {
+        self.messages
+            .first()
+            .filter(|m| m.role == Role::System)
+            .map(|m| m.text().to_string())
+            .unwrap_or_default()
+    }
 
     /// (Re)build the system prompt as message 0.
-    fn init_system_message(&mut self) {
-        let sys = Message::system(build_system_prompt(&self.registry, &self.workdir));
+    pub fn init_system_message(&mut self) {
+        let extras = PromptExtras {
+            memory: self.memory.as_ref(),
+            blocks: self.prompt_blocks.clone(),
+        };
+        let sys = Message::system(build_system_prompt_with(&self.registry, &self.workdir, &extras));
         match self.messages.first_mut() {
             Some(m) if m.role == Role::System => {
                 m.content = sys.content;
@@ -331,12 +427,72 @@ impl Agent {
         }
     }
 
-    pub fn set_plan_mode(&mut self, on: bool) {
+    pub fn set_plan_mode(&mut self, on: bool) -> bool {
+        if self.registry.plan_mode == on {
+            return false;
+        }
         self.registry.plan_mode = on;
         self.meta.plan_mode = on;
+        self.mode_changed("plan_mode", on);
+        true
+    }
+
+    /// Daily mode: swap the daily tools and the assistant prompt.
+    pub fn set_daily_mode(&mut self, on: bool) -> bool {
+        if self.registry.daily_mode == on {
+            return false;
+        }
+        let cfg = self.config.clone();
+        self.registry.set_daily(on, &cfg);
+        self.meta.daily_mode = on;
+        self.mode_changed("daily_mode", on);
+        true
+    }
+
+    /// Code Mode: collapse the catalog to `run_code` (+ the SDK prompt).
+    pub fn set_code_mode(&mut self, on: bool) -> bool {
+        if self.registry.code_mode == on {
+            return false;
+        }
+        self.registry.code_mode = on;
+        self.meta.code_mode = on;
+        self.mode_changed("code_mode", on);
+        true
+    }
+
+    fn mode_changed(&mut self, kind: &str, on: bool) {
         self.init_system_message();
         self.needs_rewrite = true; // system prompt changed in place
         self.persist_meta();
+        self.trace
+            .log(kind, json!({"turn": self.turn_count, "enabled": on}));
+    }
+
+    /// Daily mode: a memory reminder every N quiet turns.
+    fn memory_nudge(&mut self) -> &'static str {
+        use std::sync::atomic::Ordering;
+        if self.registry.memory_written.swap(false, Ordering::SeqCst) {
+            self.turns_since_memory = 0;
+        }
+        self.turns_since_memory += 1;
+        let every = self.config.daily.memory_nudge_turns;
+        if !(self.daily_mode() && every > 0 && self.registry.get("memory").is_some()) {
+            return "";
+        }
+        if self.turns_since_memory <= every {
+            return "";
+        }
+        self.turns_since_memory = 0;
+        MEMORY_NUDGE
+    }
+
+    /// Persist the goal state at once (a crash mid-loop keeps progress).
+    pub fn save_goal(&mut self, goal: Option<crate::goal::GoalState>) {
+        self.meta.goal = goal;
+        self.persist_meta();
+        if !self.file_created {
+            // nothing on disk yet: the first checkpoint writes the meta
+        }
     }
 
     /// Swap the model mid-session (the history stays).
@@ -350,6 +506,10 @@ impl Agent {
         self.meta.model = model.to_string();
         self.last_prompt_tokens = None;
         self.persist_meta();
+        self.trace.log(
+            "model_switch",
+            json!({"turn": self.turn_count, "resolved": self.resolved_llm_fields()}),
+        );
         Ok(())
     }
 
@@ -358,7 +518,7 @@ impl Agent {
         self.client.thinking_effort = level;
     }
 
-    fn persist_meta(&mut self) {
+    pub fn persist_meta(&mut self) {
         if self.file_created {
             let _ = session::append_lines(
                 &self.session_path,
@@ -471,9 +631,20 @@ impl Agent {
         cancel: &CancellationToken,
     ) {
         let _ = tx.send(AgentEvent::TurnStart);
+        self.turn_count += 1;
+        self.iteration = 0;
+        self.ended_by_tool = false;
+        self.last_run_failed = false;
+        self.was_interrupted = false;
+        let turn_started_at = utc_now_iso();
+        let turn_start = std::time::Instant::now();
         // Read-only calls interrupted by a crash are re-run first.
         if !self.rerun.is_empty() {
             let calls = std::mem::take(&mut self.rerun);
+            self.trace.log(
+                "tool_recovery",
+                json!({"turn": self.turn_count, "rerun_tool_call_ids": calls.iter().map(|c| c.id.clone()).collect::<Vec<_>>()}),
+            );
             for tc in calls {
                 let ctx = self.tool_ctx(cancel, &tc.id, tx);
                 let result = self
@@ -496,13 +667,35 @@ impl Agent {
             self.inject_steer(item, tx);
         }
         if !input.trim().is_empty() || !attachments.is_empty() {
-            let mut m = Message::user(input);
-            if !attachments.is_empty() {
-                m.attachments = Some(attachments);
+            let (mut content, images) =
+                build_user_content(&input, &attachments, self.client.spec.vision);
+            content.push_str(self.memory_nudge());
+            self.trace.log(
+                "user_message",
+                json!({"turn": self.turn_count, "content": content}),
+            );
+            let mut m = Message::user(content);
+            if !images.is_empty() {
+                m.attachments = Some(images);
             }
             self.messages.push(m);
         }
         self.conversation_loop(tx, cancel).await;
+        let status = if self.was_interrupted || cancel.is_cancelled() {
+            "interrupted"
+        } else {
+            "completed"
+        };
+        self.trace.log(
+            "turn_end",
+            json!({
+                "turn": self.turn_count,
+                "started_at": turn_started_at,
+                "duration": turn_start.elapsed().as_secs_f64(),
+                "iterations": self.iteration,
+                "status": status,
+            }),
+        );
         self.checkpoint();
         let _ = tx.send(self.usage_event());
         let _ = tx.send(AgentEvent::TurnEnd);
@@ -510,6 +703,10 @@ impl Agent {
 
     fn inject_steer(&mut self, item: QueuedMessageRecord, tx: &EventTx) {
         let _ = tx.send(AgentEvent::Steer(item.text.clone()));
+        self.trace.log(
+            "user_message",
+            json!({"turn": self.turn_count, "steer": true, "followup": false, "id": item.id, "content": item.text}),
+        );
         self.messages.push(Message::user(item.text));
         // Mark it dequeued only once the message carrying it is on disk.
         self.checkpoint();
@@ -524,6 +721,7 @@ impl Agent {
             session_path: Some(self.session_path.clone()),
             events: Some(tx.clone()),
             plan_mode: self.registry.plan_mode,
+            registry: Some(self.registry.clone()),
         }
     }
 
@@ -535,6 +733,7 @@ impl Agent {
         let mut overflow_recovered = false;
         while iteration < max_iterations {
             iteration += 1;
+            self.iteration += 1;
             if !auto_compaction_failed
                 && compaction::should_compact(
                     self.estimated_next_prompt_tokens(),
@@ -558,10 +757,15 @@ impl Agent {
                 Ok(true) => {}
                 Ok(false) => {
                     // interrupted mid-stream
+                    self.mark_interrupted("llm_stream");
                     let _ = tx.send(AgentEvent::Interrupted);
                     break;
                 }
                 Err(e) => {
+                    self.trace.log(
+                        "llm_error",
+                        json!({"turn": self.turn_count, "iteration": self.iteration, "error": e.to_string(), "context_overflow": e.is_context_overflow()}),
+                    );
                     if e.is_context_overflow() && !overflow_recovered {
                         overflow_recovered = true;
                         if self.compact("overflow", tx, cancel).await && !cancel.is_cancelled() {
@@ -569,6 +773,7 @@ impl Agent {
                             continue;
                         }
                     }
+                    self.last_run_failed = true;
                     let _ = tx.send(AgentEvent::Error(e.friendly()));
                     return;
                 }
@@ -653,10 +858,24 @@ impl Agent {
             self.execute_tool_calls(&calls, tx, cancel).await;
             self.checkpoint();
             if cancel.is_cancelled() {
+                self.mark_interrupted("tools");
                 let _ = tx.send(AgentEvent::Interrupted);
                 break;
             }
+            if self.ended_by_tool {
+                self.trace
+                    .log("turn_ended_by_tool", json!({"turn": self.turn_count}));
+                break;
+            }
         }
+    }
+
+    fn mark_interrupted(&mut self, phase: &str) {
+        self.was_interrupted = true;
+        self.trace.log(
+            "turn_interrupted",
+            json!({"turn": self.turn_count, "iteration": self.iteration, "phase": phase}),
+        );
     }
 
     /// Stream one response into a new assistant message.
@@ -670,7 +889,19 @@ impl Agent {
         let max_retries = self.config.llm.max_retries;
         let mut attempt = 0;
         loop {
-            let mut rx = self.client.chat(self.messages.clone(), tools.clone());
+            let mut client = self.client.clone();
+            if self.trace.enabled() {
+                let trace = self.trace.clone();
+                let (turn, iteration, att) = (self.turn_count, self.iteration, attempt + 1);
+                client.on_request = Some(Arc::new(move |body: &Value| {
+                    trace.log(
+                        "llm_request",
+                        json!({"turn": turn, "iteration": iteration, "attempt": att, "body": body}),
+                    );
+                }));
+            }
+            let started_at = utc_now_iso();
+            let mut rx = client.chat(self.messages.clone(), tools.clone());
             let mut text = String::new();
             let mut reasoning = String::new();
             let mut signature: Option<String> = None;
@@ -735,6 +966,10 @@ impl Agent {
             if let Some(e) = failure {
                 if e.is_retryable() && attempt < max_retries {
                     attempt += 1;
+                    self.trace.log(
+                        "llm_stream_retry",
+                        json!({"turn": self.turn_count, "iteration": self.iteration, "attempt": attempt, "error": e.to_string(), "discarded_chars": text.chars().count(), "discarded_tool_calls": calls.len()}),
+                    );
                     let _ = tx.send(AgentEvent::Retry {
                         attempt,
                         reason: e.to_string(),
@@ -749,6 +984,25 @@ impl Agent {
                 return Err(e);
             }
             let meta = meta.unwrap_or_default();
+            let totals = normalize_usage(meta.usage.as_ref());
+            self.trace.log(
+                "llm_response",
+                json!({
+                    "turn": self.turn_count,
+                    "iteration": self.iteration,
+                    "started_at": started_at,
+                    "duration": meta.duration,
+                    "ttft": meta.ttft,
+                    "finish_reason": meta.finish_reason,
+                    "usage": meta.usage,
+                    "cached_tokens": totals.cached_tokens,
+                    "content_chars": text.chars().count(),
+                    "reasoning_chars": reasoning.chars().count(),
+                    "content": text,
+                    "reasoning": reasoning,
+                    "tool_calls": calls.iter().map(|c| json!({"id": c.id, "name": c.name(), "arguments": c.function.arguments})).collect::<Vec<_>>(),
+                }),
+            );
             let mut m = Message::assistant(text);
             if !reasoning.is_empty() {
                 m.reasoning = Some(reasoning);
@@ -792,7 +1046,13 @@ impl Agent {
                 name: tc.name().into(),
                 arguments: tc.function.arguments.clone(),
             });
+            self.trace.log(
+                "tool_call",
+                json!({"turn": self.turn_count, "iteration": self.iteration, "id": tc.id, "name": tc.name(), "arguments": tc.function.arguments}),
+            );
         }
+        let started_at = utc_now_iso();
+        let batch_start = std::time::Instant::now();
         let mut results: Vec<Option<ToolResult>> = vec![None; calls.len()];
         if self.config.tools.parallel {
             let mut running = FuturesUnordered::new();
@@ -839,6 +1099,17 @@ impl Agent {
         let vision = self.client.spec.vision;
         for (tc, r) in calls.iter().zip(results) {
             let r = r.unwrap_or_else(|| ToolResult::err("tool did not run"));
+            self.trace.log(
+                "tool_result",
+                json!({
+                    "turn": self.turn_count, "iteration": self.iteration, "id": tc.id, "name": tc.name(),
+                    "success": r.success, "output": r.output, "error": r.error,
+                    "started_at": started_at, "duration": batch_start.elapsed().as_secs_f64(),
+                }),
+            );
+            if r.end_turn {
+                self.ended_by_tool = true;
+            }
             let mut m = Message::tool(tc.id.clone(), r.content_for_model());
             if vision {
                 m.attachments = r.attachments;
@@ -928,6 +1199,10 @@ impl Agent {
         };
         self.checkpoint();
         self.journal(&[session::compaction_record(&record)]);
+        self.trace.log(
+            "compaction",
+            json!({"turn": self.turn_count, "trigger": trigger, "tokens_before": before, "tokens_after": after, "first_kept_entry_id": record.first_kept_entry_id}),
+        );
         self.compactions.push(record);
         self.last_prompt_tokens = None;
         self.prompt_watermark = 0;
@@ -981,6 +1256,8 @@ impl Agent {
         meta.title = title;
         meta.parent_session = Some(self.meta.id.clone());
         meta.plan_mode = self.meta.plan_mode;
+        meta.daily_mode = self.meta.daily_mode;
+        meta.code_mode = self.meta.code_mode;
         meta
     }
 
@@ -1027,7 +1304,14 @@ impl Agent {
     pub fn reset_to(&mut self, meta: SessionMeta) {
         let path = self.session_dir.join(format!("{}.jsonl", meta.id));
         self.client.prompt_cache_key = Some(meta.id.clone());
+        let cfg = self.config.clone();
+        self.registry.plan_mode = meta.plan_mode;
+        self.registry.set_daily(meta.daily_mode, &cfg);
+        self.registry.code_mode = meta.code_mode;
         self.meta = meta;
+        if !cfg!(test) {
+            self.trace = TraceLogger::open(trace_path_for(&path));
+        }
         self.session_path = path.clone();
         *self.steer.path.lock().unwrap() = Some(path);
         self.messages.clear();
@@ -1042,10 +1326,12 @@ impl Agent {
     }
 
     pub fn new_session(&mut self) {
-        let meta = SessionMeta::new(new_session_id(), &self.workdir, &self.meta.model);
+        let mut meta = SessionMeta::new(new_session_id(), &self.workdir, &self.meta.model);
+        // The posture survives /new; plan mode and the goal do not.
+        meta.daily_mode = self.meta.daily_mode;
+        meta.code_mode = self.meta.code_mode;
         self.reset_to(meta);
-        self.registry.plan_mode = false;
-        self.init_system_message();
+        self.log_session_start(false);
     }
 }
 

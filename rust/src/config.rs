@@ -1,8 +1,8 @@
 //! Configuration: `~/.limbo/config.toml`, the same file the Python version reads.
 //!
 //! Every section and field has a default, so a missing file — or a file that
-//! only sets `[llm] model` — just works. Sections the Rust version does not
-//! use (e.g. `[daily]`, `[goal]`) are ignored instead of rejected.
+//! only sets `[llm] model` — just works. Unknown keys are ignored instead of
+//! rejected, so a config written for a newer Python release still loads.
 //!
 //! 🦀 `#[serde(default)]` on a struct means "fill any missing field from
 //! `Default::default()`". We implement `Default` by hand where the defaults
@@ -129,19 +129,150 @@ impl Default for CompactionSettings {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct SubagentSettings {
+    /// false: no supervisor at all (no board, no /agents, no task tools).
     pub enabled: bool,
-    /// Max tool-call iterations of one subagent run.
-    pub max_iterations: u32,
-    /// Model for subagents (empty = the main model).
+    /// off: no task tools for the model; suggest: the model's plan waits
+    /// for the user's approval; on: it runs at once.
+    pub auto: String,
+    pub max_parallel: usize,
+    /// Live (unfinished) tasks at a time.
+    pub max_tasks: usize,
+    /// Per-task budget of fresh tokens (0 = unlimited).
+    pub task_token_budget: u64,
+    /// Model for profiles with `model: cheap` (empty = the main model).
     pub cheap_model: String,
+    /// Which notices wake an idle main agent.
+    pub wake_main_on: Vec<String>,
+    pub on_dep_fail: String,
+    /// Tasks that were running when the process stopped: ask / auto / pause.
+    pub on_resume: String,
+    pub default_isolation: String,
+    /// Characters of a finished task's summary delivered to the main agent.
+    pub result_chars: usize,
+    /// Auto checkpoint every N tool calls of a subagent (0 = off).
+    pub auto_checkpoint_every: usize,
+    /// Max tool-call iterations of one subagent run (Rust-only knob).
+    pub max_iterations: u32,
 }
 
 impl Default for SubagentSettings {
     fn default() -> Self {
         Self {
             enabled: true,
-            max_iterations: 30,
+            auto: "suggest".into(),
+            max_parallel: 3,
+            max_tasks: 12,
+            task_token_budget: 400_000,
             cheap_model: String::new(),
+            wake_main_on: vec!["question".into(), "alert".into(), "wave_done".into()],
+            on_dep_fail: "notify".into(),
+            on_resume: "ask".into(),
+            default_isolation: "shared".into(),
+            result_chars: 2000,
+            auto_checkpoint_every: 8,
+            max_iterations: 50,
+        }
+    }
+}
+
+/// `[web_search]`: the `web_search` tool.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct WebSearchSettings {
+    pub enabled: bool,
+    /// Backend id (only "deepseek" for now).
+    pub provider: String,
+    /// Unset: inherit the matching model provider's key.
+    pub api_key: Option<String>,
+    pub base_url: Option<String>,
+    pub count: u32,
+    pub timeout: f64,
+}
+
+impl Default for WebSearchSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            provider: "deepseek".into(),
+            api_key: None,
+            base_url: None,
+            count: 10,
+            timeout: 30.0,
+        }
+    }
+}
+
+/// `[daily]`: the daily (non-coding) session posture.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct DailySettings {
+    /// Workdir of `limbo daily` sessions.
+    pub workdir: String,
+    /// Model for `limbo daily` (empty = `[llm] model`).
+    pub model: String,
+    /// Persistent memory (`~/.limbo/memory/`).
+    pub memory: bool,
+    pub user_chars: usize,
+    pub notes_chars: usize,
+    /// Remind the model about memory after this many quiet turns (0 = never).
+    pub memory_nudge_turns: u32,
+    /// Automatic skill review after this many tool rounds (0 = only /learn).
+    #[serde(alias = "learn_after_tool_calls")]
+    pub learn_after_rounds: u32,
+    pub learn_cooldown_turns: u32,
+    pub fetch_max_chars: usize,
+    pub fetch_timeout: f64,
+    /// TUI look while daily mode is on: "dawn" or "badge".
+    pub look: String,
+}
+
+impl Default for DailySettings {
+    fn default() -> Self {
+        Self {
+            workdir: "~/limbo-daily".into(),
+            model: String::new(),
+            memory: true,
+            user_chars: 1500,
+            notes_chars: 2500,
+            memory_nudge_turns: 10,
+            learn_after_rounds: 10,
+            learn_cooldown_turns: 3,
+            fetch_max_chars: 20_000,
+            fetch_timeout: 30.0,
+            look: "dawn".into(),
+        }
+    }
+}
+
+/// `[goal]`: closed-loop /goal mode.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct GoalSettings {
+    pub max_rounds: u32,
+    pub verify_timeout_ms: u64,
+}
+
+impl Default for GoalSettings {
+    fn default() -> Self {
+        Self {
+            max_rounds: 10,
+            verify_timeout_ms: 600_000,
+        }
+    }
+}
+
+/// `[queue]`: what happens to queued messages when a turn fails.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct QueueSettings {
+    /// "continue" | "keep" | "withdraw".
+    pub after_failed_run: String,
+}
+
+impl Default for QueueSettings {
+    fn default() -> Self {
+        Self {
+            after_failed_run: "continue".into(),
         }
     }
 }
@@ -152,8 +283,12 @@ pub struct Config {
     pub llm: LlmConfig,
     pub ui: UiConfig,
     pub tools: ToolsConfig,
+    pub web_search: WebSearchSettings,
     pub compaction: CompactionSettings,
+    pub goal: GoalSettings,
+    pub queue: QueueSettings,
     pub subagents: SubagentSettings,
+    pub daily: DailySettings,
     pub providers: HashMap<String, ProviderOverride>,
 }
 
@@ -178,6 +313,26 @@ impl Config {
                 if cfg.compaction.reserve_tokens < 1024 {
                     warnings.push("reserve_tokens is too small; reset to 16384".into());
                     cfg.compaction.reserve_tokens = 16_384;
+                }
+                if cfg.daily.look != "dawn" && cfg.daily.look != "badge" {
+                    warnings.push(format!("daily look={:?} is unknown; reset to 'dawn'", cfg.daily.look));
+                    cfg.daily.look = "dawn".into();
+                }
+                if cfg.web_search.count < 1 {
+                    cfg.web_search.count = 10;
+                }
+                if !matches!(cfg.queue.after_failed_run.as_str(), "continue" | "keep" | "withdraw") {
+                    cfg.queue.after_failed_run = "continue".into();
+                }
+                for (field, value, default) in [
+                    ("user_chars", &mut cfg.daily.user_chars, 1500),
+                    ("notes_chars", &mut cfg.daily.notes_chars, 2500),
+                    ("fetch_max_chars", &mut cfg.daily.fetch_max_chars, 20_000),
+                ] {
+                    if *value < 100 {
+                        warnings.push(format!("daily {field}={value} is too small; reset to {default}"));
+                        *value = default;
+                    }
                 }
                 if cfg.compaction.keep_recent_tokens < 1000 {
                     warnings.push("keep_recent_tokens is too small; reset to 20000".into());

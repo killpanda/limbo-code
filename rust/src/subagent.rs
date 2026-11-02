@@ -173,6 +173,7 @@ impl Tool for TaskTool {
                 output: Some(format!("{header}\n(interrupted)\n{answer}")),
                 error: Some("interrupted".into()),
                 attachments: None,
+                end_turn: false,
             };
         }
         ToolResult::ok(format!("{header}\n\n{answer}"))

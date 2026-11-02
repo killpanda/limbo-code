@@ -15,7 +15,7 @@ use super::theme::{self, THEMES, Theme};
 use crate::agent::{Agent, AgentEvent, EventTx, SteerQueue};
 use crate::config::{self, Config};
 use crate::llm::catalog;
-use crate::prompt::{Skill, discover_skills};
+use crate::skills::{Skill, discover_skills};
 use crate::session::{self, SessionMeta};
 
 /// What the agent is doing right now (drives the status bar).
@@ -182,7 +182,7 @@ impl App {
             .clone()
             .or_else(|| std::env::var("LIMBO_MOTION").ok());
         let entries = entries_from_history(&agent.messages);
-        let skills = discover_skills(&agent.workdir);
+        let skills = discover_skills(&agent.workdir, agent.daily_mode());
         let mut app = Self {
             theme,
             fx: Fx::new(motion.as_deref()),
