@@ -12,3 +12,6 @@ dist/
 build/
 .pi-subagents/
 snapshot_report.html
+
+# Rust build output
+rust/target/
