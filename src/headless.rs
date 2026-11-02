@@ -573,7 +573,12 @@ impl Repl {
             },
             "daily-mode" => match parse_toggle(arg, agent.daily_mode()) {
                 None => self.p.line(cmds::DAILY_USAGE),
-                Some(on) if agent.set_daily_mode(on) => self.p.line(cmds::daily_toggle_notice(on)),
+                Some(on) if agent.set_daily_mode(on) => {
+                    self.p.line(cmds::daily_toggle_notice(on));
+                    if let Some(n) = cmds::web_search_missing_notice(agent) {
+                        self.p.line(&n);
+                    }
+                }
                 Some(on) => self.p.line(&cmds::unchanged_notice("Daily mode ", on)),
             },
             "memory" | "learn" if !agent.daily_mode() => {
@@ -778,6 +783,9 @@ pub async fn run_repl(agent: Agent, json_mode: bool) -> i32 {
             );
             if let Some(g) = pump::live_goal(a) {
                 println!("🎯 goal：{}（{}）", g.text, g.status);
+            }
+            if let Some(n) = cmds::web_search_missing_notice(a) {
+                println!("{n}");
             }
         }
     }
