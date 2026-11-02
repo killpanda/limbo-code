@@ -11,7 +11,8 @@ const DESCRIPTION: &str = "Save durable facts to persistent memory that survives
 injected into every future session, so keep entries compact and high-signal. Writes take effect from the next \
 session.\n\nHOW: make all changes to one target in ONE call via 'operations' (each item: {action, content?, \
 old_text?}). The batch applies atomically and the character limit is checked only on the final result, so one \
-call can remove or patch stale entries to free room and add new ones.\n\nWHEN: only for facts that hold in every \
+call can remove or patch stale entries to free room and add new ones. When an entry on the same subject exists, patch it instead of adding a \
+near-duplicate.\n\nWHEN: only for facts that hold in every \
 session regardless of task: who the user is, their preferences and style, stable environment facts, standing \
 conventions, corrections the user made.\n\nSKIP: trivial or easily re-discovered facts, raw data, task progress, \
 completed-work logs, temporary TODOs. Reusable procedures belong in a skill.\n\nTARGETS: 'user' = who the user is \

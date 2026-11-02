@@ -395,6 +395,9 @@ impl App {
                 ),
             );
         }
+        if let Some(n) = app.agent.as_ref().and_then(cmds::web_search_missing_notice) {
+            app.notice(NoticeKind::Warn, n);
+        }
         if !app.steer.is_empty() {
             app.notice(
                 NoticeKind::Info,
@@ -1790,6 +1793,7 @@ impl App {
                     Some(on) if a.set_daily_mode(on) => {
                         self.skills_scope = (a.workdir.clone(), on);
                         self.skills = discover_skills(&a.workdir, on);
+                        let search_missing = cmds::web_search_missing_notice(a);
                         self.notice(
                             NoticeKind::Info,
                             if on {
@@ -1799,6 +1803,9 @@ impl App {
                             },
                         );
                         self.notice(NoticeKind::Info, cmds::daily_toggle_notice(on));
+                        if let Some(n) = search_missing {
+                            self.notice(NoticeKind::Warn, n);
+                        }
                     }
                     Some(on) => self.toast(cmds::unchanged_notice("Daily mode ", on)),
                 }

@@ -74,7 +74,8 @@ impl MemorySnapshot {
         }
         Some(format!(
             "\n\n<memory>\nPersistent memory from earlier sessions (a snapshot taken when this session started; \
-             facts the user states now take precedence):\n\n{}\n</memory>\n",
+             facts the user states now take precedence). Apply each entry where it fits the current request; a \
+             preference about how to run work tasks does not turn a plain question into a task:\n\n{}\n</memory>\n",
             sections.join("\n\n")
         ))
     }

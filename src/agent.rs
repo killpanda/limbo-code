@@ -1619,6 +1619,22 @@ pub(crate) mod tests {
         c
     }
 
+    #[test]
+    fn web_search_notice_only_in_daily_mode_when_enabled_but_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("sessions");
+        let mut cfg = test_config("http://127.0.0.1:9/v1");
+        // An unknown provider never registers, whatever keys this machine has.
+        cfg.web_search.provider = "nope".into();
+        let mut agent = Agent::new(cfg, dir.path(), &sessions).unwrap();
+        assert!(crate::commands::web_search_missing_notice(&agent).is_none());
+        agent.set_daily_mode(true);
+        let n = crate::commands::web_search_missing_notice(&agent).unwrap();
+        assert!(n.contains("\"nope\""));
+        agent.config.web_search.enabled = false;
+        assert!(crate::commands::web_search_missing_notice(&agent).is_none());
+    }
+
     #[tokio::test]
     async fn full_turn_with_tool_call_and_resume() {
         let dir = tempfile::tempdir().unwrap();

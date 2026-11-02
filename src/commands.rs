@@ -33,6 +33,30 @@ pub fn daily_toggle_notice(enabled: bool) -> &'static str {
     }
 }
 
+/// Why `web_search` is missing in daily mode, or None when it is registered
+/// or the user turned it off (`[web_search] enabled = false`).
+///
+/// The tool is left out quietly when no DeepSeek key resolves, and a daily
+/// session without search falls back to guessing or to `web_fetch` on URLs
+/// it already knows, so say it once where the user can see it.
+pub fn web_search_missing_notice(agent: &crate::agent::Agent) -> Option<String> {
+    let s = &agent.config.web_search;
+    if !agent.daily_mode() || !s.enabled || agent.registry.get("web_search").is_some() {
+        return None;
+    }
+    Some(if s.provider != "deepseek" {
+        format!(
+            "web_search 未启用：不支持的 provider \"{}\"（目前只支持 deepseek）",
+            s.provider
+        )
+    } else {
+        "web_search 未启用：找不到 DeepSeek API key。在 ~/.limbo/config.toml 的 [web_search] 里设 \
+         api_key，或 `limbo auth` 登录 deepseek，或设置 DEEPSEEK_API_KEY；不需要搜索可设 \
+         [web_search] enabled = false"
+            .to_string()
+    })
+}
+
 pub fn daily_only_notice(command: &str) -> String {
     format!("{command} 只在 daily 模式可用（/daily-mode on 开启）")
 }

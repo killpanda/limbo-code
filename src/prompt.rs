@@ -24,8 +24,15 @@ const GUIDELINES_TAIL: &str = "- Use read to examine files before editing\n- Use
 (edits[].old_text must match exactly)\n- Use write only for new files or complete rewrites\n- Be concise in your \
 responses\n- Show file paths clearly when working with files";
 
-const DAILY_GUIDELINES_TAIL: &str = "- For current facts, search (web_search) and read the sources (web_fetch) \
-before answering; cite the URLs you relied on\n- Save substantial outputs (notes, reports, drafts) as files in the \
+/// Daily mode answers a lot of plain questions. Without this line, models
+/// with a shell treat "explain X" as "prove X on this machine" and spend a
+/// tool call per claim before replying.
+const DAILY_ANSWER_DIRECTLY: &str = "- Answer questions you can answer from your own knowledge (concepts, \
+explanations, opinions, comparisons) directly, without tools. Use tools only when the answer depends on the user's \
+files, this machine, the web or current facts, or when the user asks you to check or run something\n- When you do \
+use tools, make independent calls together in one step instead of one call per step";
+
+const DAILY_GUIDELINES_TAIL: &str = "- Save substantial outputs (notes, reports, drafts) as files in the \
 working directory and give their paths\n- Reply in the user's language; lead with the answer and keep it concise";
 
 pub fn first_sentence(d: &str) -> &str {
@@ -83,6 +90,16 @@ pub fn build_system_prompt_with(
     }
     if has("task") {
         s.push_str("\n- Delegate self-contained research or side work to a subagent with task; run several in parallel when they are independent");
+    }
+    if daily {
+        s.push('\n');
+        s.push_str(DAILY_ANSWER_DIRECTLY);
+        // Only name web_search when it is registered (it needs a provider key).
+        s.push_str(if has("web_search") {
+            "\n- For current facts, search (web_search) and read the sources (web_fetch) before answering; cite the URLs you relied on"
+        } else {
+            "\n- For current facts, read the sources (web_fetch) before answering; cite the URLs you relied on"
+        });
     }
     s.push('\n');
     s.push_str(if daily {
@@ -150,5 +167,17 @@ mod tests {
         let p = build_system_prompt(&reg, Path::new("/nonexistent"));
         assert!(p.contains("- read: Read the contents of a file"));
         assert!(!p.contains("- bash:"));
+        assert!(!p.contains("without tools"));
+    }
+
+    #[test]
+    fn daily_prompt_answers_directly_and_names_only_registered_search() {
+        let mut reg = ToolRegistry::core(true);
+        reg.daily_mode = true;
+        let p = build_system_prompt(&reg, Path::new("/nonexistent"));
+        assert!(p.contains("directly, without tools"));
+        assert!(p.contains("independent calls together in one step"));
+        assert!(!p.contains("web_search"));
+        assert!(p.contains("read the sources (web_fetch)"));
     }
 }
