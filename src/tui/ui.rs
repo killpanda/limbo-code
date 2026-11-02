@@ -199,8 +199,13 @@ fn draw_landing(f: &mut Frame, app: &App, area: Rect) {
         )));
     }
     lines.push(Line::default());
+    let daily = app.info.daily_mode;
     lines.push(Line::from(Span::styled(
-        "terminal coding agent · rust edition",
+        if daily {
+            "白天的事，也可以交给我。"
+        } else {
+            "terminal coding agent · rust edition"
+        },
         Style::default().fg(t.dim).add_modifier(Modifier::ITALIC),
     )));
     lines.push(Line::default());
@@ -223,13 +228,23 @@ fn draw_landing(f: &mut Frame, app: &App, area: Rect) {
         ]));
     }
     lines.push(Line::default());
-    let tips: [(&str, &str); 5] = [
-        ("/", "命令"),
-        ("ctrl+r", "历史会话"),
-        ("shift+tab", "思考强度"),
-        ("ctrl+o", "展开工具输出"),
-        ("esc", "打断"),
-    ];
+    let tips: [(&str, &str); 5] = if daily {
+        [
+            ("粘贴链接", "读网页"),
+            ("/memory", "看看我记得什么"),
+            ("/learn", "把经验沉淀成技能"),
+            ("/", "命令"),
+            ("ctrl+r", "历史会话"),
+        ]
+    } else {
+        [
+            ("/", "命令"),
+            ("ctrl+r", "历史会话"),
+            ("shift+tab", "思考强度"),
+            ("ctrl+o", "展开工具输出"),
+            ("esc", "打断"),
+        ]
+    };
     let mut tip_spans = Vec::new();
     for (i, (k, v)) in tips.iter().enumerate() {
         if i > 0 {

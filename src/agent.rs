@@ -273,13 +273,31 @@ pub struct Agent {
 }
 
 impl Agent {
-    /// A fresh session.
+    /// A fresh coding session.
+    #[cfg(test)]
     pub fn new(config: Config, workdir: &Path, session_dir: &Path) -> anyhow::Result<Self> {
+        Self::create(config, workdir, session_dir, false)
+    }
+
+    /// A fresh session, born in daily mode when `daily` is set (`limbo
+    /// daily`): the very first system prompt, tool list and meta line are
+    /// already the daily ones, as in the Python version.
+    pub fn create(
+        config: Config,
+        workdir: &Path,
+        session_dir: &Path,
+        daily: bool,
+    ) -> anyhow::Result<Self> {
         let client = LlmClient::new(&config)?;
         let id = new_session_id();
-        let meta = SessionMeta::new(id.clone(), workdir, client.model_id());
+        let mut meta = SessionMeta::new(id.clone(), workdir, client.model_id());
+        meta.daily_mode = daily;
         let path = session_dir.join(format!("{id}.jsonl"));
         let mut agent = Self::assemble(config, client, workdir, session_dir, meta, path);
+        if daily {
+            let cfg = agent.config.clone();
+            agent.registry.set_daily(true, &cfg);
+        }
         agent.attach_supervisor();
         agent.init_system_message();
         agent.log_session_start(false);
@@ -1655,6 +1673,43 @@ pub(crate) mod tests {
         let last = resumed.messages.last().unwrap();
         assert_eq!(last.role, Role::Tool);
         assert_eq!(last.text(), history::PARTIAL_CONTENT);
+    }
+
+    #[test]
+    fn daily_session_is_born_daily_and_resumes_in_its_own_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        // Sessions outside the workdir: the prompt's project facts count files.
+        let store = tempfile::tempdir().unwrap();
+        let sessions = store.path().join("sessions");
+        let mut cfg = test_config("http://127.0.0.1:9/v1");
+        cfg.daily.memory = false;
+        let has_fetch = |a: &Agent| a.registry.get("web_fetch").is_some();
+
+        // `limbo daily`: daily from the first system prompt and meta line.
+        let mut daily = Agent::create(cfg.clone(), dir.path(), &sessions, true).unwrap();
+        assert!(daily.daily_mode());
+        assert!(daily.meta.daily_mode);
+        assert!(has_fetch(&daily));
+        assert!(!daily.needs_rewrite);
+        let daily_prompt = daily.messages[0].text().to_string();
+        daily.messages.push(Message::user("hi"));
+        daily.checkpoint();
+
+        // A plain session stays a coding one.
+        let mut code = Agent::new(cfg.clone(), dir.path(), &sessions).unwrap();
+        assert!(!code.daily_mode());
+        assert_ne!(code.messages[0].text(), daily_prompt);
+        code.messages.push(Message::user("hi"));
+        code.checkpoint();
+
+        // Resuming restores each session's own mode.
+        let d = Agent::resume(cfg.clone(), daily.session_path(), &sessions).unwrap();
+        assert!(d.daily_mode());
+        assert!(has_fetch(&d));
+        assert_eq!(d.messages[0].text(), daily_prompt);
+        let c = Agent::resume(cfg, code.session_path(), &sessions).unwrap();
+        assert!(!c.daily_mode());
+        assert!(!has_fetch(&c));
     }
 
     #[tokio::test]
