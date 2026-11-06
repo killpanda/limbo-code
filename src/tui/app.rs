@@ -4,7 +4,10 @@ use crate::integrations::{Reporters, State, TurnOutcome};
 use std::sync::Arc;
 use std::time::Instant;
 
-use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
+use ratatui::layout::{Margin, Position, Rect};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -15,6 +18,7 @@ use super::fx::Fx;
 use super::game2048::{Dir, Game};
 use super::input::Input;
 use super::paste::{self, PasteStore};
+use super::select::Selection;
 use super::theme::{self, THEMES, Theme};
 use crate::agent::{Agent, AgentEvent, EventTx, FOLLOW_UP, STEER, SteerQueue};
 use crate::background::BackgroundEvent;
@@ -236,7 +240,7 @@ pub const COMMANDS: &[SlashCommand] = &[
     SlashCommand {
         name: "mouse",
         args: "",
-        help: "切换鼠标捕获（关闭后可用终端原生选择复制）",
+        help: "切换鼠标捕获（开：拖动选择自动复制；关：终端原生选择）",
     },
     SlashCommand {
         name: "clear",
@@ -279,6 +283,12 @@ pub struct App {
     last_ctrl_c: Option<Instant>,
     pub mouse_capture: bool,
     pub mouse_changed: bool,
+    /// Mouse text selection (drawn reversed; copied on release).
+    pub selection: Option<Selection>,
+    /// A drag is in progress.
+    selecting: bool,
+    /// The next frame reads the selection's text back for copying.
+    pub copy_selection: bool,
     pub toast: Option<(String, Instant)>,
     pub skills: Vec<Skill>,
     /// Workdir and daily flag the skills were discovered for (the agent is
@@ -375,6 +385,9 @@ impl App {
             last_ctrl_c: None,
             mouse_capture: true,
             mouse_changed: false,
+            selection: None,
+            selecting: false,
+            copy_selection: false,
             toast: None,
             skills,
             skills_scope,
@@ -1058,18 +1071,83 @@ impl App {
             self.toast("还没有可复制的回复");
             return;
         };
-        if clipboard::write_text(&text) {
-            self.toast("已复制最后一条回复");
+        self.copy_text(&text, "已复制最后一条回复");
+    }
+
+    /// Copy text with the native tool, else OSC 52.
+    fn copy_text(&mut self, text: &str, done: &str) {
+        if clipboard::write_text(text) {
+            self.toast(done.to_string());
         } else {
-            self.pending_osc52 = Some(clipboard::osc52(&text));
-            self.toast("已通过终端（OSC 52）复制");
+            self.pending_osc52 = Some(clipboard::osc52(text));
+            self.toast(format!("{done}（通过终端 OSC 52）"));
         }
     }
 
+    /// The text of a finished mouse selection, read back from the frame.
+    pub fn copy_selected(&mut self, text: String) {
+        if text.trim().is_empty() {
+            return;
+        }
+        let n = text.chars().count();
+        self.copy_text(&text, &format!("已复制 {n} 个字符"));
+    }
+
+    /// The screen region a selection starting at `p` stays within.
+    fn selection_region(&self, p: Position) -> Rect {
+        let a = self.fx.areas;
+        if self.popup.is_some() {
+            return a.screen;
+        }
+        if a.input.contains(p) {
+            return a.input.inner(Margin {
+                horizontal: 1,
+                vertical: 1,
+            });
+        }
+        if a.chat.contains(p) {
+            // The chat text sits inside a two-column margin; the scrollbar
+            // is on the last column.
+            return a.chat.inner(Margin {
+                horizontal: 2,
+                vertical: 0,
+            });
+        }
+        a.screen
+    }
+
     pub fn on_mouse(&mut self, m: MouseEvent) {
+        let p = Position::new(m.column, m.row);
         match m.kind {
-            MouseEventKind::ScrollUp => self.scroll_by(3),
-            MouseEventKind::ScrollDown => self.scroll_by(-3),
+            MouseEventKind::ScrollUp => {
+                self.selection = None;
+                self.scroll_by(3);
+            }
+            MouseEventKind::ScrollDown => {
+                self.selection = None;
+                self.scroll_by(-3);
+            }
+            MouseEventKind::Down(MouseButton::Left) => {
+                self.selection = Some(Selection::new(self.selection_region(p), p));
+                self.selecting = true;
+            }
+            MouseEventKind::Drag(MouseButton::Left) if self.selecting => {
+                if let Some(sel) = &mut self.selection {
+                    sel.extend(p);
+                }
+            }
+            MouseEventKind::Up(MouseButton::Left) if self.selecting => {
+                self.selecting = false;
+                if let Some(sel) = &mut self.selection {
+                    sel.extend(p);
+                    if sel.is_empty() {
+                        // A plain click clears the selection.
+                        self.selection = None;
+                    } else {
+                        self.copy_selection = true;
+                    }
+                }
+            }
             _ => return,
         }
         self.dirty = true;
@@ -1084,6 +1162,9 @@ impl App {
             return;
         }
         self.dirty = true;
+        if !self.selecting {
+            self.selection = None;
+        }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);

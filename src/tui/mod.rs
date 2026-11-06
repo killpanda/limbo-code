@@ -13,6 +13,7 @@ mod game2048;
 mod input;
 mod markdown;
 mod paste;
+mod select;
 mod text;
 mod theme;
 mod ui;
@@ -115,10 +116,17 @@ async fn event_loop(
             // Synchronized update: terminals that support it show the frame
             // all at once instead of cell by cell (others ignore it).
             execute!(stdout(), BeginSynchronizedUpdate)?;
+            let mut copied = None;
             terminal.draw(|f| {
                 ui::draw(f, &mut app);
                 let theme = app.theme;
                 app.fx.process(elapsed, f.buffer_mut(), &theme);
+                if let Some(sel) = &app.selection {
+                    if std::mem::take(&mut app.copy_selection) {
+                        copied = Some(select::extract(f.buffer_mut(), sel));
+                    }
+                    select::highlight(f.buffer_mut(), sel);
+                }
             })?;
             // The caret is drawn as a cell (ui::draw_input); the terminal
             // cursor stays hidden (ratatui hides it when the frame sets no
@@ -128,6 +136,9 @@ async fn event_loop(
             }
             execute!(stdout(), EndSynchronizedUpdate)?;
             app.dirty = false;
+            if let Some(text) = copied {
+                app.copy_selected(text);
+            }
         }
         if app.quit {
             break;
