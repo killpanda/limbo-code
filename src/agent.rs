@@ -41,6 +41,7 @@ use crate::llm::usage::{estimate_tokens, normalize_usage};
 use crate::llm::{LlmClient, LlmError};
 use crate::memory::{MEMORY_NUDGE, MemorySnapshot, MemoryStore, memory_dir};
 use crate::models::{Attachment, LlmEvent, Message, Role, ToolCall, ToolResult, new_id};
+use crate::posture::Posture;
 use crate::prompt::{PromptExtras, build_system_prompt_with};
 use crate::session::{self, CompactionRecord, LoadedSession, QueuedMessageRecord, SessionMeta};
 use crate::subagents::Supervisor;
@@ -334,11 +335,8 @@ impl Agent {
             meta.clone(),
             path.to_path_buf(),
         );
-        agent.registry.plan_mode = meta.plan_mode;
-        if meta.daily_mode {
-            agent.registry.set_daily(true, &agent.config);
-        }
-        agent.registry.code_mode = meta.code_mode;
+        let cfg = agent.config.clone();
+        agent.registry.set_posture(Posture::from_meta(&meta), &cfg);
         agent.file_created = true;
         agent.persisted = raw_message_ids.into_iter().collect();
         agent.compactions = compactions;
@@ -564,14 +562,17 @@ impl Agent {
     pub fn session_total_tokens(&self) -> u64 {
         self.meta.usage.values().map(|u| u.total_tokens).sum()
     }
+    pub fn posture(&self) -> Posture {
+        self.registry.posture
+    }
     pub fn plan_mode(&self) -> bool {
-        self.registry.plan_mode
+        self.posture().plan()
     }
     pub fn daily_mode(&self) -> bool {
-        self.registry.daily_mode
+        self.posture().daily()
     }
     pub fn code_mode(&self) -> bool {
-        self.registry.code_mode
+        self.posture().code()
     }
     /// The memory store `/memory` shows (None when `[daily] memory = false`).
     pub fn memory_store(&self) -> Option<MemoryStore> {
@@ -620,45 +621,36 @@ impl Agent {
         }
     }
 
+    /// `/plan`: the read-only policy.
     pub fn set_plan_mode(&mut self, on: bool) -> bool {
-        if self.registry.plan_mode == on {
-            return false;
-        }
-        self.registry.plan_mode = on;
-        self.meta.plan_mode = on;
-        self.mode_changed("plan_mode", on);
-        true
+        self.set_posture(self.posture().with_plan(on), "plan_mode", on)
     }
 
-    /// Daily mode: swap the daily tools and the assistant prompt.
+    /// Daily mode: the daily capability set (tools + assistant prompt).
     pub fn set_daily_mode(&mut self, on: bool) -> bool {
-        if self.registry.daily_mode == on {
+        self.set_posture(self.posture().with_daily(on), "daily_mode", on)
+    }
+
+    /// Code Mode: present the catalog as `run_code` (+ the SDK prompt).
+    pub fn set_code_mode(&mut self, on: bool) -> bool {
+        self.set_posture(self.posture().with_code(on), "code_mode", on)
+    }
+
+    /// Change one posture dimension; false when nothing changed. `kind`
+    /// and `on` name the change in the trace.
+    fn set_posture(&mut self, posture: Posture, kind: &str, on: bool) -> bool {
+        if posture == self.posture() {
             return false;
         }
         let cfg = self.config.clone();
-        self.registry.set_daily(on, &cfg);
-        self.meta.daily_mode = on;
-        self.mode_changed("daily_mode", on);
-        true
-    }
-
-    /// Code Mode: collapse the catalog to `run_code` (+ the SDK prompt).
-    pub fn set_code_mode(&mut self, on: bool) -> bool {
-        if self.registry.code_mode == on {
-            return false;
-        }
-        self.registry.code_mode = on;
-        self.meta.code_mode = on;
-        self.mode_changed("code_mode", on);
-        true
-    }
-
-    fn mode_changed(&mut self, kind: &str, on: bool) {
+        self.registry.set_posture(posture, &cfg);
+        posture.write_meta(&mut self.meta);
         self.init_system_message();
         self.needs_rewrite = true; // system prompt changed in place
         self.persist_meta();
         self.trace
             .log(kind, json!({"turn": self.turn_count, "enabled": on}));
+        true
     }
 
     /// Daily mode: a memory reminder every N quiet turns.
@@ -1460,9 +1452,7 @@ impl Agent {
         let mut meta = SessionMeta::new(new_session_id(), &self.workdir, &self.meta.model);
         meta.title = title;
         meta.parent_session = Some(self.meta.id.clone());
-        meta.plan_mode = self.meta.plan_mode;
-        meta.daily_mode = self.meta.daily_mode;
-        meta.code_mode = self.meta.code_mode;
+        Posture::from_meta(&self.meta).write_meta(&mut meta);
         meta
     }
 
@@ -1510,9 +1500,7 @@ impl Agent {
         let path = self.session_dir.join(format!("{}.jsonl", meta.id));
         self.client.prompt_cache_key = Some(meta.id.clone());
         let cfg = self.config.clone();
-        self.registry.plan_mode = meta.plan_mode;
-        self.registry.set_daily(meta.daily_mode, &cfg);
-        self.registry.code_mode = meta.code_mode;
+        self.registry.set_posture(Posture::from_meta(&meta), &cfg);
         self.meta = meta;
         if !cfg!(test) {
             self.trace = TraceLogger::open(trace_path_for(&path));
@@ -1534,8 +1522,7 @@ impl Agent {
     pub fn new_session(&mut self) {
         let mut meta = SessionMeta::new(new_session_id(), &self.workdir, &self.meta.model);
         // The posture survives /new; plan mode and the goal do not.
-        meta.daily_mode = self.meta.daily_mode;
-        meta.code_mode = self.meta.code_mode;
+        self.posture().carried_over().write_meta(&mut meta);
         self.reset_to(meta);
         self.log_session_start(false);
     }

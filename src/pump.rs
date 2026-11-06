@@ -23,6 +23,7 @@ use crate::goal::{
     build_goal_prompt, build_wrapup_prompt, next_state, run_verify,
 };
 use crate::models::Attachment;
+use crate::posture::{Posture, Strategy};
 use crate::session::QueuedMessageRecord;
 
 /// Run one task to completion (or interruption).
@@ -205,6 +206,10 @@ async fn run_once(
         if let Some(batch) = join(agent, steers, tx) {
             next = batch;
             continue;
+        }
+        // Only the goal strategy continues past a quiet turn boundary.
+        if Posture::strategy(&agent.meta) != Strategy::Goal {
+            return;
         }
         let Some(state) = agent.meta.goal.clone() else {
             return;

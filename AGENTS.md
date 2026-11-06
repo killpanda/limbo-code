@@ -2,7 +2,7 @@
 
 **Limbo** is a minimal terminal AI coding agent, written in Rust (edition 2024, ratatui + tachyonfx). Users converse with an LLM in a TUI to explore, read, edit, and write code via a small set of tools. `--headless` runs a plain-terminal REPL frontend instead of the TUI (Herdr/script control), `--json` prints one JSON event per line, and `-p "<prompt>"` runs one turn and exits.
 
-**Tools execute immediately — no confirmation flow, no safety fences.** File tools are not scoped to the workdir (absolute paths and symlinks are honored as-is), there is no sensitive-file skip list, and `bash` runs every command as given (no dangerous-command filter). Every call passes admission (`admission.rs`): `ToolRegistry` runs its `Policy` list in order (`admit` returns `Deny(reason)` to block; `visible` hides a tool) — empty for the main agent, filled from the profile for subagents. `/plan` is a registry flag (`plan_mode`) that puts `PlanPolicy` first: only tools whose effect does not mutate run (bash is blocked), also enforced on Code Mode sub-calls, persisted as `SessionMeta.plan_mode`.
+**Tools execute immediately — no confirmation flow, no safety fences.** File tools are not scoped to the workdir (absolute paths and symlinks are honored as-is), there is no sensitive-file skip list, and `bash` runs every command as given (no dangerous-command filter). Every call passes admission (`admission.rs`): `ToolRegistry` runs its `Policy` list in order (`admit` returns `Deny(reason)` to block; `visible` hides a tool) — empty for the main agent, filled from the profile for subagents. `/plan` is the posture's policy dimension (`ToolRegistry.posture`, see `posture.rs`), which puts `PlanPolicy` first: only tools whose effect does not mutate run (bash is blocked), also enforced on Code Mode sub-calls, persisted as `SessionMeta.plan_mode`.
 
 The source is commented for people learning Rust (`🦀 Rust notes` blocks); keep that style when adding code. `docs/learning-rust.md` has the reading order.
 
@@ -35,6 +35,7 @@ src/
 ├── admission.rs      # ActionRequest → Policy → Verdict (Allow/Deny); PlanPolicy
 ├── effect.rs         # Effect (read/fetch/session/write/mutate/exec) + Recovery (replay/inspect) per tool
 ├── attachments.rs    # Vision gate: images inline for vision models, path references otherwise
+├── posture.rs        # Posture = policy (plan) × capability set (coding/daily) × presentation (direct/code); strategy (single/goal)
 ├── prompt.rs         # System-prompt assembly (tools section derived from the registry)
 ├── session.rs        # Session JSONL journal: records, append/rewrite, list, export, fork/handoff
 ├── trace.rs          # Append-only JSONL run log (<session dir>/traces/)

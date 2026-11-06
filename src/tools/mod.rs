@@ -40,6 +40,7 @@ use tokio_util::sync::CancellationToken;
 use crate::admission::{self, ActionRequest, PlanPolicy, Policy, Verdict};
 use crate::effect::{Effect, Recovery};
 use crate::models::ToolResult;
+use crate::posture::Posture;
 
 /// Everything a tool call may need besides its arguments.
 #[derive(Clone)]
@@ -123,10 +124,10 @@ pub const DAILY_TOOLS: [&str; 5] = [
 #[derive(Clone)]
 pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
-    pub plan_mode: bool,
-    pub daily_mode: bool,
-    /// Code Mode: the model sees only `run_code` (plus non-programmable tools).
-    pub code_mode: bool,
+    /// Policy, capability set and presentation (`posture.rs`). Change the
+    /// capability set through [`ToolRegistry::set_daily`], which also swaps
+    /// the daily tools.
+    pub posture: Posture,
     /// Admission policies in front of every call (subagent profiles:
     /// read-only, no-edit, allow-list, path claims); plan mode adds
     /// [`PlanPolicy`] ahead of them.
@@ -158,9 +159,7 @@ impl ToolRegistry {
         tools.push(Arc::new(run_code::RunCodeTool));
         Self {
             tools,
-            plan_mode: false,
-            daily_mode: false,
-            code_mode: false,
+            posture: Posture::default(),
             policies: Vec::new(),
             memory_written: Arc::new(AtomicBool::new(false)),
             session_dir: crate::config::limbo_home().join("sessions"),
@@ -180,9 +179,29 @@ impl ToolRegistry {
         r
     }
 
+    pub fn plan_mode(&self) -> bool {
+        self.posture.plan()
+    }
+    pub fn daily_mode(&self) -> bool {
+        self.posture.daily()
+    }
+    /// Code Mode: the model sees only `run_code` (plus non-programmable tools).
+    pub fn code_mode(&self) -> bool {
+        self.posture.code()
+    }
+
+    /// Switch to `posture`, swapping the daily tools when the capability
+    /// set changes.
+    pub fn set_posture(&mut self, posture: Posture, config: &crate::config::Config) {
+        if posture.daily() != self.daily_mode() {
+            self.set_daily(posture.daily(), config);
+        }
+        self.posture = posture;
+    }
+
     /// Add or remove the daily tools.
     pub fn set_daily(&mut self, enabled: bool, config: &crate::config::Config) {
-        self.daily_mode = enabled;
+        self.posture = self.posture.with_daily(enabled);
         self.tools.retain(|t| !DAILY_TOOLS.contains(&t.name()));
         if !enabled {
             return;
@@ -236,7 +255,7 @@ impl ToolRegistry {
 
     /// The active policies, in order: plan mode first, then the registry's own.
     fn active_policies(&self) -> impl Iterator<Item = &dyn Policy> {
-        let plan: Option<&dyn Policy> = self.plan_mode.then_some(&PlanPolicy);
+        let plan: Option<&dyn Policy> = self.plan_mode().then_some(&PlanPolicy);
         plan.into_iter()
             .chain(self.policies.iter().map(|p| p.as_ref()))
     }
@@ -247,7 +266,7 @@ impl ToolRegistry {
 
     fn model_facing(&self) -> impl Iterator<Item = &Arc<dyn Tool>> {
         self.tools.iter().filter(move |t| {
-            let shown = if self.code_mode {
+            let shown = if self.code_mode() {
                 t.name() == "run_code" || !t.program_callable()
             } else {
                 t.name() != "run_code"
@@ -412,7 +431,7 @@ mod tests {
     #[tokio::test]
     async fn plan_mode_blocks_mutations() {
         let mut reg = ToolRegistry::core(true);
-        reg.plan_mode = true;
+        reg.posture = reg.posture.with_plan(true);
         assert!(!reg.names().contains(&"write"));
         let ctx = ToolContext::simple("/tmp");
         let r = reg

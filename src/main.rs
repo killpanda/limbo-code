@@ -29,6 +29,7 @@ mod learn;
 mod llm;
 mod memory;
 mod models;
+mod posture;
 mod prompt;
 mod pump;
 mod recent_models;

@@ -60,6 +60,19 @@ proposals should name modules with these terms.
   (converging on the latest config model), persist to config.toml. The UI
   screen is an adapter translating verdicts into chat messages.
 
+## Posture
+
+- **Posture** — how a session works, as independent dimensions
+  (`posture.rs`) instead of modes: **policy** (`default` | `plan`, what
+  admission lets through), **capability set** (`coding` | `daily`, which
+  tools and system prompt), **presentation** (`direct` | `code`, tools one
+  by one or behind `run_code`) and **strategy** (`single` | `goal`, how the
+  Turn pump drives turns; follows from a live goal). `/plan`,
+  `/daily-mode`, `/code-mode` and `/goal` are sugar over one dimension
+  each. The session file keeps the legacy `plan_mode` / `daily_mode` /
+  `code_mode` meta fields. `/new` keeps the capability set and
+  presentation, not the policy or goal.
+
 ## Execution
 
 - **Effect** — what running a tool does (`effect.rs`): `read` (local

@@ -56,7 +56,7 @@ pub fn build_system_prompt_with(
     workdir: &Path,
     extras: &PromptExtras,
 ) -> String {
-    let daily = registry.daily_mode;
+    let daily = registry.daily_mode();
     let mut s = String::from(if daily { DAILY_INTRO } else { BASE_INTRO });
     s.push_str("Available tools:");
     for def in registry.definitions() {
@@ -107,13 +107,13 @@ pub fn build_system_prompt_with(
     } else {
         GUIDELINES_TAIL
     });
-    if registry.code_mode {
+    if registry.code_mode() {
         s.push_str("\n\n");
         s.push_str(crate::tools::run_code::CODE_ONLY_INSTRUCTION);
         s.push_str("\n\n");
         s.push_str(&crate::tools::run_code::render_tools_sdk(registry));
     }
-    if registry.plan_mode {
+    if registry.plan_mode() {
         s.push_str("\n\n");
         s.push_str(PLAN_MODE_INSTRUCTION);
     }
@@ -131,7 +131,7 @@ pub fn build_system_prompt_with(
     if let Some(ctx) = context_block(workdir) {
         s.push_str(&ctx);
     }
-    if has("read") || registry.code_mode {
+    if has("read") || registry.code_mode() {
         s.push_str(&format_skills(&discover_skills(workdir, daily)));
     }
     s
@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn daily_prompt_answers_directly_and_names_only_registered_search() {
         let mut reg = ToolRegistry::core(true);
-        reg.daily_mode = true;
+        reg.posture = reg.posture.with_daily(true);
         let p = build_system_prompt(&reg, Path::new("/nonexistent"));
         assert!(p.contains("directly, without tools"));
         assert!(p.contains("independent calls together in one step"));
