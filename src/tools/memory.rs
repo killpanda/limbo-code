@@ -27,6 +27,9 @@ impl Tool for MemoryTool {
     fn name(&self) -> &'static str {
         "memory"
     }
+    fn effect(&self) -> crate::effect::Effect {
+        crate::effect::Effect::Mutate
+    }
     fn description(&self) -> String {
         DESCRIPTION.into()
     }

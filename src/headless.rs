@@ -42,7 +42,10 @@ fn event_json(ev: &AgentEvent) -> serde_json::Value {
             id,
             name,
             arguments,
-        } => json!({"type": "tool_call", "id": id, "name": name, "arguments": arguments}),
+            provider,
+        } => {
+            json!({"type": "tool_call", "id": id, "name": name, "arguments": arguments, "provider": provider})
+        }
         AgentEvent::ToolProgress { id, line } => {
             json!({"type": "tool_progress", "id": id, "line": line})
         }
@@ -151,7 +154,10 @@ impl Printer {
             }
             AgentEvent::Thinking(_) | AgentEvent::TurnStart | AgentEvent::Usage { .. } => {}
             AgentEvent::ToolCall {
-                name, arguments, ..
+                name,
+                arguments,
+                provider,
+                ..
             } => {
                 let desc = if name == "run_code" {
                     arguments
@@ -162,7 +168,7 @@ impl Printer {
                 } else {
                     describe_call(name, arguments)
                 };
-                self.line(&format!("⚙ {desc}"));
+                self.line(&format!("⚙ {desc} · {}", provider.label()));
             }
             AgentEvent::ToolProgress { line, .. } => self.line(&format!("  │ {line}")),
             AgentEvent::ToolResult {

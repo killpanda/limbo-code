@@ -13,6 +13,7 @@ use serde_json::Value;
 use super::markdown;
 use super::text::{ellipsize, str_width, wrap_line};
 use super::theme::{SPINNER, Theme, gradient_spans};
+use crate::capability::Provider;
 use crate::compaction::is_summary_message;
 use crate::models::{Message, Role};
 use crate::subagents::describe_call;
@@ -50,6 +51,8 @@ pub enum EntryKind {
     Tool {
         id: String,
         name: String,
+        /// Who carried the call out; `None` for a tool no longer registered.
+        provider: Option<Provider>,
         args: Value,
         status: ToolStatus,
         output: String,
@@ -268,6 +271,7 @@ fn render_entry(
         }
         EntryKind::Tool {
             name,
+            provider,
             args,
             status,
             output,
@@ -293,7 +297,10 @@ fn render_entry(
                 _ => String::new(),
             };
             let right = format!(" {mark} {elapsed}");
-            let label_w = str_width(name) + 4;
+            let tag = provider
+                .map(|p| format!(" · {}", p.label()))
+                .unwrap_or_default();
+            let label_w = str_width(name) + str_width(&tag) + 4;
             let avail = width.saturating_sub(label_w + str_width(&right) + 2);
             let detail = ellipsize(&detail, avail);
             let pad = width.saturating_sub(label_w + str_width(&detail) + str_width(&right) + 1);
@@ -306,6 +313,7 @@ fn render_entry(
                     name.clone(),
                     Style::default().fg(t.accent3).add_modifier(Modifier::BOLD),
                 ),
+                Span::styled(tag, Style::default().fg(t.faint)),
                 Span::raw("  "),
                 Span::styled(detail, Style::default().fg(t.dim)),
                 Span::styled(" ".repeat(pad), Style::default()),
@@ -407,7 +415,11 @@ fn render_entry(
 }
 
 /// Rebuild transcript entries from a loaded history.
-pub fn entries_from_history(messages: &[Message]) -> Vec<Entry> {
+/// `provider` names who carries a tool out (from the live registry).
+pub fn entries_from_history(
+    messages: &[Message],
+    provider: impl Fn(&str) -> Option<Provider>,
+) -> Vec<Entry> {
     let mut out: Vec<Entry> = Vec::new();
     for m in messages {
         match m.role {
@@ -438,6 +450,7 @@ pub fn entries_from_history(messages: &[Message]) -> Vec<Entry> {
                     out.push(Entry::new(EntryKind::Tool {
                         id: c.id.clone(),
                         name: c.function.name.clone(),
+                        provider: provider(&c.function.name),
                         args: c.function.arguments.clone(),
                         status: ToolStatus::Running,
                         output: String::new(),
@@ -477,4 +490,31 @@ pub fn entries_from_history(messages: &[Message]) -> Vec<Entry> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tool_card_shows_provider() {
+        let mut e = Entry::new(EntryKind::Tool {
+            id: "1".into(),
+            name: "run_code".into(),
+            provider: Some(Provider::Program),
+            args: serde_json::json!({"code": "print(1)", "description": "count"}),
+            status: ToolStatus::Ok,
+            output: String::new(),
+            progress: vec![],
+            started: Instant::now(),
+            secs: Some(1.0),
+        });
+        let theme = super::super::theme::by_name(None);
+        let head: String = e.lines(&theme, 80, false, false, 0)[0]
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect();
+        assert!(head.contains("run_code · program"), "{head}");
+    }
 }

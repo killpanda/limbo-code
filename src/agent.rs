@@ -30,17 +30,21 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::admission::Verdict;
 use crate::attachments::build_user_content;
+use crate::capability::Provider;
 use crate::compaction::{
     self, build_summary_prompt, find_split_point, is_summary_message, make_summary_message,
     summary_body,
 };
 use crate::config::Config;
 use crate::history;
+use crate::journal::{ActionKind, ActionLog, ActionPhase, ActionRecord};
 use crate::llm::usage::{estimate_tokens, normalize_usage};
 use crate::llm::{LlmClient, LlmError};
 use crate::memory::{MEMORY_NUDGE, MemorySnapshot, MemoryStore, memory_dir};
 use crate::models::{Attachment, LlmEvent, Message, Role, ToolCall, ToolResult, new_id};
+use crate::posture::Posture;
 use crate::prompt::{PromptExtras, build_system_prompt_with};
 use crate::session::{self, CompactionRecord, LoadedSession, QueuedMessageRecord, SessionMeta};
 use crate::subagents::Supervisor;
@@ -64,6 +68,8 @@ pub enum AgentEvent {
         id: String,
         name: String,
         arguments: Value,
+        /// Who carries the call out (`tool` for unknown names).
+        provider: Provider,
     },
     /// A line of live progress from a long-running tool (subagents).
     ToolProgress {
@@ -312,7 +318,7 @@ impl Agent {
             meta,
             messages,
             compactions,
-            intents,
+            actions,
             queue,
             raw_message_ids,
         } = session::load_session_full(path)?;
@@ -334,17 +340,14 @@ impl Agent {
             meta.clone(),
             path.to_path_buf(),
         );
-        agent.registry.plan_mode = meta.plan_mode;
-        if meta.daily_mode {
-            agent.registry.set_daily(true, &agent.config);
-        }
-        agent.registry.code_mode = meta.code_mode;
+        let cfg = agent.config.clone();
+        agent.registry.set_posture(Posture::from_meta(&meta), &cfg);
         agent.file_created = true;
         agent.persisted = raw_message_ids.into_iter().collect();
         agent.compactions = compactions;
-        let started: HashSet<String> = intents.iter().map(|i| i.call_id.clone()).collect();
+        let journal = ActionLog::from_records(&actions);
         let registry = agent.registry.clone();
-        let rec = history::recover(messages, meta.tool_intents.then_some(&started), |name| {
+        let rec = history::recover(messages, meta.tool_intents.then_some(&journal), |name| {
             registry.get(name).is_some_and(|t| t.replay_safe())
         });
         agent.messages = rec.messages;
@@ -564,14 +567,17 @@ impl Agent {
     pub fn session_total_tokens(&self) -> u64 {
         self.meta.usage.values().map(|u| u.total_tokens).sum()
     }
+    pub fn posture(&self) -> Posture {
+        self.registry.posture
+    }
     pub fn plan_mode(&self) -> bool {
-        self.registry.plan_mode
+        self.posture().plan()
     }
     pub fn daily_mode(&self) -> bool {
-        self.registry.daily_mode
+        self.posture().daily()
     }
     pub fn code_mode(&self) -> bool {
-        self.registry.code_mode
+        self.posture().code()
     }
     /// The memory store `/memory` shows (None when `[daily] memory = false`).
     pub fn memory_store(&self) -> Option<MemoryStore> {
@@ -620,45 +626,36 @@ impl Agent {
         }
     }
 
+    /// `/plan`: the read-only policy.
     pub fn set_plan_mode(&mut self, on: bool) -> bool {
-        if self.registry.plan_mode == on {
-            return false;
-        }
-        self.registry.plan_mode = on;
-        self.meta.plan_mode = on;
-        self.mode_changed("plan_mode", on);
-        true
+        self.set_posture(self.posture().with_plan(on), "plan_mode", on)
     }
 
-    /// Daily mode: swap the daily tools and the assistant prompt.
+    /// Daily mode: the daily capability set (tools + assistant prompt).
     pub fn set_daily_mode(&mut self, on: bool) -> bool {
-        if self.registry.daily_mode == on {
+        self.set_posture(self.posture().with_daily(on), "daily_mode", on)
+    }
+
+    /// Code Mode: present the catalog as `run_code` (+ the SDK prompt).
+    pub fn set_code_mode(&mut self, on: bool) -> bool {
+        self.set_posture(self.posture().with_code(on), "code_mode", on)
+    }
+
+    /// Change one posture dimension; false when nothing changed. `kind`
+    /// and `on` name the change in the trace.
+    fn set_posture(&mut self, posture: Posture, kind: &str, on: bool) -> bool {
+        if posture == self.posture() {
             return false;
         }
         let cfg = self.config.clone();
-        self.registry.set_daily(on, &cfg);
-        self.meta.daily_mode = on;
-        self.mode_changed("daily_mode", on);
-        true
-    }
-
-    /// Code Mode: collapse the catalog to `run_code` (+ the SDK prompt).
-    pub fn set_code_mode(&mut self, on: bool) -> bool {
-        if self.registry.code_mode == on {
-            return false;
-        }
-        self.registry.code_mode = on;
-        self.meta.code_mode = on;
-        self.mode_changed("code_mode", on);
-        true
-    }
-
-    fn mode_changed(&mut self, kind: &str, on: bool) {
+        self.registry.set_posture(posture, &cfg);
+        posture.write_meta(&mut self.meta);
         self.init_system_message();
         self.needs_rewrite = true; // system prompt changed in place
         self.persist_meta();
         self.trace
             .log(kind, json!({"turn": self.turn_count, "enabled": on}));
+        true
     }
 
     /// Daily mode: a memory reminder every N quiet turns.
@@ -776,6 +773,23 @@ impl Agent {
         if self.file_created {
             let _ = session::append_lines(&self.session_path, records);
         }
+    }
+
+    /// Append one execution-journal record (goal verify runs use this).
+    pub fn journal_action(&self, record: &ActionRecord) {
+        self.journal(&[record.to_line()]);
+    }
+
+    /// A call's result is in: journal it before the result message is
+    /// checkpointed, so a crash in between is told apart from one mid-run.
+    fn journal_finished(&self, tc: &ToolCall, r: &ToolResult) {
+        let phase = if r.success {
+            ActionPhase::Completed
+        } else {
+            ActionPhase::Failed
+        };
+        let cap = self.registry.capability(tc.name());
+        self.journal_action(&tool_action(tc, phase).with_capability(cap));
     }
 
     // -- token accounting ------------------------------------------------------
@@ -921,6 +935,7 @@ impl Agent {
             call_id: call_id.to_string(),
             events: Some(tx.clone()),
             registry: Some(self.registry.clone()),
+            journal: self.file_created.then(|| self.session_path.clone()),
         }
     }
 
@@ -1236,27 +1251,34 @@ impl Agent {
         tx: &EventTx,
         cancel: &CancellationToken,
     ) {
-        // Commit each call's intent before any side effect runs.
-        let intents: Vec<Value> = calls
-            .iter()
-            .map(|tc| {
-                let safe = self
-                    .registry
-                    .get(tc.name())
-                    .is_some_and(|t| t.replay_safe());
-                session::tool_intent_record(&tc.id, tc.name(), safe)
-            })
-            .collect();
+        // Journal each call as started (or denied) before any side effect runs.
+        let mut admitted = Vec::with_capacity(calls.len());
+        let mut intents: Vec<Value> = Vec::with_capacity(calls.len());
+        for tc in calls {
+            let cap = self.registry.capability(tc.name());
+            let rec = match self.registry.admit(tc.name(), &tc.function.arguments) {
+                Verdict::Allow => tool_action(tc, ActionPhase::Started),
+                Verdict::Deny(reason) => tool_action(tc, ActionPhase::Denied).with_detail(reason),
+            };
+            admitted.push(rec.phase == ActionPhase::Started);
+            intents.push(rec.with_capability(cap).to_line());
+        }
         self.journal(&intents);
         for tc in calls {
+            let provider = self
+                .registry
+                .capability(tc.name())
+                .map(|c| c.provider)
+                .unwrap_or_default();
             let _ = tx.send(AgentEvent::ToolCall {
                 id: tc.id.clone(),
                 name: tc.name().into(),
                 arguments: tc.function.arguments.clone(),
+                provider,
             });
             self.trace.log(
                 "tool_call",
-                json!({"turn": self.turn_count, "iteration": self.iteration, "id": tc.id, "name": tc.name(), "arguments": tc.function.arguments}),
+                json!({"turn": self.turn_count, "iteration": self.iteration, "id": tc.id, "name": tc.name(), "arguments": tc.function.arguments, "provider": provider}),
             );
         }
         let started_at = utc_now_iso();
@@ -1277,6 +1299,9 @@ impl Agent {
             }
             while let Some((i, r)) = running.next().await {
                 let tc = &calls[i];
+                if admitted[i] {
+                    self.journal_finished(tc, &r);
+                }
                 let _ = tx.send(AgentEvent::ToolResult {
                     id: tc.id.clone(),
                     name: tc.name().into(),
@@ -1295,6 +1320,9 @@ impl Agent {
                         .execute(tc.name(), tc.function.arguments.clone(), &ctx)
                         .await
                 };
+                if admitted[i] {
+                    self.journal_finished(tc, &r);
+                }
                 let _ = tx.send(AgentEvent::ToolResult {
                     id: tc.id.clone(),
                     name: tc.name().into(),
@@ -1463,9 +1491,7 @@ impl Agent {
         let mut meta = SessionMeta::new(new_session_id(), &self.workdir, &self.meta.model);
         meta.title = title;
         meta.parent_session = Some(self.meta.id.clone());
-        meta.plan_mode = self.meta.plan_mode;
-        meta.daily_mode = self.meta.daily_mode;
-        meta.code_mode = self.meta.code_mode;
+        Posture::from_meta(&self.meta).write_meta(&mut meta);
         meta
     }
 
@@ -1513,9 +1539,7 @@ impl Agent {
         let path = self.session_dir.join(format!("{}.jsonl", meta.id));
         self.client.prompt_cache_key = Some(meta.id.clone());
         let cfg = self.config.clone();
-        self.registry.plan_mode = meta.plan_mode;
-        self.registry.set_daily(meta.daily_mode, &cfg);
-        self.registry.code_mode = meta.code_mode;
+        self.registry.set_posture(Posture::from_meta(&meta), &cfg);
         self.meta = meta;
         if !cfg!(test) {
             self.trace = TraceLogger::open(trace_path_for(&path));
@@ -1537,11 +1561,14 @@ impl Agent {
     pub fn new_session(&mut self) {
         let mut meta = SessionMeta::new(new_session_id(), &self.workdir, &self.meta.model);
         // The posture survives /new; plan mode and the goal do not.
-        meta.daily_mode = self.meta.daily_mode;
-        meta.code_mode = self.meta.code_mode;
+        self.posture().carried_over().write_meta(&mut meta);
         self.reset_to(meta);
         self.log_session_start(false);
     }
+}
+
+fn tool_action(tc: &ToolCall, phase: ActionPhase) -> ActionRecord {
+    ActionRecord::new(ActionKind::Tool, &tc.id, tc.name(), phase)
 }
 
 /// `20261102-021814-ab12cd` — sortable and readable.
@@ -1702,7 +1729,12 @@ pub(crate) mod tests {
         )]);
         agent.messages.push(a);
         agent.checkpoint();
-        agent.journal(&[session::tool_intent_record("w1", "write", false)]);
+        agent.journal_action(&ActionRecord::new(
+            ActionKind::Tool,
+            "w1",
+            "write",
+            ActionPhase::Started,
+        ));
         // "crash" here, then resume
         let resumed = Agent::resume(
             test_config("http://127.0.0.1:9/v1"),

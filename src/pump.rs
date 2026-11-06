@@ -18,11 +18,15 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{Agent, AgentEvent, EventTx, FOLLOW_UP, STEER};
+use crate::capability::Provider;
+use crate::effect::Effect;
 use crate::goal::{
     self, GoalState, STATUS_ACTIVE, STATUS_CLEARED, STATUS_EXHAUSTED, STATUS_PASSED,
     build_goal_prompt, build_wrapup_prompt, next_state, run_verify,
 };
+use crate::journal::{ActionKind, ActionPhase, ActionRecord};
 use crate::models::Attachment;
+use crate::posture::{Posture, Strategy};
 use crate::session::QueuedMessageRecord;
 
 /// Run one task to completion (or interruption).
@@ -206,6 +210,10 @@ async fn run_once(
             next = batch;
             continue;
         }
+        // Only the goal strategy continues past a quiet turn boundary.
+        if Posture::strategy(&agent.meta) != Strategy::Goal {
+            return;
+        }
         let Some(state) = agent.meta.goal.clone() else {
             return;
         };
@@ -218,6 +226,13 @@ async fn run_once(
             round,
             max_rounds: state.max_rounds,
         });
+        let action_id = format!("verify-{round}");
+        let verify_action = |phase| {
+            ActionRecord::new(ActionKind::Verify, &action_id, &state.verify_command, phase)
+                .with_effect(Some(Effect::Exec))
+                .with_provider(Provider::Runtime)
+        };
+        agent.journal_action(&verify_action(ActionPhase::Started));
         let result = run_verify(
             &state.verify_command,
             &agent.workdir,
@@ -225,6 +240,16 @@ async fn run_once(
             cancel,
         )
         .await;
+        let finished = match (result.exit_code, result.cancelled, result.timed_out) {
+            (Some(0), ..) => verify_action(ActionPhase::Completed).with_detail("exit 0"),
+            (_, true, _) => verify_action(ActionPhase::Failed).with_detail("cancelled"),
+            (_, _, true) => verify_action(ActionPhase::Failed).with_detail("timed out"),
+            (code, ..) => verify_action(ActionPhase::Failed).with_detail(format!(
+                "exit {}",
+                code.map_or("?".into(), |c| c.to_string())
+            )),
+        };
+        agent.journal_action(&finished);
         agent.trace.log(
             "goal_verify",
             json!({"command": state.verify_command, "exit_code": result.exit_code, "round": round,

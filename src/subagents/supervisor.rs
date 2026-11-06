@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use super::hooks::{AllowListHook, ClaimHook, NoEditHook, ReadOnlyHook};
+use super::policies::{AllowListPolicy, ClaimPolicy, NoEditPolicy, ReadOnlyPolicy};
 use super::profiles::{
     NO_EDIT, Profile, ProjectFacts, READ_ONLY, discover_profiles, format_facts,
     format_profiles_for_prompt, resolve_profile, scan_project,
@@ -755,7 +755,7 @@ impl Supervisor {
         if let Some(r) = self.runners.lock().unwrap().get(&task.id) {
             let _ = r; // the runner keeps the steer handle registered in start()
         }
-        // -- tools & hooks per profile
+        // -- tools & policies per profile
         let names = profile.tool_names();
         let remove: Vec<String> = match &names {
             Some(allowed) => agent
@@ -768,12 +768,12 @@ impl Supervisor {
             None => MAIN_ONLY_TOOLS.iter().map(|s| s.to_string()).collect(),
         };
         if profile.tools == READ_ONLY {
-            agent.registry.hooks.push(Arc::new(ReadOnlyHook));
+            agent.registry.policies.push(Arc::new(ReadOnlyPolicy));
         } else if profile.tools == NO_EDIT {
-            agent.registry.hooks.push(Arc::new(NoEditHook));
+            agent.registry.policies.push(Arc::new(NoEditPolicy));
         }
         if profile.writes() && task.isolation == "shared" {
-            agent.registry.hooks.push(Arc::new(ClaimHook {
+            agent.registry.policies.push(Arc::new(ClaimPolicy {
                 task_id: task.id.clone(),
                 sup: self.me.clone(),
                 workdir: workdir.clone(),
@@ -781,8 +781,8 @@ impl Supervisor {
         }
         if self.inherits_prompt(task, &profile) {
             // Advertising is not permission: the main tool list is shown,
-            // the hook decides what runs.
-            agent.registry.hooks.push(Arc::new(AllowListHook {
+            // the policy decides what runs.
+            agent.registry.policies.push(Arc::new(AllowListPolicy {
                 allowed: names.unwrap_or_default(),
             }));
             agent.system_override = main
@@ -2204,14 +2204,14 @@ impl Supervisor {
         }
     }
 
-    /// Whether a ClaimHook should block `rel` for task `me`.
+    /// Whether a ClaimPolicy should block `rel` for task `me`.
     pub fn claimed_by(&self, me: &str, rel: &str) -> Option<(String, String, String)> {
         let b = self.board.lock().unwrap();
         for t in b.live() {
             if t.id == me || t.isolation == "worktree" {
                 continue;
             }
-            if !t.scope_paths.is_empty() && super::hooks::matches(rel, &t.scope_paths) {
+            if !t.scope_paths.is_empty() && super::policies::matches(rel, &t.scope_paths) {
                 return Some((t.id.clone(), t.agent_name().to_string(), t.title.clone()));
             }
         }

@@ -219,8 +219,8 @@ impl Tool for SessionSearchTool {
             },
         })
     }
-    fn replay_safe(&self) -> bool {
-        true
+    fn effect(&self) -> crate::effect::Effect {
+        crate::effect::Effect::Read
     }
     async fn run(&self, args: Value, _ctx: &ToolContext) -> ToolResult {
         if let Some(id) = arg_str(&args, "session_id")

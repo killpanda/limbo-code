@@ -115,7 +115,7 @@ pub fn goal_event_line(ev: &crate::agent::AgentEvent) -> Option<String> {
             command,
             round,
             max_rounds,
-        } => format!("🔍 第 {round}/{max_rounds} 轮验收：`{command}`"),
+        } => format!("🔍 第 {round}/{max_rounds} 轮验收：`{command}` · runtime"),
         GoalVerifyResult {
             exit_code,
             cancelled,

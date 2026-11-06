@@ -331,7 +331,9 @@ impl App {
             .motion
             .clone()
             .or_else(|| std::env::var("LIMBO_MOTION").ok());
-        let entries = entries_from_history(&agent.messages);
+        let entries = entries_from_history(&agent.messages, |n| {
+            agent.registry.capability(n).map(|c| c.provider)
+        });
         let skills = discover_skills(&agent.workdir, agent.daily_mode());
         let skills_scope = (agent.workdir.clone(), agent.daily_mode());
         let sup = agent.supervisor.clone();
@@ -845,12 +847,14 @@ impl App {
                 id,
                 name,
                 arguments,
+                provider,
             } => {
                 self.close_live();
                 self.activity = Activity::Tool(name.clone());
                 self.entries.push(Entry::new(EntryKind::Tool {
                     id,
                     name,
+                    provider: Some(provider),
                     args: arguments,
                     status: ToolStatus::Running,
                     output: String::new(),
@@ -2030,7 +2034,9 @@ impl App {
                 }
                 self.steer = agent.steer.clone();
                 self.sup = agent.supervisor.clone();
-                self.entries = entries_from_history(&agent.messages);
+                self.entries = entries_from_history(&agent.messages, |n| {
+                    agent.registry.capability(n).map(|c| c.provider)
+                });
                 // The target may be in the other mode: skills and the Dawn
                 // look follow the session that is now live.
                 self.skills = discover_skills(&agent.workdir, agent.daily_mode());

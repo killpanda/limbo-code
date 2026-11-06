@@ -3,7 +3,7 @@
 //! Layout of `~/.limbo/sessions/<id>.jsonl`:
 //! - line 1: `{"type": "meta", ...}`
 //! - then, in the order they happened: message lines (no `type` key),
-//!   `compaction`, `tool_intent`, `meta_patch`, `queue` and `task` records.
+//!   `compaction`, `action` (execution journal, see `journal.rs`; legacy `tool_intent`), `meta_patch`, `queue` and `task` records.
 //!
 //! Steady state only *appends*; a full atomic rewrite (temp file + rename,
 //! mode 0600) happens on first save or when history changed shape.
@@ -18,6 +18,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::compaction::{is_summary_message, make_summary_message};
+use crate::journal::{ActionKind, ActionPhase, ActionRecord};
 use crate::models::{Message, Role};
 
 pub fn now_iso() -> String {
@@ -139,6 +140,8 @@ fn auto() -> String {
     "auto".into()
 }
 
+/// The legacy pre-run record (files written before the execution journal);
+/// loaded as an `action` with phase `started`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ToolIntentRecord {
     pub call_id: String,
@@ -185,7 +188,9 @@ pub struct LoadedSession {
     /// History with the latest compaction applied.
     pub messages: Vec<Message>,
     pub compactions: Vec<CompactionRecord>,
-    pub intents: Vec<ToolIntentRecord>,
+    /// The execution journal (`action` records, legacy `tool_intent`s
+    /// converted), in file order.
+    pub actions: Vec<ActionRecord>,
     /// Messages still queued when the file was last written.
     pub queue: Vec<QueuedMessageRecord>,
     /// Every message line in the file (before compaction selection).
@@ -200,18 +205,6 @@ fn record(kind: &str, value: impl Serialize) -> Value {
         out.extend(std::mem::take(obj));
     }
     Value::Object(out)
-}
-
-pub fn tool_intent_record(call_id: &str, name: &str, replay_safe: bool) -> Value {
-    record(
-        "tool_intent",
-        ToolIntentRecord {
-            call_id: call_id.into(),
-            name: name.into(),
-            replay: if replay_safe { "safe" } else { "unsafe" }.into(),
-            created_at: now_iso(),
-        },
-    )
 }
 
 pub fn compaction_record(c: &CompactionRecord) -> Value {
@@ -396,7 +389,7 @@ pub fn load_session_full(path: &Path) -> std::io::Result<LoadedSession> {
     let mut patches: Vec<Value> = Vec::new();
     let mut messages = Vec::new();
     let mut compactions = Vec::new();
-    let mut intents = Vec::new();
+    let mut actions = Vec::new();
     let mut queued: Vec<QueuedMessageRecord> = Vec::new();
     for line in reader.lines() {
         let line = line?;
@@ -430,9 +423,21 @@ pub fn load_session_full(path: &Path) -> std::io::Result<LoadedSession> {
                     compactions.push(c);
                 }
             }
+            Some("action") => {
+                if let Ok(a) = serde_json::from_value(v) {
+                    actions.push(a);
+                }
+            }
             Some("tool_intent") => {
-                if let Ok(i) = serde_json::from_value(v) {
-                    intents.push(i);
+                if let Ok(i) = serde_json::from_value::<ToolIntentRecord>(v) {
+                    let mut a = ActionRecord::new(
+                        ActionKind::Tool,
+                        &i.call_id,
+                        &i.name,
+                        ActionPhase::Started,
+                    );
+                    a.at = i.created_at;
+                    actions.push(a);
                 }
             }
             Some("queue") => match obj.get("op").and_then(Value::as_str) {
@@ -478,7 +483,7 @@ pub fn load_session_full(path: &Path) -> std::io::Result<LoadedSession> {
         meta,
         messages: apply_compactions(messages, &compactions),
         compactions,
-        intents,
+        actions,
         queue: queued,
         raw_message_ids,
     })
@@ -656,7 +661,8 @@ mod tests {
                 meta_patch_record(&patched),
                 queued_record(&q),
                 json!({"type": "future_thing", "x": 1}),
-                tool_intent_record("c1", "bash", false),
+                json!({"type": "tool_intent", "call_id": "c1", "name": "bash", "replay": "unsafe"}),
+                ActionRecord::new(ActionKind::Tool, "c2", "read", ActionPhase::Completed).to_line(),
             ],
         )
         .unwrap();
@@ -671,7 +677,9 @@ mod tests {
         assert_eq!(loaded.meta.goal.as_ref().unwrap().text, "keep me");
         assert_eq!(loaded.messages.len(), 3);
         assert_eq!(loaded.queue.len(), 1);
-        assert_eq!(loaded.intents[0].call_id, "c1");
+        assert_eq!(loaded.actions[0].id, "c1");
+        assert_eq!(loaded.actions[0].phase, ActionPhase::Started);
+        assert_eq!(loaded.actions[1].phase, ActionPhase::Completed);
     }
 
     #[test]

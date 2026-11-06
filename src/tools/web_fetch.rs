@@ -84,8 +84,8 @@ impl Tool for WebFetchTool {
             "required": ["url"],
         })
     }
-    fn replay_safe(&self) -> bool {
-        true
+    fn effect(&self) -> crate::effect::Effect {
+        crate::effect::Effect::Fetch
     }
     async fn run(&self, args: Value, ctx: &ToolContext) -> ToolResult {
         let url = arg_str(&args, "url").unwrap_or("").trim().to_string();

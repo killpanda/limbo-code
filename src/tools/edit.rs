@@ -118,6 +118,9 @@ impl Tool for EditTool {
     fn name(&self) -> &'static str {
         "edit"
     }
+    fn effect(&self) -> crate::effect::Effect {
+        crate::effect::Effect::Mutate
+    }
     fn description(&self) -> String {
         "Edit a single file using exact text replacement. Every edits[].old_text must match a unique, \
          non-overlapping region of the original file. If two changes affect the same block or nearby lines, \

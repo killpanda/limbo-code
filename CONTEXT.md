@@ -41,8 +41,15 @@ proposals should name modules with these terms.
   that keeps a crash recoverable (summarized messages before their
   compaction record, `dequeued` after the message carrying the item). The
   Agent calls its verbs (`checkpoint`, `queued`/`dequeued`,
-  `record_intents`, `compacted`, `patch_meta`); `session.rs` owns the
+  `journal_action`, `compacted`, `patch_meta`); `session.rs` owns the
   file format and loading.
+- **Execution journal** — the `action` records in the session file
+  (`journal.rs`): every tool call (and `/goal` verify run) appends
+  `started` or `denied` before it runs and `completed` / `failed` when
+  its result is in. A `run_code` program's sub-calls get records of
+  their own, with `parent` = the `run_code` call id. Resume reads them as an **action log**: a call with
+  no result message is "did not run" (nothing), "may have partially
+  run" (started only) or "result lost" (finished).
 - **Steer** — a user message queued mid-turn, injected at consistency
   points (loop top, turn end, run head). The steer queue owns
   queueing semantics — id generation, FIFO, and the cancel boundary (an
@@ -59,6 +66,49 @@ proposals should name modules with these terms.
   target (API key, thinking-effort compatibility), swap the client
   (converging on the latest config model), persist to config.toml. The UI
   screen is an adapter translating verdicts into chat messages.
+
+## Posture
+
+- **Posture** — how a session works, as independent dimensions
+  (`posture.rs`) instead of modes: **policy** (`default` | `plan`, what
+  admission lets through), **capability set** (`coding` | `daily`, which
+  tools and system prompt), **presentation** (`direct` | `code`, tools one
+  by one or behind `run_code`) and **strategy** (`single` | `goal`, how the
+  Turn pump drives turns; follows from a live goal). `/plan`,
+  `/daily-mode`, `/code-mode` and `/goal` are sugar over one dimension
+  each. The session file keeps the legacy `plan_mode` / `daily_mode` /
+  `code_mode` meta fields. `/new` keeps the capability set and
+  presentation, not the policy or goal.
+
+## Execution
+
+- **Capability** — one thing a session can do (`capability.rs`): a
+  registered tool seen as name + effect + recovery + **provider**. The
+  model still calls tools by name; admission and the execution journal
+  work with capabilities.
+- **Provider** — who carries a capability out: `tool` (local, in
+  process), `program` (`run_code`; its sub-calls are capabilities of
+  their own), `subagent` (the task board and its children) or `human`
+  (`ask_user`: the answer is the user's next message), or `runtime` (the
+  harness itself: `/goal` verify commands). Shown on TUI tool cards
+  (`read · tool`), in headless output, the trace's `tool_call` events and
+  every `action` record.
+
+- **Effect** — what running a tool does (`effect.rs`): `read` (local
+  reads), `fetch` (network reads), `session` (only this session's live
+  state: task board, questions, the `run_code` transport), `write`
+  (repeatable local writes), `mutate` (other local changes), `exec`
+  (arbitrary commands). Plan mode and read-only profiles block the
+  mutating ones (`write`/`mutate`/`exec`). Journaled on each `started` action record.
+- **Admission** — the gate every action passes before it runs
+  (`admission.rs`): an **action request** (tool, arguments, effect) goes
+  through the registry's **policies** in order and the first `Deny`
+  wins; its reason is the error result the model reads. Plan mode is
+  `PlanPolicy`; subagent profiles add read-only / no-edit / allow-list /
+  path-claim policies (`subagents/policies.rs`).
+- **Recovery** — what resume does with a call a crash interrupted:
+  `replay` (re-run it; the default for read/fetch) or `inspect` (do not
+  re-run; the model is told it may have partially run).
 
 ## Subagents
 

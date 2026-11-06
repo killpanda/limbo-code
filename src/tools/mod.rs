@@ -1,8 +1,9 @@
 //! Tools the model can call, and the registry that dispatches them.
 //!
 //! Like the Python version there are no safety fences: absolute paths are
-//! honored, and `bash` runs whatever it is given. The only gate is plan
-//! mode, which hides and blocks every tool that can change things.
+//! honored, and `bash` runs whatever it is given. The only gates are
+//! admission policies (`admission.rs`): plan mode, which hides and blocks
+//! every tool that can change things, and subagent profile restrictions.
 //!
 //! 🦀 Rust notes
 //! - [`Tool`] is an async trait. `#[async_trait]` rewrites `async fn` in a
@@ -36,7 +37,11 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
+use crate::admission::{self, ActionRequest, PlanPolicy, Policy, Verdict};
+use crate::capability::{Capability, Provider};
+use crate::effect::{Effect, Recovery};
 use crate::models::ToolResult;
+use crate::posture::Posture;
 
 /// Everything a tool call may need besides its arguments.
 #[derive(Clone)]
@@ -51,6 +56,9 @@ pub struct ToolContext {
     pub events: Option<crate::agent::EventTx>,
     /// The registry running this call (`run_code` dispatches through it).
     pub registry: Option<ToolRegistry>,
+    /// The session file, for journaling nested calls (`run_code`'s
+    /// sub-calls); `None` outside a session.
+    pub journal: Option<PathBuf>,
 }
 
 impl ToolContext {
@@ -63,6 +71,7 @@ impl ToolContext {
             call_id: "call".into(),
             events: None,
             registry: None,
+            journal: None,
         }
     }
     pub fn progress(&self, line: impl Into<String>) {
@@ -81,13 +90,27 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> String;
     /// JSON Schema of the arguments.
     fn parameters(&self) -> Value;
-    /// Read-only tools are re-run after a crash; everything else is not.
-    fn replay_safe(&self) -> bool {
-        false
+    /// What running the tool does (see [`crate::effect`]). Unknown tools
+    /// are treated as arbitrary execution.
+    fn effect(&self) -> Effect {
+        Effect::Exec
     }
-    /// Whether the tool can change files or state (blocked in plan mode).
+    /// What resume does with a call a crash interrupted.
+    fn recovery(&self) -> Recovery {
+        self.effect().default_recovery()
+    }
+    /// Re-run after a crash (derived from [`Tool::recovery`]).
+    fn replay_safe(&self) -> bool {
+        self.recovery() == Recovery::Replay
+    }
+    /// Whether the tool can change files or state (blocked in plan mode;
+    /// derived from [`Tool::effect`]).
     fn mutates(&self) -> bool {
-        !self.replay_safe()
+        self.effect().mutates()
+    }
+    /// Who carries the call out (`capability.rs`); local tools by default.
+    fn provider(&self) -> Provider {
+        Provider::Tool
     }
     /// Whether a `run_code` program may call it. Tools that drive live
     /// session state (the task board) stay native tools beside `run_code`.
@@ -95,16 +118,6 @@ pub trait Tool: Send + Sync {
         true
     }
     async fn run(&self, args: Value, ctx: &ToolContext) -> ToolResult;
-}
-
-/// A gate in front of every call (subagent profiles: read-only, no-edit,
-/// path claims). `Err` blocks the call with that message.
-pub trait ToolHook: Send + Sync {
-    fn before_tool(&self, tool: &dyn Tool, args: &Value) -> Result<(), String>;
-    /// Whether the tool is listed at all (hidden tools are also blocked).
-    fn visible(&self, _tool: &dyn Tool) -> bool {
-        true
-    }
 }
 
 /// Tools only daily mode registers.
@@ -120,11 +133,14 @@ pub const DAILY_TOOLS: [&str; 5] = [
 #[derive(Clone)]
 pub struct ToolRegistry {
     tools: Vec<Arc<dyn Tool>>,
-    pub plan_mode: bool,
-    pub daily_mode: bool,
-    /// Code Mode: the model sees only `run_code` (plus non-programmable tools).
-    pub code_mode: bool,
-    pub hooks: Vec<Arc<dyn ToolHook>>,
+    /// Policy, capability set and presentation (`posture.rs`). Change the
+    /// capability set through [`ToolRegistry::set_daily`], which also swaps
+    /// the daily tools.
+    pub posture: Posture,
+    /// Admission policies in front of every call (subagent profiles:
+    /// read-only, no-edit, allow-list, path claims); plan mode adds
+    /// [`PlanPolicy`] ahead of them.
+    pub policies: Vec<Arc<dyn Policy>>,
     /// Set when the `memory` tool ran (daily memory nudge bookkeeping).
     pub memory_written: Arc<AtomicBool>,
     /// Where `session_search` looks.
@@ -152,10 +168,8 @@ impl ToolRegistry {
         tools.push(Arc::new(run_code::RunCodeTool));
         Self {
             tools,
-            plan_mode: false,
-            daily_mode: false,
-            code_mode: false,
-            hooks: Vec::new(),
+            posture: Posture::default(),
+            policies: Vec::new(),
             memory_written: Arc::new(AtomicBool::new(false)),
             session_dir: crate::config::limbo_home().join("sessions"),
         }
@@ -174,9 +188,29 @@ impl ToolRegistry {
         r
     }
 
+    pub fn plan_mode(&self) -> bool {
+        self.posture.plan()
+    }
+    pub fn daily_mode(&self) -> bool {
+        self.posture.daily()
+    }
+    /// Code Mode: the model sees only `run_code` (plus non-programmable tools).
+    pub fn code_mode(&self) -> bool {
+        self.posture.code()
+    }
+
+    /// Switch to `posture`, swapping the daily tools when the capability
+    /// set changes.
+    pub fn set_posture(&mut self, posture: Posture, config: &crate::config::Config) {
+        if posture.daily() != self.daily_mode() {
+            self.set_daily(posture.daily(), config);
+        }
+        self.posture = posture;
+    }
+
     /// Add or remove the daily tools.
     pub fn set_daily(&mut self, enabled: bool, config: &crate::config::Config) {
-        self.daily_mode = enabled;
+        self.posture = self.posture.with_daily(enabled);
         self.tools.retain(|t| !DAILY_TOOLS.contains(&t.name()));
         if !enabled {
             return;
@@ -223,18 +257,39 @@ impl ToolRegistry {
         self.model_facing().map(|t| t.name()).collect()
     }
 
+    /// Every registered tool as a capability (hidden ones included).
+    #[cfg(test)]
+    pub fn capabilities(&self) -> Vec<Capability> {
+        self.tools
+            .iter()
+            .map(|t| Capability::of(t.as_ref()))
+            .collect()
+    }
+
+    /// One registered tool as a capability.
+    pub fn capability(&self, name: &str) -> Option<Capability> {
+        self.get(name).map(|t| Capability::of(t.as_ref()))
+    }
+
     /// Every registered tool name (programmable ones included).
     pub fn all_names(&self) -> Vec<&'static str> {
         self.tools.iter().map(|t| t.name()).collect()
     }
 
+    /// The active policies, in order: plan mode first, then the registry's own.
+    fn active_policies(&self) -> impl Iterator<Item = &dyn Policy> {
+        let plan: Option<&dyn Policy> = self.plan_mode().then_some(&PlanPolicy);
+        plan.into_iter()
+            .chain(self.policies.iter().map(|p| p.as_ref()))
+    }
+
     fn allowed(&self, t: &Arc<dyn Tool>) -> bool {
-        (!self.plan_mode || !t.mutates()) && self.hooks.iter().all(|h| h.visible(t.as_ref()))
+        self.active_policies().all(|p| p.visible(t.as_ref()))
     }
 
     fn model_facing(&self) -> impl Iterator<Item = &Arc<dyn Tool>> {
         self.tools.iter().filter(move |t| {
-            let shown = if self.code_mode {
+            let shown = if self.code_mode() {
                 t.name() == "run_code" || !t.program_callable()
             } else {
                 t.name() != "run_code"
@@ -264,23 +319,27 @@ impl ToolRegistry {
             .collect()
     }
 
-    /// Run one call. Unknown tools, plan-mode and hook blocks become error
-    /// results the model can read and react to.
+    /// Whether a call would be admitted (unknown tools are denied).
+    pub fn admit(&self, name: &str, args: &Value) -> Verdict {
+        let Some(tool) = self.get(name) else {
+            return Verdict::Deny(format!("Unknown tool: {name}"));
+        };
+        let req = ActionRequest {
+            tool: tool.as_ref(),
+            args,
+        };
+        admission::admit(self.active_policies(), &req)
+    }
+
+    /// Run one call: resolve → admit → run. Unknown tools and denials
+    /// become error results the model can read and react to.
     pub async fn execute(&self, name: &str, args: Value, ctx: &ToolContext) -> ToolResult {
+        if let Verdict::Deny(reason) = self.admit(name, &args) {
+            return ToolResult::err(reason);
+        }
         let Some(tool) = self.get(name) else {
             return ToolResult::err(format!("Unknown tool: {name}"));
         };
-        if self.plan_mode && tool.mutates() {
-            return ToolResult::err(format!(
-                "Plan mode is on (read-only): {name} is blocked. Keep exploring with read-only tools, then \
-                 present the plan; the user leaves plan mode with /plan off before anything is changed."
-            ));
-        }
-        for h in &self.hooks {
-            if let Err(e) = h.before_tool(tool.as_ref(), &args) {
-                return ToolResult::err(e);
-            }
-        }
         if let Some(err) = args.get("parse_error").and_then(Value::as_str) {
             return ToolResult::err(format!(
                 "Tool arguments were not valid JSON ({err}). Re-issue the call with valid JSON arguments."
@@ -383,10 +442,27 @@ mod tests {
         assert_eq!(resolve_path(wd, "/etc/hosts"), PathBuf::from("/etc/hosts"));
     }
 
+    /// The effect table: replay and plan-mode gating follow from it.
+    #[test]
+    fn core_tool_effects() {
+        let reg = ToolRegistry::core(true);
+        let row = |n: &str| {
+            let t = reg.get(n).unwrap();
+            (t.effect(), t.replay_safe(), t.mutates())
+        };
+        for n in ["read", "grep", "find", "ls"] {
+            assert_eq!(row(n), (Effect::Read, true, false), "{n}");
+        }
+        assert_eq!(row("write"), (Effect::Write, false, true));
+        assert_eq!(row("edit"), (Effect::Mutate, false, true));
+        assert_eq!(row("bash"), (Effect::Exec, false, true));
+        assert_eq!(row("run_code"), (Effect::Session, false, false));
+    }
+
     #[tokio::test]
     async fn plan_mode_blocks_mutations() {
         let mut reg = ToolRegistry::core(true);
-        reg.plan_mode = true;
+        reg.posture = reg.posture.with_plan(true);
         assert!(!reg.names().contains(&"write"));
         let ctx = ToolContext::simple("/tmp");
         let r = reg

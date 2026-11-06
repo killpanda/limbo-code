@@ -31,6 +31,9 @@ impl Tool for BashTool {
     fn name(&self) -> &'static str {
         "bash"
     }
+    fn effect(&self) -> crate::effect::Effect {
+        crate::effect::Effect::Exec
+    }
     fn description(&self) -> String {
         format!(
             "Execute a bash command in the current working directory. Returns stdout and stderr. Output is \

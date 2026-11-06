@@ -11,22 +11,27 @@
 //! - `tui`        — the ratatui + tachyonfx interface
 //! - `headless`   — plain-terminal and JSON frontends
 
+mod admission;
 mod agent;
 mod attachments;
 mod auth;
 mod background;
+mod capability;
 mod cli_auth;
 mod commands;
 mod compaction;
 mod config;
+mod effect;
 mod goal;
 mod headless;
 mod history;
 mod integrations;
+mod journal;
 mod learn;
 mod llm;
 mod memory;
 mod models;
+mod posture;
 mod prompt;
 mod pump;
 mod recent_models;
