@@ -267,6 +267,9 @@ impl Tool for RunCodeTool {
     fn effect(&self) -> crate::effect::Effect {
         crate::effect::Effect::Session
     }
+    fn provider(&self) -> crate::capability::Provider {
+        crate::capability::Provider::Program
+    }
     fn program_callable(&self) -> bool {
         false
     }

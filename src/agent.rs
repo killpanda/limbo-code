@@ -1250,13 +1250,13 @@ impl Agent {
         let mut admitted = Vec::with_capacity(calls.len());
         let mut intents: Vec<Value> = Vec::with_capacity(calls.len());
         for tc in calls {
-            let effect = self.registry.get(tc.name()).map(|t| t.effect());
+            let cap = self.registry.capability(tc.name());
             let rec = match self.registry.admit(tc.name(), &tc.function.arguments) {
                 Verdict::Allow => tool_action(tc, ActionPhase::Started),
                 Verdict::Deny(reason) => tool_action(tc, ActionPhase::Denied).with_detail(reason),
             };
             admitted.push(rec.phase == ActionPhase::Started);
-            intents.push(rec.with_effect(effect).to_line());
+            intents.push(rec.with_capability(cap).to_line());
         }
         self.journal(&intents);
         for tc in calls {

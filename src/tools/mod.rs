@@ -38,6 +38,7 @@ use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
 use crate::admission::{self, ActionRequest, PlanPolicy, Policy, Verdict};
+use crate::capability::{Capability, Provider};
 use crate::effect::{Effect, Recovery};
 use crate::models::ToolResult;
 use crate::posture::Posture;
@@ -102,6 +103,10 @@ pub trait Tool: Send + Sync {
     /// derived from [`Tool::effect`]).
     fn mutates(&self) -> bool {
         self.effect().mutates()
+    }
+    /// Who carries the call out (`capability.rs`); local tools by default.
+    fn provider(&self) -> Provider {
+        Provider::Tool
     }
     /// Whether a `run_code` program may call it. Tools that drive live
     /// session state (the task board) stay native tools beside `run_code`.
@@ -246,6 +251,20 @@ impl ToolRegistry {
     #[cfg(test)]
     pub fn names(&self) -> Vec<&'static str> {
         self.model_facing().map(|t| t.name()).collect()
+    }
+
+    /// Every registered tool as a capability (hidden ones included).
+    #[cfg(test)]
+    pub fn capabilities(&self) -> Vec<Capability> {
+        self.tools
+            .iter()
+            .map(|t| Capability::of(t.as_ref()))
+            .collect()
+    }
+
+    /// One registered tool as a capability.
+    pub fn capability(&self, name: &str) -> Option<Capability> {
+        self.get(name).map(|t| Capability::of(t.as_ref()))
     }
 
     /// Every registered tool name (programmable ones included).

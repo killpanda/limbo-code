@@ -51,6 +51,9 @@ macro_rules! task_tool {
             fn effect(&self) -> crate::effect::Effect {
                 crate::effect::Effect::Session
             }
+            fn provider(&self) -> crate::capability::Provider {
+                crate::capability::Provider::Subagent
+            }
             fn recovery(&self) -> crate::effect::Recovery {
                 if $safe {
                     crate::effect::Recovery::Replay

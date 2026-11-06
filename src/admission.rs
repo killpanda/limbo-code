@@ -16,6 +16,7 @@
 
 use serde_json::Value;
 
+use crate::capability::Provider;
 use crate::effect::Effect;
 use crate::tools::Tool;
 
@@ -31,6 +32,9 @@ impl ActionRequest<'_> {
     }
     pub fn effect(&self) -> Effect {
         self.tool.effect()
+    }
+    pub fn provider(&self) -> Provider {
+        self.tool.provider()
     }
 }
 

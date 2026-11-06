@@ -41,6 +41,7 @@ src/
 ├── session.rs        # Session JSONL journal: records, append/rewrite, list, export, fork/handoff
 ├── trace.rs          # Append-only JSONL run log (<session dir>/traces/)
 ├── trace_viewer.rs   # /tracing-viewer: loopback HTTP server (std::net + threads) + assets/trace_viewer.html
+├── capability.rs     # Capability (name + effect + recovery + Provider: tool/program/subagent/human) per registered tool
 ├── commands.rs       # Frontend-neutral slash-command pieces (toggles, notices, /btw)
 ├── background.rs     # Process-wide channel for events outside a turn (subagents, skill reviews)
 ├── skills.rs         # SKILL.md discovery; the bundled daily pack (assets/daily_skills, include_dir!)
@@ -128,6 +129,6 @@ CI (`.github/workflows/ci.yml`) runs exactly these three.
 
 ## Adding Things
 
-- **Tool**: implement `Tool` in `src/tools/<name>.rs` (`name`/`description`/`parameters` + `run()`; declare its `effect()` (`effect.rs`: read/fetch/session/write/mutate/exec — `replay_safe`/`mutates` derive from it; the default is `exec`), override `recovery`/`program_callable` when needed; resolve paths with `resolve_path`, take `mutation_lock(path)` around writes), add it to `ToolRegistry::core` or `set_daily`, and add tests in the same file
+- **Tool**: implement `Tool` in `src/tools/<name>.rs` (`name`/`description`/`parameters` + `run()`; declare its `effect()` (`effect.rs`: read/fetch/session/write/mutate/exec — `replay_safe`/`mutates` derive from it; the default is `exec`), override `recovery`/`provider`/`program_callable` when needed; resolve paths with `resolve_path`, take `mutation_lock(path)` around writes), add it to `ToolRegistry::core` or `set_daily`, and add tests in the same file
 - **Web-search backend**: extend `src/tools/web_search.rs`; users pick it with `[web_search] provider`
 - **Provider/model**: add specs in `llm/catalog.rs`; a new wire format → a new `Dialect` variant plus a module implementing `Decoder` and the request body. User-specific endpoint/key tweaks belong in `[providers.<id>]` config, not the catalog

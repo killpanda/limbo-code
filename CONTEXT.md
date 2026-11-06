@@ -81,6 +81,15 @@ proposals should name modules with these terms.
 
 ## Execution
 
+- **Capability** — one thing a session can do (`capability.rs`): a
+  registered tool seen as name + effect + recovery + **provider**. The
+  model still calls tools by name; admission and the execution journal
+  work with capabilities.
+- **Provider** — who carries a capability out: `tool` (local, in
+  process), `program` (`run_code`; its sub-calls are capabilities of
+  their own), `subagent` (the task board and its children) or `human`
+  (`ask_user`: the answer is the user's next message).
+
 - **Effect** — what running a tool does (`effect.rs`): `read` (local
   reads), `fetch` (network reads), `session` (only this session's live
   state: task board, questions, the `run_code` transport), `write`

@@ -16,6 +16,7 @@ mod agent;
 mod attachments;
 mod auth;
 mod background;
+mod capability;
 mod cli_auth;
 mod commands;
 mod compaction;

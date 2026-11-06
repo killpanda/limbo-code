@@ -52,6 +52,10 @@ impl Tool for AskUserTool {
     fn effect(&self) -> crate::effect::Effect {
         crate::effect::Effect::Session
     }
+    /// The answer comes from the user (their next message).
+    fn provider(&self) -> crate::capability::Provider {
+        crate::capability::Provider::Human
+    }
     /// Asking again after a crash is harmless.
     fn recovery(&self) -> crate::effect::Recovery {
         crate::effect::Recovery::Replay

@@ -25,6 +25,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::capability::{Capability, Provider};
 use crate::effect::Effect;
 
 /// What kind of action a record is about.
@@ -63,6 +64,9 @@ pub struct ActionRecord {
     pub phase: ActionPhase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub effect: Option<Effect>,
+    /// Who carried it out (absent for unknown tools and legacy records).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<Provider>,
     /// A short note: the denial reason, a verify exit code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -78,12 +82,19 @@ impl ActionRecord {
             name: name.into(),
             phase,
             effect: None,
+            provider: None,
             detail: None,
             at: crate::session::now_iso(),
         }
     }
     pub fn with_effect(mut self, effect: Option<Effect>) -> Self {
         self.effect = effect;
+        self
+    }
+    /// Effect and provider of a capability (`None` = an unknown tool).
+    pub fn with_capability(mut self, cap: Option<Capability>) -> Self {
+        self.effect = cap.map(|c| c.effect);
+        self.provider = cap.map(|c| c.provider);
         self
     }
     pub fn with_detail(mut self, detail: impl Into<String>) -> Self {
@@ -140,11 +151,12 @@ mod tests {
     #[test]
     fn line_round_trip() {
         let r = ActionRecord::new(ActionKind::Tool, "c1", "bash", ActionPhase::Started)
-            .with_effect(Some(Effect::Exec));
+            .with_capability(Some(Capability::of(&crate::tools::bash::BashTool)));
         let line = r.to_line();
         assert_eq!(line["type"], "action");
         assert_eq!(line["phase"], "started");
         assert_eq!(line["effect"], "exec");
+        assert_eq!(line["provider"], "tool");
         let mut obj = line.as_object().unwrap().clone();
         obj.remove("type");
         let back: ActionRecord = serde_json::from_value(Value::Object(obj)).unwrap();

@@ -14,15 +14,16 @@ use std::sync::Weak;
 use serde_json::Value;
 
 use super::supervisor::Supervisor;
-use super::tools::SUBAGENT_TOOL_NAMES;
 use crate::admission::{ActionRequest, Policy, Verdict};
+use crate::capability::Provider;
 
 pub struct ReadOnlyPolicy;
 
 impl Policy for ReadOnlyPolicy {
     fn admit(&self, req: &ActionRequest) -> Verdict {
         let tool = req.tool;
-        if SUBAGENT_TOOL_NAMES.contains(&tool.name()) || !tool.mutates() {
+        // The board's own capabilities (checkpoint, need, finish, …) stay callable.
+        if req.provider() == Provider::Subagent || !tool.mutates() {
             return Verdict::Allow;
         }
         Verdict::Deny(format!(
