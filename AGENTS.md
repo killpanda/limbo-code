@@ -2,7 +2,7 @@
 
 **Limbo** is a minimal terminal AI coding agent, written in Rust (edition 2024, ratatui + tachyonfx). Users converse with an LLM in a TUI to explore, read, edit, and write code via a small set of tools. `--headless` runs a plain-terminal REPL frontend instead of the TUI (Herdr/script control), `--json` prints one JSON event per line, and `-p "<prompt>"` runs one turn and exits.
 
-**Tools execute immediately — no confirmation flow, no safety fences.** File tools are not scoped to the workdir (absolute paths and symlinks are honored as-is), there is no sensitive-file skip list, and `bash` runs every command as given (no dangerous-command filter). `ToolRegistry` runs a list of `ToolHook`s before every call (`before_tool` returns `Err` to block; `visible` hides a tool) — empty for the main agent, filled from the profile for subagents. `/plan` is a registry flag (`plan_mode`): only non-mutating tools and read-only bash run, also enforced on Code Mode sub-calls, persisted as `SessionMeta.plan_mode`.
+**Tools execute immediately — no confirmation flow, no safety fences.** File tools are not scoped to the workdir (absolute paths and symlinks are honored as-is), there is no sensitive-file skip list, and `bash` runs every command as given (no dangerous-command filter). Every call passes admission (`admission.rs`): `ToolRegistry` runs its `Policy` list in order (`admit` returns `Deny(reason)` to block; `visible` hides a tool) — empty for the main agent, filled from the profile for subagents. `/plan` is a registry flag (`plan_mode`) that puts `PlanPolicy` first: only tools whose effect does not mutate run (bash is blocked), also enforced on Code Mode sub-calls, persisted as `SessionMeta.plan_mode`.
 
 The source is commented for people learning Rust (`🦀 Rust notes` blocks); keep that style when adding code. `docs/learning-rust.md` has the reading order.
 
@@ -32,6 +32,7 @@ src/
 ├── goal.rs           # /goal state machine, prompt templates, verify runner
 ├── compaction.rs     # Context compaction decision and summary prompt
 ├── history.rs        # tool_call↔result pairing + resume repair
+├── admission.rs      # ActionRequest → Policy → Verdict (Allow/Deny); PlanPolicy
 ├── effect.rs         # Effect (read/fetch/session/write/mutate/exec) + Recovery (replay/inspect) per tool
 ├── attachments.rs    # Vision gate: images inline for vision models, path references otherwise
 ├── prompt.rs         # System-prompt assembly (tools section derived from the registry)
@@ -48,9 +49,9 @@ src/
 ├── headless.rs       # --headless / --json / -p frontends on the same pump
 ├── subagents/        # mod.rs (task board), supervisor.rs (scheduler, runners, notices),
 │                     # tools.rs (plan_tasks/task_*/answer; child: checkpoint/need/ask_main/finish/propose_task),
-│                     # profiles.rs (agent profiles + <project_facts> scan), hooks.rs (read-only/no-edit/
+│                     # profiles.rs (agent profiles + <project_facts> scan), policies.rs (read-only/no-edit/
 │                     # allow-list/path claims), worktree.rs (git worktree isolation)
-├── tools/            # mod.rs (Tool + ToolHook traits, ToolRegistry, path helpers, per-file mutation locks),
+├── tools/            # mod.rs (Tool trait, ToolRegistry, path helpers, per-file mutation locks),
 │                     # truncate.rs, read/write/edit/bash/grep/find/ls, run_code (Code Mode transport),
 │                     # web_search (only when its provider has a key), daily mode only: web_fetch,
 │                     # memory, session_search, ask_user (ends the turn), skill_manage
@@ -102,7 +103,7 @@ Single column: status bar (state/elapsed/tokens/model/workdir/queue + goal and C
 
 `/goal <text>` starts closed-loop mode: the first round proposes acceptance command(s) in a `<verify_proposal>` block; the user confirms (accept / edit / skip), then each round is a full agent turn followed by the verify command. Exit 0 ends the loop; otherwise the failure output is fed back into the next round until `max_rounds`, when a no-tool wrap-up turn summarizes. Goal state persists on `SessionMeta.goal`. Esc during verify kills the subprocess.
 
-Subagents (docs/subagents.md): the main agent's `plan_tasks` creates tasks on the board (suggest mode asks the user first); the supervisor runs each as a child agent with its own session file, gated by profile hooks. Child tools that end the turn (`need`, `ask_main`, `finish`) return `end_turn`. Notices reach the main agent as one subagent steer item; an idle main agent is woken through the background channel. Board records live in the main session file (`type: "task"`), so the board survives restarts; tasks running at exit come back paused.
+Subagents (docs/subagents.md): the main agent's `plan_tasks` creates tasks on the board (suggest mode asks the user first); the supervisor runs each as a child agent with its own session file, gated by profile policies. Child tools that end the turn (`need`, `ask_main`, `finish`) return `end_turn`. Notices reach the main agent as one subagent steer item; an idle main agent is woken through the background channel. Board records live in the main session file (`type: "task"`), so the board survives restarts; tasks running at exit come back paused.
 
 Daily mode (`limbo daily` / `--daily` / `/daily-mode on|off`, docs/daily-mode.md): a session posture like Code Mode — same loop, a general-assistant system prompt, plus the daily tools; persisted as `SessionMeta.daily_mode`. Memory is a snapshot taken when the agent is built: `USER.md` and `NOTES.md` enter daily prompts only; `memory` writes reach disk at once but the prompt changes only next session (prefix cache stays intact). `/learn` (and the automatic trigger in `learn.rs`) runs a `skill-reviewer` fork subagent whose only write tool is `skill_manage`.
 

@@ -9,7 +9,7 @@
 //! This module also holds the user-side verbs shared by the frontends:
 //! `/task`, `/agents` and `@name` routing.
 
-pub mod hooks;
+pub mod policies;
 pub mod profiles;
 pub mod supervisor;
 pub mod tools;

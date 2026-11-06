@@ -1,8 +1,9 @@
 //! Tools the model can call, and the registry that dispatches them.
 //!
 //! Like the Python version there are no safety fences: absolute paths are
-//! honored, and `bash` runs whatever it is given. The only gate is plan
-//! mode, which hides and blocks every tool that can change things.
+//! honored, and `bash` runs whatever it is given. The only gates are
+//! admission policies (`admission.rs`): plan mode, which hides and blocks
+//! every tool that can change things, and subagent profile restrictions.
 //!
 //! 🦀 Rust notes
 //! - [`Tool`] is an async trait. `#[async_trait]` rewrites `async fn` in a
@@ -36,6 +37,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
+use crate::admission::{self, ActionRequest, PlanPolicy, Policy, Verdict};
 use crate::effect::{Effect, Recovery};
 use crate::models::ToolResult;
 
@@ -108,16 +110,6 @@ pub trait Tool: Send + Sync {
     async fn run(&self, args: Value, ctx: &ToolContext) -> ToolResult;
 }
 
-/// A gate in front of every call (subagent profiles: read-only, no-edit,
-/// path claims). `Err` blocks the call with that message.
-pub trait ToolHook: Send + Sync {
-    fn before_tool(&self, tool: &dyn Tool, args: &Value) -> Result<(), String>;
-    /// Whether the tool is listed at all (hidden tools are also blocked).
-    fn visible(&self, _tool: &dyn Tool) -> bool {
-        true
-    }
-}
-
 /// Tools only daily mode registers.
 pub const DAILY_TOOLS: [&str; 5] = [
     "web_fetch",
@@ -135,7 +127,10 @@ pub struct ToolRegistry {
     pub daily_mode: bool,
     /// Code Mode: the model sees only `run_code` (plus non-programmable tools).
     pub code_mode: bool,
-    pub hooks: Vec<Arc<dyn ToolHook>>,
+    /// Admission policies in front of every call (subagent profiles:
+    /// read-only, no-edit, allow-list, path claims); plan mode adds
+    /// [`PlanPolicy`] ahead of them.
+    pub policies: Vec<Arc<dyn Policy>>,
     /// Set when the `memory` tool ran (daily memory nudge bookkeeping).
     pub memory_written: Arc<AtomicBool>,
     /// Where `session_search` looks.
@@ -166,7 +161,7 @@ impl ToolRegistry {
             plan_mode: false,
             daily_mode: false,
             code_mode: false,
-            hooks: Vec::new(),
+            policies: Vec::new(),
             memory_written: Arc::new(AtomicBool::new(false)),
             session_dir: crate::config::limbo_home().join("sessions"),
         }
@@ -239,8 +234,15 @@ impl ToolRegistry {
         self.tools.iter().map(|t| t.name()).collect()
     }
 
+    /// The active policies, in order: plan mode first, then the registry's own.
+    fn active_policies(&self) -> impl Iterator<Item = &dyn Policy> {
+        let plan: Option<&dyn Policy> = self.plan_mode.then_some(&PlanPolicy);
+        plan.into_iter()
+            .chain(self.policies.iter().map(|p| p.as_ref()))
+    }
+
     fn allowed(&self, t: &Arc<dyn Tool>) -> bool {
-        (!self.plan_mode || !t.mutates()) && self.hooks.iter().all(|h| h.visible(t.as_ref()))
+        self.active_policies().all(|p| p.visible(t.as_ref()))
     }
 
     fn model_facing(&self) -> impl Iterator<Item = &Arc<dyn Tool>> {
@@ -275,22 +277,18 @@ impl ToolRegistry {
             .collect()
     }
 
-    /// Run one call. Unknown tools, plan-mode and hook blocks become error
-    /// results the model can read and react to.
+    /// Run one call: resolve → admit → run. Unknown tools and denials
+    /// become error results the model can read and react to.
     pub async fn execute(&self, name: &str, args: Value, ctx: &ToolContext) -> ToolResult {
         let Some(tool) = self.get(name) else {
             return ToolResult::err(format!("Unknown tool: {name}"));
         };
-        if self.plan_mode && tool.mutates() {
-            return ToolResult::err(format!(
-                "Plan mode is on (read-only): {name} is blocked. Keep exploring with read-only tools, then \
-                 present the plan; the user leaves plan mode with /plan off before anything is changed."
-            ));
-        }
-        for h in &self.hooks {
-            if let Err(e) = h.before_tool(tool.as_ref(), &args) {
-                return ToolResult::err(e);
-            }
+        let req = ActionRequest {
+            tool: tool.as_ref(),
+            args: &args,
+        };
+        if let Verdict::Deny(reason) = admission::admit(self.active_policies(), &req) {
+            return ToolResult::err(reason);
         }
         if let Some(err) = args.get("parse_error").and_then(Value::as_str) {
             return ToolResult::err(format!(

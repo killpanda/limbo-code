@@ -68,6 +68,12 @@ proposals should name modules with these terms.
   (repeatable local writes), `mutate` (other local changes), `exec`
   (arbitrary commands). Plan mode and read-only profiles block the
   mutating ones (`write`/`mutate`/`exec`). Journaled on each `tool_intent`.
+- **Admission** — the gate every action passes before it runs
+  (`admission.rs`): an **action request** (tool, arguments, effect) goes
+  through the registry's **policies** in order and the first `Deny`
+  wins; its reason is the error result the model reads. Plan mode is
+  `PlanPolicy`; subagent profiles add read-only / no-edit / allow-list /
+  path-claim policies (`subagents/policies.rs`).
 - **Recovery** — what resume does with a call a crash interrupted:
   `replay` (re-run it; the default for read/fetch) or `inspect` (do not
   re-run; the model is told it may have partially run).

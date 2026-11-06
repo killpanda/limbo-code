@@ -11,6 +11,7 @@
 //! - `tui`        — the ratatui + tachyonfx interface
 //! - `headless`   — plain-terminal and JSON frontends
 
+mod admission;
 mod agent;
 mod attachments;
 mod auth;
