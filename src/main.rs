@@ -25,6 +25,7 @@ mod goal;
 mod headless;
 mod history;
 mod integrations;
+mod journal;
 mod learn;
 mod llm;
 mod memory;

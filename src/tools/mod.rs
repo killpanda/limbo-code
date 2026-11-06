@@ -296,19 +296,27 @@ impl ToolRegistry {
             .collect()
     }
 
-    /// Run one call: resolve → admit → run. Unknown tools and denials
-    /// become error results the model can read and react to.
-    pub async fn execute(&self, name: &str, args: Value, ctx: &ToolContext) -> ToolResult {
+    /// Whether a call would be admitted (unknown tools are denied).
+    pub fn admit(&self, name: &str, args: &Value) -> Verdict {
         let Some(tool) = self.get(name) else {
-            return ToolResult::err(format!("Unknown tool: {name}"));
+            return Verdict::Deny(format!("Unknown tool: {name}"));
         };
         let req = ActionRequest {
             tool: tool.as_ref(),
-            args: &args,
+            args,
         };
-        if let Verdict::Deny(reason) = admission::admit(self.active_policies(), &req) {
+        admission::admit(self.active_policies(), &req)
+    }
+
+    /// Run one call: resolve → admit → run. Unknown tools and denials
+    /// become error results the model can read and react to.
+    pub async fn execute(&self, name: &str, args: Value, ctx: &ToolContext) -> ToolResult {
+        if let Verdict::Deny(reason) = self.admit(name, &args) {
             return ToolResult::err(reason);
         }
+        let Some(tool) = self.get(name) else {
+            return ToolResult::err(format!("Unknown tool: {name}"));
+        };
         if let Some(err) = args.get("parse_error").and_then(Value::as_str) {
             return ToolResult::err(format!(
                 "Tool arguments were not valid JSON ({err}). Re-issue the call with valid JSON arguments."

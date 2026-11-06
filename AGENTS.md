@@ -37,6 +37,7 @@ src/
 ├── attachments.rs    # Vision gate: images inline for vision models, path references otherwise
 ├── posture.rs        # Posture = policy (plan) × capability set (coding/daily) × presentation (direct/code); strategy (single/goal)
 ├── prompt.rs         # System-prompt assembly (tools section derived from the registry)
+├── journal.rs        # Execution journal: `action` records (started/denied/completed/failed) + ActionLog for recovery
 ├── session.rs        # Session JSONL journal: records, append/rewrite, list, export, fork/handoff
 ├── trace.rs          # Append-only JSONL run log (<session dir>/traces/)
 ├── trace_viewer.rs   # /tracing-viewer: loopback HTTP server (std::net + threads) + assets/trace_viewer.html
@@ -94,7 +95,7 @@ Providers/models live in `llm/catalog.rs`; unknown models get generic OpenAI-com
 [providers.<id>]  # base_url / api_key / api_key_env / headers
 ```
 
-`/model` rebuilds the client mid-session (refused while busy) and persists via `toml_edit`. Sessions resume via `--continue` / `--resume` / `/sessions`; resume repairs dangling tool calls: each call commits a `tool_intent` record before it runs, so a crashed call is re-run on the next turn if its tool's recovery is `replay` (read/fetch effects: read/grep/find/ls, web tools), otherwise marked "may have partially run" (intent committed) or "did not run" (no intent). `/export [path]` merges meta + trace + messages (Markdown if `.md`). `/fork [n]` copies the active history (first n user turns) into a new session, `/handoff <note>` starts a clean linked session from a note; both record `parent_session` and leave the parent untouched.
+`/model` rebuilds the client mid-session (refused while busy) and persists via `toml_edit`. Sessions resume via `--continue` / `--resume` / `/sessions`; resume repairs dangling tool calls from the execution journal (`journal.rs`): each call appends an `action` record `started` (or `denied`) before it runs and `completed`/`failed` once its result is in (goal verify runs too, kind `verify`), so a crashed call is re-run on the next turn if its tool's recovery is `replay` (read/fetch effects: read/grep/find/ls, web tools), otherwise marked "ran to the end, result lost" (finished), "may have partially run" (started only) or "did not run" (nothing). Legacy `tool_intent` records load as `started`. `/export [path]` merges meta + trace + messages (Markdown if `.md`). `/fork [n]` copies the active history (first n user turns) into a new session, `/handoff <note>` starts a clean linked session from a note; both record `parent_session` and leave the parent untouched.
 
 Skills: `~/.agents/skills/<name>/SKILL.md` (global, shared with other agents; lowest of the non-bundled), `~/.limbo/skills/<name>/SKILL.md` (user) and `<workdir>/.agents/skills/<name>/SKILL.md` (project, wins collisions); daily sessions also see the bundled pack (lowest, unpacked to `~/.limbo/daily/bundled/<version>/`) and `~/.limbo/daily/skills/` (highest), coding sessions never do — injected as an `<available_skills>` catalog in the system prompt and invocable via `/<name> [args]`.
 

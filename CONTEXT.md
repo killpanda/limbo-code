@@ -41,8 +41,14 @@ proposals should name modules with these terms.
   that keeps a crash recoverable (summarized messages before their
   compaction record, `dequeued` after the message carrying the item). The
   Agent calls its verbs (`checkpoint`, `queued`/`dequeued`,
-  `record_intents`, `compacted`, `patch_meta`); `session.rs` owns the
+  `journal_action`, `compacted`, `patch_meta`); `session.rs` owns the
   file format and loading.
+- **Execution journal** — the `action` records in the session file
+  (`journal.rs`): every tool call (and `/goal` verify run) appends
+  `started` or `denied` before it runs and `completed` / `failed` when
+  its result is in. Resume reads them as an **action log**: a call with
+  no result message is "did not run" (nothing), "may have partially
+  run" (started only) or "result lost" (finished).
 - **Steer** — a user message queued mid-turn, injected at consistency
   points (loop top, turn end, run head). The steer queue owns
   queueing semantics — id generation, FIFO, and the cancel boundary (an
@@ -80,7 +86,7 @@ proposals should name modules with these terms.
   state: task board, questions, the `run_code` transport), `write`
   (repeatable local writes), `mutate` (other local changes), `exec`
   (arbitrary commands). Plan mode and read-only profiles block the
-  mutating ones (`write`/`mutate`/`exec`). Journaled on each `tool_intent`.
+  mutating ones (`write`/`mutate`/`exec`). Journaled on each `started` action record.
 - **Admission** — the gate every action passes before it runs
   (`admission.rs`): an **action request** (tool, arguments, effect) goes
   through the registry's **policies** in order and the first `Deny`

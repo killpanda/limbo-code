@@ -34,7 +34,7 @@ JSONL，首行为 meta，后续为消息行。**向后兼容**：无 meta 行的
 ```
 
 - `id` 即文件名 stem（不含 `.jsonl`），`--resume` 支持 id 前缀匹配
-- 增量追加：一轮内每个一致性点追加新消息和类型化记录（`meta_patch`、`tool_intent`、`queue`、`compaction`）；只有首次保存、追加失败后或恢复时修复了悬空调用才原子重写全量（写入顺序与回退规则见 `src/session.rs` 和 `src/agent.rs`）
+- 增量追加：一轮内每个一致性点追加新消息和类型化记录（`meta_patch`、`action`（执行日志，旧文件为 `tool_intent`）、`queue`、`compaction`）；只有首次保存、追加失败后或恢复时修复了悬空调用才原子重写全量（写入顺序与回退规则见 `src/session.rs` 和 `src/agent.rs`）
 - `title` 取首条 user 消息（折叠空白、截断 50 字符）
 - `list_sessions` 只读每个文件的首行，O(1)/文件；旧文件回退用 mtime 排序、标题为空
 
@@ -63,7 +63,9 @@ src/
   （AGENTS.md 可能已变更）
 - **悬空 tool_calls 修复**：旧会话末尾若有未配对的 `tool_calls`（崩溃导致），
   加载时补占位 tool 消息（`[session restored: tool call interrupted]`），
-  避免 OpenAI API 报 400
+  避免 OpenAI API 报 400。占位内容按执行日志（`action` 记录）区分：没有记录 = 没运行，
+  只有 `started` = 可能部分执行，已有 `completed`/`failed` = 已执行完但结果丢失；
+  recovery 为 `replay` 的只读工具会直接重跑
 - **沿用原文件**：resume 不产生新 session 文件，继续写同一文件
 - **workdir 跟随会话**：CLI resume 时若 meta 中的 workdir 仍存在，切换过去
 - **model 用当前配置**：meta 中记录的原 model 仅作展示

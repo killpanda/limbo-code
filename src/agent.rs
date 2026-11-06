@@ -30,6 +30,7 @@ use serde_json::{Value, json};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
+use crate::admission::Verdict;
 use crate::attachments::build_user_content;
 use crate::compaction::{
     self, build_summary_prompt, find_split_point, is_summary_message, make_summary_message,
@@ -37,6 +38,7 @@ use crate::compaction::{
 };
 use crate::config::Config;
 use crate::history;
+use crate::journal::{ActionKind, ActionLog, ActionPhase, ActionRecord};
 use crate::llm::usage::{estimate_tokens, normalize_usage};
 use crate::llm::{LlmClient, LlmError};
 use crate::memory::{MEMORY_NUDGE, MemorySnapshot, MemoryStore, memory_dir};
@@ -313,7 +315,7 @@ impl Agent {
             meta,
             messages,
             compactions,
-            intents,
+            actions,
             queue,
             raw_message_ids,
         } = session::load_session_full(path)?;
@@ -340,9 +342,9 @@ impl Agent {
         agent.file_created = true;
         agent.persisted = raw_message_ids.into_iter().collect();
         agent.compactions = compactions;
-        let started: HashSet<String> = intents.iter().map(|i| i.call_id.clone()).collect();
+        let journal = ActionLog::from_records(&actions);
         let registry = agent.registry.clone();
-        let rec = history::recover(messages, meta.tool_intents.then_some(&started), |name| {
+        let rec = history::recover(messages, meta.tool_intents.then_some(&journal), |name| {
             registry.get(name).is_some_and(|t| t.replay_safe())
         });
         agent.messages = rec.messages;
@@ -768,6 +770,22 @@ impl Agent {
         if self.file_created {
             let _ = session::append_lines(&self.session_path, records);
         }
+    }
+
+    /// Append one execution-journal record (goal verify runs use this).
+    pub fn journal_action(&self, record: &ActionRecord) {
+        self.journal(&[record.to_line()]);
+    }
+
+    /// A call's result is in: journal it before the result message is
+    /// checkpointed, so a crash in between is told apart from one mid-run.
+    fn journal_finished(&self, tc: &ToolCall, r: &ToolResult) {
+        let phase = if r.success {
+            ActionPhase::Completed
+        } else {
+            ActionPhase::Failed
+        };
+        self.journal_action(&tool_action(tc, phase));
     }
 
     // -- token accounting ------------------------------------------------------
@@ -1228,14 +1246,18 @@ impl Agent {
         tx: &EventTx,
         cancel: &CancellationToken,
     ) {
-        // Commit each call's intent before any side effect runs.
-        let intents: Vec<Value> = calls
-            .iter()
-            .map(|tc| {
-                let tool = self.registry.get(tc.name());
-                session::tool_intent_record(&tc.id, tc.name(), tool.as_deref())
-            })
-            .collect();
+        // Journal each call as started (or denied) before any side effect runs.
+        let mut admitted = Vec::with_capacity(calls.len());
+        let mut intents: Vec<Value> = Vec::with_capacity(calls.len());
+        for tc in calls {
+            let effect = self.registry.get(tc.name()).map(|t| t.effect());
+            let rec = match self.registry.admit(tc.name(), &tc.function.arguments) {
+                Verdict::Allow => tool_action(tc, ActionPhase::Started),
+                Verdict::Deny(reason) => tool_action(tc, ActionPhase::Denied).with_detail(reason),
+            };
+            admitted.push(rec.phase == ActionPhase::Started);
+            intents.push(rec.with_effect(effect).to_line());
+        }
         self.journal(&intents);
         for tc in calls {
             let _ = tx.send(AgentEvent::ToolCall {
@@ -1266,6 +1288,9 @@ impl Agent {
             }
             while let Some((i, r)) = running.next().await {
                 let tc = &calls[i];
+                if admitted[i] {
+                    self.journal_finished(tc, &r);
+                }
                 let _ = tx.send(AgentEvent::ToolResult {
                     id: tc.id.clone(),
                     name: tc.name().into(),
@@ -1284,6 +1309,9 @@ impl Agent {
                         .execute(tc.name(), tc.function.arguments.clone(), &ctx)
                         .await
                 };
+                if admitted[i] {
+                    self.journal_finished(tc, &r);
+                }
                 let _ = tx.send(AgentEvent::ToolResult {
                     id: tc.id.clone(),
                     name: tc.name().into(),
@@ -1528,6 +1556,10 @@ impl Agent {
     }
 }
 
+fn tool_action(tc: &ToolCall, phase: ActionPhase) -> ActionRecord {
+    ActionRecord::new(ActionKind::Tool, &tc.id, tc.name(), phase)
+}
+
 /// `20261102-021814-ab12cd` — sortable and readable.
 pub fn new_session_id() -> String {
     let short: String = new_id().chars().take(6).collect();
@@ -1686,11 +1718,12 @@ pub(crate) mod tests {
         )]);
         agent.messages.push(a);
         agent.checkpoint();
-        agent.journal(&[session::tool_intent_record(
+        agent.journal_action(&ActionRecord::new(
+            ActionKind::Tool,
             "w1",
             "write",
-            Some(&crate::tools::write::WriteTool),
-        )]);
+            ActionPhase::Started,
+        ));
         // "crash" here, then resume
         let resumed = Agent::resume(
             test_config("http://127.0.0.1:9/v1"),
