@@ -32,6 +32,7 @@ src/
 ├── goal.rs           # /goal state machine, prompt templates, verify runner
 ├── compaction.rs     # Context compaction decision and summary prompt
 ├── history.rs        # tool_call↔result pairing + resume repair
+├── effect.rs         # Effect (read/fetch/session/write/mutate/exec) + Recovery (replay/inspect) per tool
 ├── attachments.rs    # Vision gate: images inline for vision models, path references otherwise
 ├── prompt.rs         # System-prompt assembly (tools section derived from the registry)
 ├── session.rs        # Session JSONL journal: records, append/rewrite, list, export, fork/handoff
@@ -91,7 +92,7 @@ Providers/models live in `llm/catalog.rs`; unknown models get generic OpenAI-com
 [providers.<id>]  # base_url / api_key / api_key_env / headers
 ```
 
-`/model` rebuilds the client mid-session (refused while busy) and persists via `toml_edit`. Sessions resume via `--continue` / `--resume` / `/sessions`; resume repairs dangling tool calls: each call commits a `tool_intent` record before it runs, so a crashed call is re-run on the next turn if its tool is `replay_safe` (read/grep/find/ls), otherwise marked "may have partially run" (intent committed) or "did not run" (no intent). `/export [path]` merges meta + trace + messages (Markdown if `.md`). `/fork [n]` copies the active history (first n user turns) into a new session, `/handoff <note>` starts a clean linked session from a note; both record `parent_session` and leave the parent untouched.
+`/model` rebuilds the client mid-session (refused while busy) and persists via `toml_edit`. Sessions resume via `--continue` / `--resume` / `/sessions`; resume repairs dangling tool calls: each call commits a `tool_intent` record before it runs, so a crashed call is re-run on the next turn if its tool's recovery is `replay` (read/fetch effects: read/grep/find/ls, web tools), otherwise marked "may have partially run" (intent committed) or "did not run" (no intent). `/export [path]` merges meta + trace + messages (Markdown if `.md`). `/fork [n]` copies the active history (first n user turns) into a new session, `/handoff <note>` starts a clean linked session from a note; both record `parent_session` and leave the parent untouched.
 
 Skills: `~/.agents/skills/<name>/SKILL.md` (global, shared with other agents; lowest of the non-bundled), `~/.limbo/skills/<name>/SKILL.md` (user) and `<workdir>/.agents/skills/<name>/SKILL.md` (project, wins collisions); daily sessions also see the bundled pack (lowest, unpacked to `~/.limbo/daily/bundled/<version>/`) and `~/.limbo/daily/skills/` (highest), coding sessions never do — injected as an `<available_skills>` catalog in the system prompt and invocable via `/<name> [args]`.
 
@@ -124,6 +125,6 @@ CI (`.github/workflows/ci.yml`) runs exactly these three.
 
 ## Adding Things
 
-- **Tool**: implement `Tool` in `src/tools/<name>.rs` (`name`/`description`/`parameters` + `run()`; override `replay_safe`/`mutates`/`program_callable` when needed; resolve paths with `resolve_path`, take `mutation_lock(path)` around writes), add it to `ToolRegistry::core` or `set_daily`, and add tests in the same file
+- **Tool**: implement `Tool` in `src/tools/<name>.rs` (`name`/`description`/`parameters` + `run()`; declare its `effect()` (`effect.rs`: read/fetch/session/write/mutate/exec — `replay_safe`/`mutates` derive from it; the default is `exec`), override `recovery`/`program_callable` when needed; resolve paths with `resolve_path`, take `mutation_lock(path)` around writes), add it to `ToolRegistry::core` or `set_daily`, and add tests in the same file
 - **Web-search backend**: extend `src/tools/web_search.rs`; users pick it with `[web_search] provider`
 - **Provider/model**: add specs in `llm/catalog.rs`; a new wire format → a new `Dialect` variant plus a module implementing `Decoder` and the request body. User-specific endpoint/key tweaks belong in `[providers.<id>]` config, not the catalog

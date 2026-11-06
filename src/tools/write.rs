@@ -13,6 +13,9 @@ impl Tool for WriteTool {
     fn name(&self) -> &'static str {
         "write"
     }
+    fn effect(&self) -> crate::effect::Effect {
+        crate::effect::Effect::Write
+    }
     fn description(&self) -> String {
         "Create or overwrite a file. Use only for new files or complete rewrites.".into()
     }

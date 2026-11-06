@@ -47,11 +47,16 @@ macro_rules! task_tool {
             fn parameters(&self) -> Value {
                 $params
             }
-            fn replay_safe(&self) -> bool {
-                $safe
+            /// Board state only: plan mode may still manage the board.
+            fn effect(&self) -> crate::effect::Effect {
+                crate::effect::Effect::Session
             }
-            fn mutates(&self) -> bool {
-                false // plan mode may still manage the board
+            fn recovery(&self) -> crate::effect::Recovery {
+                if $safe {
+                    crate::effect::Recovery::Replay
+                } else {
+                    crate::effect::Recovery::Inspect
+                }
             }
             fn program_callable(&self) -> bool {
                 false

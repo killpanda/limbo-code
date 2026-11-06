@@ -1240,11 +1240,8 @@ impl Agent {
         let intents: Vec<Value> = calls
             .iter()
             .map(|tc| {
-                let safe = self
-                    .registry
-                    .get(tc.name())
-                    .is_some_and(|t| t.replay_safe());
-                session::tool_intent_record(&tc.id, tc.name(), safe)
+                let tool = self.registry.get(tc.name());
+                session::tool_intent_record(&tc.id, tc.name(), tool.as_deref())
             })
             .collect();
         self.journal(&intents);
@@ -1702,7 +1699,11 @@ pub(crate) mod tests {
         )]);
         agent.messages.push(a);
         agent.checkpoint();
-        agent.journal(&[session::tool_intent_record("w1", "write", false)]);
+        agent.journal(&[session::tool_intent_record(
+            "w1",
+            "write",
+            Some(&crate::tools::write::WriteTool),
+        )]);
         // "crash" here, then resume
         let resumed = Agent::resume(
             test_config("http://127.0.0.1:9/v1"),

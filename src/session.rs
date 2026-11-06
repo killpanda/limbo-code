@@ -145,6 +145,9 @@ pub struct ToolIntentRecord {
     pub name: String,
     #[serde(default = "unsafe_replay")]
     pub replay: String,
+    /// The tool's declared effect (absent in files written before effects).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effect: Option<crate::effect::Effect>,
     #[serde(default)]
     pub created_at: String,
 }
@@ -202,13 +205,21 @@ fn record(kind: &str, value: impl Serialize) -> Value {
     Value::Object(out)
 }
 
-pub fn tool_intent_record(call_id: &str, name: &str, replay_safe: bool) -> Value {
+/// The intent a call commits before it runs. `tool` is `None` for a name
+/// the registry does not know (recorded as unsafe, no effect).
+pub fn tool_intent_record(
+    call_id: &str,
+    name: &str,
+    tool: Option<&dyn crate::tools::Tool>,
+) -> Value {
+    let replay_safe = tool.is_some_and(|t| t.replay_safe());
     record(
         "tool_intent",
         ToolIntentRecord {
             call_id: call_id.into(),
             name: name.into(),
             replay: if replay_safe { "safe" } else { "unsafe" }.into(),
+            effect: tool.map(|t| t.effect()),
             created_at: now_iso(),
         },
     )
@@ -656,7 +667,7 @@ mod tests {
                 meta_patch_record(&patched),
                 queued_record(&q),
                 json!({"type": "future_thing", "x": 1}),
-                tool_intent_record("c1", "bash", false),
+                tool_intent_record("c1", "bash", Some(&crate::tools::bash::BashTool)),
             ],
         )
         .unwrap();
@@ -672,6 +683,8 @@ mod tests {
         assert_eq!(loaded.messages.len(), 3);
         assert_eq!(loaded.queue.len(), 1);
         assert_eq!(loaded.intents[0].call_id, "c1");
+        assert_eq!(loaded.intents[0].replay, "unsafe");
+        assert_eq!(loaded.intents[0].effect, Some(crate::effect::Effect::Exec));
     }
 
     #[test]

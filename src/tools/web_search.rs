@@ -206,8 +206,8 @@ impl Tool for WebSearchTool {
             "required": ["query"],
         })
     }
-    fn replay_safe(&self) -> bool {
-        true
+    fn effect(&self) -> crate::effect::Effect {
+        crate::effect::Effect::Fetch
     }
     async fn run(&self, args: Value, _ctx: &ToolContext) -> ToolResult {
         let Some(query) = arg_str(&args, "query")

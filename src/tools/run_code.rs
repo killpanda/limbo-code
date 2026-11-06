@@ -264,8 +264,8 @@ impl Tool for RunCodeTool {
     }
     /// Its sub-calls go through the registry, which applies plan mode to
     /// each of them; the transport itself changes nothing.
-    fn mutates(&self) -> bool {
-        false
+    fn effect(&self) -> crate::effect::Effect {
+        crate::effect::Effect::Session
     }
     fn program_callable(&self) -> bool {
         false

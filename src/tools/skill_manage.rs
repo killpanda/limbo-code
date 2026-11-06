@@ -203,6 +203,9 @@ impl Tool for SkillManageTool {
     fn name(&self) -> &'static str {
         "skill_manage"
     }
+    fn effect(&self) -> crate::effect::Effect {
+        crate::effect::Effect::Mutate
+    }
     fn description(&self) -> String {
         DESCRIPTION.into()
     }

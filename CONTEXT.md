@@ -60,6 +60,18 @@ proposals should name modules with these terms.
   (converging on the latest config model), persist to config.toml. The UI
   screen is an adapter translating verdicts into chat messages.
 
+## Execution
+
+- **Effect** — what running a tool does (`effect.rs`): `read` (local
+  reads), `fetch` (network reads), `session` (only this session's live
+  state: task board, questions, the `run_code` transport), `write`
+  (repeatable local writes), `mutate` (other local changes), `exec`
+  (arbitrary commands). Plan mode and read-only profiles block the
+  mutating ones (`write`/`mutate`/`exec`). Journaled on each `tool_intent`.
+- **Recovery** — what resume does with a call a crash interrupted:
+  `replay` (re-run it; the default for read/fetch) or `inspect` (do not
+  re-run; the model is told it may have partially run).
+
 ## Subagents
 
 - **Task board** — the delegated work of one main session

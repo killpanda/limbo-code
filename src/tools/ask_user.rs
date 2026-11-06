@@ -49,8 +49,12 @@ impl Tool for AskUserTool {
             "required": ["question"],
         })
     }
-    fn replay_safe(&self) -> bool {
-        true
+    fn effect(&self) -> crate::effect::Effect {
+        crate::effect::Effect::Session
+    }
+    /// Asking again after a crash is harmless.
+    fn recovery(&self) -> crate::effect::Recovery {
+        crate::effect::Recovery::Replay
     }
     async fn run(&self, args: Value, _ctx: &ToolContext) -> ToolResult {
         if arg_str(&args, "question").is_none_or(|q| q.trim().is_empty()) {

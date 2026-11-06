@@ -36,6 +36,7 @@ use async_trait::async_trait;
 use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 
+use crate::effect::{Effect, Recovery};
 use crate::models::ToolResult;
 
 /// Everything a tool call may need besides its arguments.
@@ -81,13 +82,23 @@ pub trait Tool: Send + Sync {
     fn description(&self) -> String;
     /// JSON Schema of the arguments.
     fn parameters(&self) -> Value;
-    /// Read-only tools are re-run after a crash; everything else is not.
-    fn replay_safe(&self) -> bool {
-        false
+    /// What running the tool does (see [`crate::effect`]). Unknown tools
+    /// are treated as arbitrary execution.
+    fn effect(&self) -> Effect {
+        Effect::Exec
     }
-    /// Whether the tool can change files or state (blocked in plan mode).
+    /// What resume does with a call a crash interrupted.
+    fn recovery(&self) -> Recovery {
+        self.effect().default_recovery()
+    }
+    /// Re-run after a crash (derived from [`Tool::recovery`]).
+    fn replay_safe(&self) -> bool {
+        self.recovery() == Recovery::Replay
+    }
+    /// Whether the tool can change files or state (blocked in plan mode;
+    /// derived from [`Tool::effect`]).
     fn mutates(&self) -> bool {
-        !self.replay_safe()
+        self.effect().mutates()
     }
     /// Whether a `run_code` program may call it. Tools that drive live
     /// session state (the task board) stay native tools beside `run_code`.
@@ -381,6 +392,23 @@ mod tests {
             PathBuf::from("/work/proj/a.rs")
         );
         assert_eq!(resolve_path(wd, "/etc/hosts"), PathBuf::from("/etc/hosts"));
+    }
+
+    /// The effect table: replay and plan-mode gating follow from it.
+    #[test]
+    fn core_tool_effects() {
+        let reg = ToolRegistry::core(true);
+        let row = |n: &str| {
+            let t = reg.get(n).unwrap();
+            (t.effect(), t.replay_safe(), t.mutates())
+        };
+        for n in ["read", "grep", "find", "ls"] {
+            assert_eq!(row(n), (Effect::Read, true, false), "{n}");
+        }
+        assert_eq!(row("write"), (Effect::Write, false, true));
+        assert_eq!(row("edit"), (Effect::Mutate, false, true));
+        assert_eq!(row("bash"), (Effect::Exec, false, true));
+        assert_eq!(row("run_code"), (Effect::Session, false, false));
     }
 
     #[tokio::test]

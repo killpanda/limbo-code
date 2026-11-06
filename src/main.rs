@@ -19,6 +19,7 @@ mod cli_auth;
 mod commands;
 mod compaction;
 mod config;
+mod effect;
 mod goal;
 mod headless;
 mod history;

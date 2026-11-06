@@ -63,8 +63,8 @@ impl Tool for ReadTool {
             "required": ["path"],
         })
     }
-    fn replay_safe(&self) -> bool {
-        true
+    fn effect(&self) -> crate::effect::Effect {
+        crate::effect::Effect::Read
     }
 
     async fn run(&self, args: Value, ctx: &ToolContext) -> ToolResult {
