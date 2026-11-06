@@ -788,7 +788,8 @@ impl Agent {
         } else {
             ActionPhase::Failed
         };
-        self.journal_action(&tool_action(tc, phase));
+        let cap = self.registry.capability(tc.name());
+        self.journal_action(&tool_action(tc, phase).with_capability(cap));
     }
 
     // -- token accounting ------------------------------------------------------
