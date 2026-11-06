@@ -232,6 +232,7 @@ mod tests {
             id: "1".into(),
             name: "bash".into(),
             arguments: json!({}),
+            provider: crate::capability::Provider::Tool,
         }
     }
     fn result(name: &str, ok: bool) -> AgentEvent {

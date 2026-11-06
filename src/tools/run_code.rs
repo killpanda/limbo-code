@@ -102,6 +102,42 @@ fn parameter_list(parameters: &Value) -> String {
         .join(", ")
 }
 
+/// One program sub-call: admitted and run through the registry like any
+/// call, and journaled as its own action (`parent` = the `run_code` call).
+async fn run_sub_call(
+    registry: &ToolRegistry,
+    name: &str,
+    args: Value,
+    sub: &ToolContext,
+) -> ToolResult {
+    use crate::journal::{ActionKind, ActionPhase, ActionRecord, append};
+    let parent = sub.call_id.rsplit_once('.').map_or("", |(p, _)| p);
+    let record = |phase| {
+        ActionRecord::new(ActionKind::Tool, &sub.call_id, name, phase)
+            .with_capability(registry.capability(name))
+            .with_parent(parent)
+    };
+    let admitted = registry.admit(name, &args) == crate::admission::Verdict::Allow;
+    if let Some(path) = &sub.journal {
+        let phase = if admitted {
+            ActionPhase::Started
+        } else {
+            ActionPhase::Denied
+        };
+        append(path, &[record(phase)]);
+    }
+    let r = registry.execute(name, args, sub).await;
+    if let (true, Some(path)) = (admitted, &sub.journal) {
+        let phase = if r.success {
+            ActionPhase::Completed
+        } else {
+            ActionPhase::Failed
+        };
+        append(path, &[record(phase)]);
+    }
+    r
+}
+
 /// The SDK section of the system prompt, derived from the registry.
 pub fn render_tools_sdk(registry: &ToolRegistry) -> String {
     let mut lines = vec![
@@ -361,12 +397,13 @@ async fn run_program(
                         let registry = registry.clone();
                         let mut sub = ctx.clone();
                         sub.call_id = format!("{}.{}", ctx.call_id, &crate::models::new_id()[..6]);
-                        ctx.progress(format!("tools.{name}(…)"));
+                        let provider = registry.capability(&name).map(|c| c.provider).unwrap_or_default();
+                        ctx.progress(format!("tools.{name}(…) · {}", provider.label()));
                         running.push(async move {
                             let r = if registry.get(&name).is_some_and(|t| !t.program_callable()) {
                                 ToolResult::err(format!("{name} cannot be called from a program; call it as a tool"))
                             } else {
-                                registry.execute(&name, call_args, &sub).await
+                                run_sub_call(&registry, &name, call_args, &sub).await
                             };
                             (id, r)
                         });
@@ -466,6 +503,52 @@ mod tests {
         assert!(r.success, "{out}");
         assert!(out.contains("failed read"), "{out}");
         assert!(out.contains("{\"n\": 2}"), "{out}");
+    }
+
+    #[tokio::test]
+    async fn sub_calls_are_journaled() {
+        if !has_python() {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let journal = dir.path().join("s.jsonl");
+        std::fs::write(&journal, "").unwrap();
+        struct NoWrite;
+        impl crate::admission::Policy for NoWrite {
+            fn admit(&self, req: &crate::admission::ActionRequest) -> crate::admission::Verdict {
+                match req.name() {
+                    "write" => crate::admission::Verdict::Deny("no".into()),
+                    _ => crate::admission::Verdict::Allow,
+                }
+            }
+        }
+        let mut reg = ToolRegistry::core(true);
+        reg.policies.push(std::sync::Arc::new(NoWrite));
+        let mut ctx = ToolContext::simple(dir.path());
+        ctx.call_id = "rc1".into();
+        ctx.journal = Some(journal.clone());
+        let code = "await tools.ls(path='.')\ntry:\n    await tools.write(path='x', content='y')\nexcept ToolCallError:\n    pass";
+        let r = reg
+            .execute("run_code", json!({"code": code, "description": "t"}), &ctx)
+            .await;
+        assert!(r.success, "{:?}", r.error);
+        let recs: Vec<Value> = std::fs::read_to_string(&journal)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        let phases: Vec<(&str, &str)> = recs
+            .iter()
+            .map(|r| (r["name"].as_str().unwrap(), r["phase"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            phases,
+            [("ls", "started"), ("ls", "completed"), ("write", "denied")]
+        );
+        assert!(
+            recs.iter()
+                .all(|r| r["parent"] == "rc1" && r["provider"] == "tool")
+        );
     }
 
     #[tokio::test]

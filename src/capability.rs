@@ -31,6 +31,21 @@ pub enum Provider {
     Subagent,
     /// The user: the answer arrives as their next message (ask_user).
     Human,
+    /// The harness itself, not a model call: `/goal` verify commands.
+    Runtime,
+}
+
+impl Provider {
+    /// The word shown in tool cards, the trace and the journal.
+    pub fn label(self) -> &'static str {
+        match self {
+            Provider::Tool => "tool",
+            Provider::Program => "program",
+            Provider::Subagent => "subagent",
+            Provider::Human => "human",
+            Provider::Runtime => "runtime",
+        }
+    }
 }
 
 /// One capability as admission and the journal see it.
@@ -67,6 +82,19 @@ mod tests {
         assert_eq!(cap("read").recovery, Recovery::Replay);
         assert_eq!(cap("run_code").provider, Provider::Program);
         assert_eq!(cap("bash").effect, Effect::Exec);
+    }
+
+    #[test]
+    fn labels_match_serde() {
+        for p in [
+            Provider::Tool,
+            Provider::Program,
+            Provider::Subagent,
+            Provider::Human,
+            Provider::Runtime,
+        ] {
+            assert_eq!(serde_json::to_value(p).unwrap(), p.label());
+        }
     }
 
     #[test]

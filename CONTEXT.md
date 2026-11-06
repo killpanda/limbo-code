@@ -46,7 +46,8 @@ proposals should name modules with these terms.
 - **Execution journal** — the `action` records in the session file
   (`journal.rs`): every tool call (and `/goal` verify run) appends
   `started` or `denied` before it runs and `completed` / `failed` when
-  its result is in. Resume reads them as an **action log**: a call with
+  its result is in. A `run_code` program's sub-calls get records of
+  their own, with `parent` = the `run_code` call id. Resume reads them as an **action log**: a call with
   no result message is "did not run" (nothing), "may have partially
   run" (started only) or "result lost" (finished).
 - **Steer** — a user message queued mid-turn, injected at consistency
@@ -88,7 +89,10 @@ proposals should name modules with these terms.
 - **Provider** — who carries a capability out: `tool` (local, in
   process), `program` (`run_code`; its sub-calls are capabilities of
   their own), `subagent` (the task board and its children) or `human`
-  (`ask_user`: the answer is the user's next message).
+  (`ask_user`: the answer is the user's next message), or `runtime` (the
+  harness itself: `/goal` verify commands). Shown on TUI tool cards
+  (`read · tool`), in headless output, the trace's `tool_call` events and
+  every `action` record.
 
 - **Effect** — what running a tool does (`effect.rs`): `read` (local
   reads), `fetch` (network reads), `session` (only this session's live

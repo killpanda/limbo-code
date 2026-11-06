@@ -67,6 +67,9 @@ pub struct ActionRecord {
     /// Who carried it out (absent for unknown tools and legacy records).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<Provider>,
+    /// The call this one ran inside (a `run_code` program's sub-calls).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent: Option<String>,
     /// A short note: the denial reason, a verify exit code.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
@@ -83,12 +86,21 @@ impl ActionRecord {
             phase,
             effect: None,
             provider: None,
+            parent: None,
             detail: None,
             at: crate::session::now_iso(),
         }
     }
     pub fn with_effect(mut self, effect: Option<Effect>) -> Self {
         self.effect = effect;
+        self
+    }
+    pub fn with_provider(mut self, provider: Provider) -> Self {
+        self.provider = Some(provider);
+        self
+    }
+    pub fn with_parent(mut self, parent: &str) -> Self {
+        self.parent = Some(parent.into());
         self
     }
     /// Effect and provider of a capability (`None` = an unknown tool).
@@ -111,6 +123,12 @@ impl ActionRecord {
         }
         Value::Object(out)
     }
+}
+
+/// Append records to a session file (a no-op until the file exists).
+pub fn append(path: &std::path::Path, records: &[ActionRecord]) {
+    let lines: Vec<Value> = records.iter().map(ActionRecord::to_line).collect();
+    let _ = crate::session::append_lines(path, &lines);
 }
 
 /// What the journal knows about the tool calls of one session.

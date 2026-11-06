@@ -56,6 +56,9 @@ pub struct ToolContext {
     pub events: Option<crate::agent::EventTx>,
     /// The registry running this call (`run_code` dispatches through it).
     pub registry: Option<ToolRegistry>,
+    /// The session file, for journaling nested calls (`run_code`'s
+    /// sub-calls); `None` outside a session.
+    pub journal: Option<PathBuf>,
 }
 
 impl ToolContext {
@@ -68,6 +71,7 @@ impl ToolContext {
             call_id: "call".into(),
             events: None,
             registry: None,
+            journal: None,
         }
     }
     pub fn progress(&self, line: impl Into<String>) {

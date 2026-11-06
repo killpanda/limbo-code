@@ -32,6 +32,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::admission::Verdict;
 use crate::attachments::build_user_content;
+use crate::capability::Provider;
 use crate::compaction::{
     self, build_summary_prompt, find_split_point, is_summary_message, make_summary_message,
     summary_body,
@@ -67,6 +68,8 @@ pub enum AgentEvent {
         id: String,
         name: String,
         arguments: Value,
+        /// Who carries the call out (`tool` for unknown names).
+        provider: Provider,
     },
     /// A line of live progress from a long-running tool (subagents).
     ToolProgress {
@@ -931,6 +934,7 @@ impl Agent {
             call_id: call_id.to_string(),
             events: Some(tx.clone()),
             registry: Some(self.registry.clone()),
+            journal: self.file_created.then(|| self.session_path.clone()),
         }
     }
 
@@ -1260,14 +1264,20 @@ impl Agent {
         }
         self.journal(&intents);
         for tc in calls {
+            let provider = self
+                .registry
+                .capability(tc.name())
+                .map(|c| c.provider)
+                .unwrap_or_default();
             let _ = tx.send(AgentEvent::ToolCall {
                 id: tc.id.clone(),
                 name: tc.name().into(),
                 arguments: tc.function.arguments.clone(),
+                provider,
             });
             self.trace.log(
                 "tool_call",
-                json!({"turn": self.turn_count, "iteration": self.iteration, "id": tc.id, "name": tc.name(), "arguments": tc.function.arguments}),
+                json!({"turn": self.turn_count, "iteration": self.iteration, "id": tc.id, "name": tc.name(), "arguments": tc.function.arguments, "provider": provider}),
             );
         }
         let started_at = utc_now_iso();

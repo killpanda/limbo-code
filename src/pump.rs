@@ -18,6 +18,7 @@ use serde_json::json;
 use tokio_util::sync::CancellationToken;
 
 use crate::agent::{Agent, AgentEvent, EventTx, FOLLOW_UP, STEER};
+use crate::capability::Provider;
 use crate::effect::Effect;
 use crate::goal::{
     self, GoalState, STATUS_ACTIVE, STATUS_CLEARED, STATUS_EXHAUSTED, STATUS_PASSED,
@@ -229,6 +230,7 @@ async fn run_once(
         let verify_action = |phase| {
             ActionRecord::new(ActionKind::Verify, &action_id, &state.verify_command, phase)
                 .with_effect(Some(Effect::Exec))
+                .with_provider(Provider::Runtime)
         };
         agent.journal_action(&verify_action(ActionPhase::Started));
         let result = run_verify(
