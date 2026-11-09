@@ -33,6 +33,9 @@ pub enum Provider {
     Human,
     /// The harness itself, not a model call: `/goal` verify commands.
     Runtime,
+    /// The chat the session is attached to (`limbo gateway`): `send_file`
+    /// delivers to the person on Telegram / WeChat.
+    Channel,
 }
 
 impl Provider {
@@ -44,6 +47,7 @@ impl Provider {
             Provider::Subagent => "subagent",
             Provider::Human => "human",
             Provider::Runtime => "runtime",
+            Provider::Channel => "channel",
         }
     }
 }
@@ -92,6 +96,7 @@ mod tests {
             Provider::Subagent,
             Provider::Human,
             Provider::Runtime,
+            Provider::Channel,
         ] {
             assert_eq!(serde_json::to_value(p).unwrap(), p.label());
         }

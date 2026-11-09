@@ -467,7 +467,10 @@ impl Supervisor {
             (r, changed)
         };
         for (id, status, title) in changed {
-            background::emit(BackgroundEvent::TaskChanged { id, status, title });
+            background::emit_for(
+                &self.main_id,
+                BackgroundEvent::TaskChanged { id, status, title },
+            );
         }
         r
     }
@@ -1136,10 +1139,13 @@ impl Supervisor {
                 headline.into()
             },
         };
-        background::emit(BackgroundEvent::Notice {
-            kind: kind.into(),
-            text: n.headline.clone(),
-        });
+        background::emit_for(
+            &self.main_id,
+            BackgroundEvent::Notice {
+                kind: kind.into(),
+                text: n.headline.clone(),
+            },
+        );
         if DELIVERED.contains(&kind) {
             self.pending.lock().unwrap().push(n);
         }
@@ -1345,7 +1351,7 @@ impl Supervisor {
             .unwrap()
             .retain(|n| !ids.contains(&n.id));
         if wake {
-            background::emit(BackgroundEvent::MainWake);
+            background::emit_for(&self.main_id, BackgroundEvent::MainWake);
         }
     }
 
@@ -1504,7 +1510,7 @@ impl Supervisor {
             .join("\n");
         let ids: Vec<String> = created.iter().map(|t| t.id.clone()).collect();
         if status == "proposed" {
-            background::emit(BackgroundEvent::PlanProposed(ids.clone()));
+            background::emit_for(&self.main_id, BackgroundEvent::PlanProposed(ids.clone()));
             return PlanResult {
                 message: format!(
                     "计划已提交给用户确认：\n{listing}\n用户确认前任务不会开始。现在结束本轮，简短告诉用户计划的要点即可。"
@@ -1890,20 +1896,26 @@ impl Supervisor {
             && t.created_by != "user"
             && let Some(n) = self.result_notice(&t)
         {
-            background::emit(BackgroundEvent::Notice {
-                kind: n.kind.clone(),
-                text: n.headline.clone(),
-            });
+            background::emit_for(
+                &self.main_id,
+                BackgroundEvent::Notice {
+                    kind: n.kind.clone(),
+                    text: n.headline.clone(),
+                },
+            );
             self.pending.lock().unwrap().push(n);
         } else if let Some(t) = self.board.lock().unwrap().get(id).cloned()
             && t.created_by == "user"
             && let Some(n) = self.result_notice(&t)
         {
             // User-started tasks (e.g. /learn) report to the user only.
-            background::emit(BackgroundEvent::Notice {
-                kind: n.kind,
-                text: n.headline,
-            });
+            background::emit_for(
+                &self.main_id,
+                BackgroundEvent::Notice {
+                    kind: n.kind,
+                    text: n.headline,
+                },
+            );
         }
         "已交付，任务结束。".into()
     }
@@ -1923,10 +1935,13 @@ impl Supervisor {
         });
         if let Some((t, q)) = q {
             let n = Self::question_notice(&t, &q);
-            background::emit(BackgroundEvent::Notice {
-                kind: "question".into(),
-                text: n.headline.clone(),
-            });
+            background::emit_for(
+                &self.main_id,
+                BackgroundEvent::Notice {
+                    kind: "question".into(),
+                    text: n.headline.clone(),
+                },
+            );
             self.pending.lock().unwrap().push(n);
         }
         "问题已提交，你会在得到回答后继续。现在结束本轮。".into()

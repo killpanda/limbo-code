@@ -277,6 +277,112 @@ impl Default for QueueSettings {
     }
 }
 
+/// `[gateway]`: `limbo gateway`, the chat front end (Telegram / WeChat).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct GatewaySettings {
+    /// Workdir of chat sessions.
+    pub workdir: String,
+    /// Capability set of new chat sessions: "daily" or "coding".
+    pub posture: String,
+    /// Model for chat sessions (empty = `[llm] model`).
+    pub model: String,
+    /// Unload an idle chat's agent after this many seconds (0 = never).
+    pub idle_unload_secs: u64,
+    /// Largest attachment downloaded from a chat, in MB.
+    pub max_attachment_mb: u64,
+    /// Show tool progress lines in chats that can edit messages.
+    pub show_tools: bool,
+}
+
+impl Default for GatewaySettings {
+    fn default() -> Self {
+        Self {
+            workdir: "~/limbo-chat".into(),
+            posture: "daily".into(),
+            model: String::new(),
+            idle_unload_secs: 1800,
+            max_attachment_mb: 20,
+            show_tools: true,
+        }
+    }
+}
+
+/// Ids in config files may be written as numbers (`owners = [12345]`) or
+/// strings; both become strings.
+fn de_ids<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    let raw: Vec<toml::Value> = Deserialize::deserialize(d)?;
+    Ok(raw
+        .into_iter()
+        .filter_map(|v| match v {
+            toml::Value::Integer(i) => Some(i.to_string()),
+            toml::Value::String(s) => Some(s),
+            _ => None,
+        })
+        .collect())
+}
+
+/// `[channels.telegram]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct TelegramSettings {
+    pub enabled: bool,
+    /// Telegram user ids allowed to talk to the bot (besides the one
+    /// recorded by `limbo channels login telegram`).
+    #[serde(deserialize_with = "de_ids")]
+    pub owners: Vec<String>,
+    /// HTTP(S)/SOCKS proxy for api.telegram.org.
+    pub proxy: String,
+    pub api_base: String,
+    /// Groups: "off" (ignore) or "mention" (answer @mentions and replies).
+    pub groups: String,
+}
+
+impl Default for TelegramSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            owners: Vec::new(),
+            proxy: String::new(),
+            api_base: crate::channels::telegram::DEFAULT_API_BASE.into(),
+            groups: "mention".into(),
+        }
+    }
+}
+
+/// `[channels.weixin]`.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(default)]
+pub struct WeixinSettings {
+    pub enabled: bool,
+    /// iLink user ids allowed besides whoever scanned the login QR code.
+    #[serde(deserialize_with = "de_ids")]
+    pub owners: Vec<String>,
+    /// `iLink-App-Id` header.
+    pub app_id: String,
+    /// `iLink-App-ClientVersion` (the protocol version the server expects).
+    pub client_version: String,
+}
+
+impl Default for WeixinSettings {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            owners: Vec::new(),
+            app_id: "bot".into(),
+            client_version: "2.4.10".into(),
+        }
+    }
+}
+
+/// `[channels]`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ChannelsSettings {
+    pub telegram: TelegramSettings,
+    pub weixin: WeixinSettings,
+}
+
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -289,6 +395,8 @@ pub struct Config {
     pub queue: QueueSettings,
     pub subagents: SubagentSettings,
     pub daily: DailySettings,
+    pub gateway: GatewaySettings,
+    pub channels: ChannelsSettings,
     pub providers: HashMap<String, ProviderOverride>,
 }
 

@@ -111,6 +111,17 @@ non-coding work, in its own working directory:
 
 See [docs/daily-mode.md](docs/daily-mode.md).
 
+### From Telegram and WeChat
+
+```bash
+limbo channels login telegram --token <BotFather token>   # then message the bot once
+limbo channels login weixin                               # scan the QR code with WeChat
+limbo gateway install                                     # launchd on macOS, systemd on Linux
+```
+
+Each chat gets its own daily-mode session; only the owners recorded at
+login can talk to it. See [docs/gateway.md](docs/gateway.md).
+
 ### Scriptable
 
 `limbo --headless` gives the same agent as a line-oriented REPL, and
@@ -305,6 +316,8 @@ Limbo borrows openly from other agents. Thank you to:
   self-learning skills
 - [`docs/subagents.md`](docs/subagents.md): background subagents, the task
   board and how to steer them
+- [`docs/gateway.md`](docs/gateway.md): talk to limbo from Telegram and
+  WeChat; run it as a macOS launchd or Linux systemd service
 - [`docs/learning-rust.md`](docs/learning-rust.md): code map and reading
   order for learning Rust from this codebase
 - [`design/`](design/): RFCs for headless mode, bang commands, and the UI

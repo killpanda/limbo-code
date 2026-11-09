@@ -3,6 +3,17 @@
 version = 4
 
 [[package]]
+name = "aes"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b169f7a6d4742236a0a00c541b845991d0ac43e546831af1249753ab4c3aa3a0"
+dependencies = [
+ "cfg-if",
+ "cipher",
+ "cpufeatures 0.2.17",
+]
+
+[[package]]
 name = "aho-corasick"
 version = "1.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -285,6 +296,16 @@ dependencies = [
  "iana-time-zone",
  "num-traits",
  "windows-link",
+]
+
+[[package]]
+name = "cipher"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "773f3b9af64447d2ce9850330c473515014aa235e6a783b02db81ff39e4a3dad"
+dependencies = [
+ "crypto-common",
+ "inout",
 ]
 
 [[package]]
@@ -1148,6 +1169,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "inout"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "879f10e63c20629ecabbb64a8010319738c66a5cd0c29b02d63d272b03751d01"
+dependencies = [
+ "generic-array",
+]
+
+[[package]]
 name = "instability"
 version = "0.3.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1246,6 +1276,7 @@ dependencies = [
 name = "limbo"
 version = "0.4.2"
 dependencies = [
+ "aes",
  "anyhow",
  "async-trait",
  "base64 0.22.1",
@@ -1259,7 +1290,9 @@ dependencies = [
  "ignore",
  "include_dir",
  "libc",
+ "md-5",
  "pulldown-cmark",
+ "qrcode",
  "rand 0.9.5",
  "ratatui",
  "regex",
@@ -1344,6 +1377,16 @@ checksum = "f3d0581a75c45969c63afd2bb87b1d8b25cfcc556c7a918cf9bb13b0fe8d2381"
 dependencies = [
  "nix 0.31.3",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "md-5"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+dependencies = [
+ "cfg-if",
+ "digest",
 ]
 
 [[package]]
@@ -1729,6 +1772,12 @@ dependencies = [
  "memchr",
  "unicase",
 ]
+
+[[package]]
+name = "qrcode"
+version = "0.14.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d68782463e408eb1e668cf6152704bd856c78c5b6417adaee3203d8f4c1fc9ec"
 
 [[package]]
 name = "quinn"
