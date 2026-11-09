@@ -727,10 +727,7 @@ fn draw_popup(f: &mut Frame, app: &mut App, area: Rect) {
                 ]),
                 search,
             );
-            let visible: Vec<&(String, String)> = items
-                .iter()
-                .filter(|(id, _)| id.contains(filter.as_str()))
-                .collect();
+            let visible = crate::tui::app::visible_models(items, filter);
             let sel = (*selected).min(visible.len().saturating_sub(1));
             let h = list.height as usize;
             let skip = sel.saturating_sub(h.saturating_sub(1));

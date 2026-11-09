@@ -1539,8 +1539,10 @@ impl App {
                 filter,
             } => match key.code {
                 KeyCode::Esc => self.popup = None,
-                KeyCode::Up => *selected = selected.saturating_sub(1),
-                KeyCode::Down => *selected += 1,
+                KeyCode::Up | KeyCode::Down => {
+                    let len = visible_models(items, filter).len();
+                    *selected = step_selection(*selected, len, key.code);
+                }
                 KeyCode::Backspace => {
                     filter.pop();
                     *selected = 0;
@@ -1550,10 +1552,7 @@ impl App {
                     *selected = 0;
                 }
                 KeyCode::Enter => {
-                    let visible: Vec<&(String, String)> = items
-                        .iter()
-                        .filter(|(id, _)| id.contains(filter.as_str()))
-                        .collect();
+                    let visible = visible_models(items, filter);
                     let choice = visible
                         .get((*selected).min(visible.len().saturating_sub(1)))
                         .map(|(id, _)| id.clone());
@@ -2227,6 +2226,53 @@ impl Mods {
             shift: m.contains(KeyModifiers::SHIFT),
             cmd,
         }
+    }
+}
+
+/// The model picker's rows that match the typed filter.
+pub(crate) fn visible_models<'a>(
+    items: &'a [(String, String)],
+    filter: &str,
+) -> Vec<&'a (String, String)> {
+    items.iter().filter(|(id, _)| id.contains(filter)).collect()
+}
+
+/// Moves a list selection one row for Up/Down, staying inside `0..len`.
+/// An unbounded Down let a held key run the index far past the last row, so
+/// the following Ups were spent walking it back before the highlight moved.
+fn step_selection(selected: usize, len: usize, code: KeyCode) -> usize {
+    let last = len.saturating_sub(1);
+    let selected = selected.min(last);
+    match code {
+        KeyCode::Up => selected.saturating_sub(1),
+        KeyCode::Down => (selected + 1).min(last),
+        _ => selected,
+    }
+}
+
+#[cfg(test)]
+mod picker_tests {
+    use super::*;
+
+    /// Holding Down past the last model and then holding Up must move the
+    /// highlight up on the very first Up.
+    #[test]
+    fn up_moves_right_after_holding_down_past_the_end() {
+        let len = 5;
+        let mut sel = 0;
+        // Key repeat while holding Down: far more presses than rows.
+        for _ in 0..40 {
+            sel = step_selection(sel, len, KeyCode::Down);
+        }
+        assert_eq!(sel, len - 1, "Down must stop on the last row");
+        sel = step_selection(sel, len, KeyCode::Up);
+        assert_eq!(sel, len - 2, "first Up must leave the last row");
+    }
+
+    #[test]
+    fn empty_list_stays_at_zero() {
+        assert_eq!(step_selection(0, 0, KeyCode::Down), 0);
+        assert_eq!(step_selection(0, 0, KeyCode::Up), 0);
     }
 }
 
