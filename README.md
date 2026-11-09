@@ -149,7 +149,8 @@ Then just describe the task: *"find why the login test is flaky and fix it"*.
 | `Enter` / `Shift+Enter` (or `Ctrl+J`) | send / new line |
 | `Enter` while the agent works | steer: the message is delivered mid-turn |
 | `Alt+Enter` | queue a follow-up for after the current task |
-| `Esc`, `Ctrl+C` | interrupt; `Ctrl+C` twice when idle quits |
+| `Esc`, `Ctrl+C` | interrupt; `Ctrl+C` twice when idle quits (with text selected, `Ctrl+C` copies instead) |
+| `Super+C` / `Ctrl+Shift+C` | copy the mouse selection (`Super+V` / `Ctrl+Shift+V` paste) |
 | `Shift+Tab` | cycle thinking level |
 | `/` | command palette |
 | `Ctrl+R` | sessions |

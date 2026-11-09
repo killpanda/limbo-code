@@ -289,6 +289,9 @@ pub struct App {
     selecting: bool,
     /// The next frame reads the selection's text back for copying.
     pub copy_selection: bool,
+    /// Drop the selection once it is copied (a key copy, not a mouse one,
+    /// so the next Ctrl+C interrupts again).
+    pub clear_after_copy: bool,
     pub toast: Option<(String, Instant)>,
     pub skills: Vec<Skill>,
     /// Workdir and daily flag the skills were discovered for (the agent is
@@ -390,6 +393,7 @@ impl App {
             selection: None,
             selecting: false,
             copy_selection: false,
+            clear_after_copy: false,
             toast: None,
             skills,
             skills_scope,
@@ -1166,12 +1170,41 @@ impl App {
             return;
         }
         self.dirty = true;
+        let mods = Mods::of(key.modifiers);
+        let (ctrl, alt, shift) = (mods.ctrl, mods.alt, mods.shift);
+
+        // Copy / paste chords: Super+C (or Cmd+C) and Ctrl+Shift+C copy,
+        // Super+V and Ctrl+Shift+V paste. Some terminals turn Super+C into a
+        // plain Ctrl+C, so a Ctrl+C while text is selected copies it too
+        // instead of interrupting or quitting.
+        if let KeyCode::Char(ch) = key.code {
+            let ch = ch.to_ascii_lowercase();
+            let has_selection = self.selection.as_ref().is_some_and(|s| !s.is_empty());
+            if ch == 'c' && (mods.cmd || (ctrl && shift) || (ctrl && has_selection)) {
+                if has_selection {
+                    self.copy_selection = true;
+                    self.clear_after_copy = true;
+                } else if mods.cmd || shift {
+                    self.toast("没有选中的文字（鼠标拖动选中，/copy 复制最后一条回复）");
+                }
+                if mods.cmd || shift || has_selection {
+                    return;
+                }
+            }
+            if ch == 'v' && (mods.cmd || (ctrl && shift)) && self.popup.is_none() {
+                self.selection = None;
+                self.paste_clipboard();
+                return;
+            }
+        }
         if !self.selecting {
             self.selection = None;
         }
-        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let alt = key.modifiers.contains(KeyModifiers::ALT);
-        let shift = key.modifiers.contains(KeyModifiers::SHIFT);
+        if mods.cmd {
+            // Other Super/Cmd chords belong to the desktop or the terminal,
+            // never to Limbo's Ctrl shortcuts or the prompt.
+            return;
+        }
 
         if self.popup.is_some() {
             self.popup_key(key);
@@ -2172,5 +2205,50 @@ pub fn fmt_tokens(n: u64) -> String {
         format!("{:.1}k", n as f64 / 1e3)
     } else {
         n.to_string()
+    }
+}
+
+/// Modifier state of a key event, with Super/Meta/Hyper ("cmd") kept apart
+/// from Ctrl so Super+C never reads as Ctrl+C.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Mods {
+    ctrl: bool,
+    alt: bool,
+    shift: bool,
+    cmd: bool,
+}
+
+impl Mods {
+    fn of(m: KeyModifiers) -> Self {
+        let cmd = m.intersects(KeyModifiers::SUPER | KeyModifiers::META | KeyModifiers::HYPER);
+        Mods {
+            ctrl: m.contains(KeyModifiers::CONTROL) && !cmd,
+            alt: m.contains(KeyModifiers::ALT),
+            shift: m.contains(KeyModifiers::SHIFT),
+            cmd,
+        }
+    }
+}
+
+#[cfg(test)]
+mod mods_tests {
+    use super::*;
+
+    #[test]
+    fn super_is_not_ctrl() {
+        let m = Mods::of(KeyModifiers::SUPER);
+        assert!(m.cmd && !m.ctrl);
+        let m = Mods::of(KeyModifiers::SUPER | KeyModifiers::CONTROL);
+        assert!(m.cmd && !m.ctrl);
+        let m = Mods::of(KeyModifiers::META);
+        assert!(m.cmd && !m.ctrl);
+    }
+
+    #[test]
+    fn plain_ctrl_stays_ctrl() {
+        let m = Mods::of(KeyModifiers::CONTROL);
+        assert!(m.ctrl && !m.cmd && !m.alt && !m.shift);
+        let m = Mods::of(KeyModifiers::CONTROL | KeyModifiers::SHIFT);
+        assert!(m.ctrl && m.shift && !m.cmd);
     }
 }

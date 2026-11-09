@@ -30,7 +30,8 @@ cargo test                          # 跑测试
 | Ctrl+V / Ctrl+Y | 从剪贴板粘贴（图片、文件路径或文本）/ 复制最后一条回复 |
 | 鼠标拖动 | 选中文字，松开即复制到剪贴板（终端原生选择：按住 Shift 拖动，或 `/mouse` 关闭鼠标捕获） |
 | Ctrl+G | 子代理面板（任务板 + 选中任务的记录） |
-| Esc、Ctrl+C | 打断当前回合；空闲时连按两次 Ctrl+C 退出 |
+| Esc、Ctrl+C | 打断当前回合；空闲时连按两次 Ctrl+C 退出（有选中文字时 Ctrl+C 改为复制） |
+| Super+C / Ctrl+Shift+C | 复制鼠标选中的文字（Super+V / Ctrl+Shift+V 粘贴）；Super 组合键不会再被当成 Ctrl |
 | agent 忙时按 Enter | 把消息排进队列，作为“插话”发给 agent |
 | ↑ / ↓ | 翻输入历史 |
 | PageUp / PageDown、Ctrl+↑/↓ | 滚动对话 |
