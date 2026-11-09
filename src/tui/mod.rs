@@ -138,6 +138,10 @@ async fn event_loop(
             app.dirty = false;
             if let Some(text) = copied {
                 app.copy_selected(text);
+                if std::mem::take(&mut app.clear_after_copy) {
+                    app.selection = None;
+                    app.dirty = true;
+                }
             }
         }
         if app.quit {
