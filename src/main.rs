@@ -17,11 +17,14 @@ mod attachments;
 mod auth;
 mod background;
 mod capability;
+mod channels;
 mod cli_auth;
 mod commands;
 mod compaction;
 mod config;
+mod conversation;
 mod effect;
+mod gateway;
 mod goal;
 mod headless;
 mod history;
@@ -98,12 +101,47 @@ enum Command {
         #[command(subcommand)]
         action: AuthAction,
     },
+    /// Chat gateway: talk to limbo from Telegram / personal WeChat
+    Gateway {
+        #[command(subcommand)]
+        action: Option<GatewayAction>,
+    },
+    /// Log the gateway's chat channels in and out (telegram | weixin)
+    Channels {
+        #[command(subcommand)]
+        action: ChannelsAction,
+    },
     /// List sessions for the working directory
     Sessions {
         /// Show sessions of every directory
         #[arg(long)]
         all: bool,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum GatewayAction {
+    /// Run in the foreground (the default)
+    Run,
+    /// Install a background service (launchd on macOS, systemd --user on Linux)
+    Install,
+    /// Stop and remove the background service
+    Uninstall,
+}
+
+#[derive(Subcommand, Debug)]
+enum ChannelsAction {
+    /// Connect a channel: telegram (bot token) or weixin (QR code)
+    Login {
+        channel: String,
+        /// Telegram bot token (default: prompt)
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// Forget a channel's credentials
+    Logout { channel: String },
+    /// Show logged-in channels, owners and the service state
+    Status,
 }
 
 #[derive(Subcommand, Debug)]
@@ -187,6 +225,33 @@ fn real_main() -> anyhow::Result<i32> {
                 AuthAction::Logout { provider } => cli_auth::logout(provider),
             });
         }
+        Some(Command::Channels { action }) => {
+            return match action {
+                ChannelsAction::Login { channel, token } => {
+                    rt.block_on(gateway::login(&config, channel, token.clone()))
+                }
+                ChannelsAction::Logout { channel } => gateway::logout(channel),
+                ChannelsAction::Status => Ok(gateway::status(&config)),
+            };
+        }
+        Some(Command::Gateway { action }) => {
+            return match action {
+                None | Some(GatewayAction::Run) => rt.block_on(gateway::run(config, &session_dir)),
+                Some(GatewayAction::Install) => {
+                    let mut keep = Vec::new();
+                    if let Some(c) = &cli.config {
+                        keep.push("--config".to_string());
+                        keep.push(std::fs::canonicalize(c)?.display().to_string());
+                    }
+                    if let Some(d) = &cli.session_dir {
+                        keep.push("--session-dir".to_string());
+                        keep.push(std::fs::canonicalize(d)?.display().to_string());
+                    }
+                    gateway::service::install(&keep)
+                }
+                Some(GatewayAction::Uninstall) => gateway::service::uninstall(),
+            };
+        }
         _ => {}
     }
     let workdir = match &cli.workdir {
@@ -207,7 +272,10 @@ fn real_main() -> anyhow::Result<i32> {
     };
 
     match cli.command {
-        Some(Command::Models { .. }) | Some(Command::Auth { .. }) => unreachable!(),
+        Some(Command::Models { .. })
+        | Some(Command::Auth { .. })
+        | Some(Command::Channels { .. })
+        | Some(Command::Gateway { .. }) => unreachable!(),
         Some(Command::Sessions { all }) => {
             for m in session::list_sessions(&session_dir, (!all).then_some(workdir.as_path())) {
                 println!(

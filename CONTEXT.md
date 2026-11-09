@@ -130,6 +130,25 @@ proposals should name modules with these terms.
   one `<subagent_updates>` steer item; questions and alerts wake an idle
   main agent, results wait until the wave is done.
 
+## Gateway
+
+- **Gateway** — the long-running process (`limbo gateway`) that connects
+  chat apps to agents (`gateway/`). One per machine (`gateway.lock`).
+- **Channel** — one chat platform account (Telegram bot, WeChat iLink
+  bot) behind the `Channel` trait: receive, send, fetch media, and
+  `ChannelCaps` (text limit, edit support, Markdown dialect, send rate).
+- **Peer** — one chat on one channel (`PeerKey`: channel, account, chat,
+  thread). Every peer has its own current session and session history.
+- **Owner** — a platform user id allowed to talk to the gateway. There
+  are no guests: everyone else is ignored.
+- **Worker** — the task that owns one peer's Conversation, renderer and
+  outbox.
+- **Outbox** — a worker's ordered sender: coalesces edits, respects rate
+  limits, retries, and parks messages while a WeChat context token is
+  expired.
+- **Provider `channel`** — a capability that reaches the user's chat
+  (`send_file`).
+
 ## Safety
 
 Limbo has no safety fences: file tools are not scoped to the workdir,

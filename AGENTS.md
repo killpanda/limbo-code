@@ -19,7 +19,7 @@ Runtime dependencies: `rg` (ripgrep) for `grep`; `python3` only for Code Mode (`
 
 ```
 src/
-├── main.rs           # CLI (clap): args, subcommands (models/auth/sessions/daily), launch
+├── main.rs           # CLI (clap): args, subcommands (models/auth/sessions/daily/gateway/channels), launch
 ├── models.rs         # Message, ToolCall, ToolResult, LlmEvent (serde, the shared vocabulary)
 ├── config.rs         # ~/.limbo/config.toml: every section has defaults; toml_edit rewrites keep comments
 ├── auth.rs           # ~/.limbo/auth.json (0600)
@@ -50,6 +50,13 @@ src/
 ├── recent_models.rs  # Recently used models for the picker
 ├── integrations.rs   # Herdr + OSC 7501 lifecycle reporting
 ├── headless.rs       # --headless / --json / -p frontends on the same pump
+├── conversation.rs   # Frontend-neutral Conversation<S: Sink>: job/cancel/steer/slash commands, shared by headless and gateway
+├── channels/         # mod.rs (Channel trait, PeerKey, Inbound/OutboundMessage, ChannelCaps), markdown.rs (render/split),
+│                     #   store.rs (~/.limbo/channels: credentials 0600, cursors, gateway lock), telegram.rs (hand-written Bot API),
+│                     #   weixin/ (api.rs iLink protocol, cdn.rs AES-128-ECB media, login.rs QR login)
+├── gateway/          # mod.rs (router: dedup, access, one worker per chat; `limbo gateway`/`limbo channels`), access.rs (owners),
+│                     #   sessions.rs (chat → session map), worker.rs (per-chat Conversation), render.rs (AgentEvent → chat messages),
+│                     #   outbox.rs (rate limits, edit coalescing, retries), send_file.rs (tool), service.rs (launchd / systemd)
 ├── subagents/        # mod.rs (task board), supervisor.rs (scheduler, runners, notices),
 │                     # tools.rs (plan_tasks/task_*/answer; child: checkpoint/need/ask_main/finish/propose_task),
 │                     # profiles.rs (agent profiles + <project_facts> scan), policies.rs (read-only/no-edit/
@@ -109,6 +116,8 @@ Single column: status bar (state/elapsed/tokens/model/workdir/queue + goal and C
 Subagents (docs/subagents.md): the main agent's `plan_tasks` creates tasks on the board (suggest mode asks the user first); the supervisor runs each as a child agent with its own session file, gated by profile policies. Child tools that end the turn (`need`, `ask_main`, `finish`) return `end_turn`. Notices reach the main agent as one subagent steer item; an idle main agent is woken through the background channel. Board records live in the main session file (`type: "task"`), so the board survives restarts; tasks running at exit come back paused.
 
 Daily mode (`limbo daily` / `--daily` / `/daily-mode on|off`, docs/daily-mode.md): a session posture like Code Mode — same loop, a general-assistant system prompt, plus the daily tools; persisted as `SessionMeta.daily_mode`. Memory is a snapshot taken when the agent is built: `USER.md` and `NOTES.md` enter daily prompts only; `memory` writes reach disk at once but the prompt changes only next session (prefix cache stays intact). `/learn` (and the automatic trigger in `learn.rs`) runs a `skill-reviewer` fork subagent whose only write tool is `skill_manage`.
+
+Gateway (`limbo gateway`, docs/gateway.md): one process serves Telegram and personal WeChat (iLink) chats. Each `Channel` adapter long-polls and hands `InboundMessage`s to the router, which drops duplicates, strangers (owners only, per channel) and unaddressed group messages, then sends each chat to its own worker (one `Conversation<ChatSink>` per `PeerKey`, loaded lazily, unloaded after `idle_unload_secs`). A message while busy steers the running turn. `Renderer` turns `AgentEvent`s into `OutItem`s (streamed previews where the channel can edit, tool-progress slot, `ask_user` as numbered choices); the per-chat outbox applies `ChannelCaps` (rate limits, chunking, retries, parking on expired WeChat context). Background events reach the right worker through `background::route(session, tx)`. Chats default to daily posture; `send_file` (provider `channel`) is registered only there. `limbo gateway install` writes a launchd agent (macOS) or systemd user unit (Linux).
 
 ## Key Decisions
 

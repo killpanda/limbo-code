@@ -47,6 +47,10 @@ regex = "1"
 include_dir = "0.7"
 sha1_smol = "1"
 url = "2"
+# chat gateway (WeChat iLink media: AES-128-ECB + MD5; terminal QR code for login)
+aes = "0.8"
+md-5 = "0.10"
+qrcode = { version = "0.14", default-features = false }
 
 [dev-dependencies]
 tempfile = "3"
